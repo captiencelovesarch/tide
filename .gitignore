@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.swp
+.DS_Store
+
+# AUR build artifacts (makepkg pkg/ and extracted source dirs, not src/tide/)
+/pkg/
+/tide-*/
+*.pkg.tar.zst
+*.pkg.tar.xz
+tide-1.0.0.tar.gz

@@ -1,0 +1,117 @@
+/* tide :: paper */
+
+* {
+    font-family: "@font_family", "IBM Plex Sans", sans-serif;
+    font-size: @font_size;
+    color: @fg;
+}
+
+QMainWindow, QDialog, QWidget {
+    background: @bg;
+    color: @fg;
+}
+
+QLabel { background: transparent; color: @fg; }
+QLabel#dim, QLabel.dim { color: @dim; }
+QLabel#accent, QLabel.accent { color: @accent; }
+
+QLineEdit {
+    background: @bg_alt;
+    color: @fg;
+    border: @border solid @border_dim;
+    border-radius: @radius;
+    padding: 7px 12px;
+    selection-background-color: @accent;
+    selection-color: @bg;
+}
+QLineEdit:focus { border-color: @accent; }
+
+QPushButton {
+    background: @bg_alt;
+    color: @fg;
+    border: @border solid @border_dim;
+    border-radius: @radius;
+    padding: 6px 14px;
+}
+QPushButton:hover { background: @sel_bg; color: @sel_fg; }
+QPushButton:disabled { color: @dim; }
+
+QComboBox {
+    background: @bg_alt;
+    color: @fg;
+    border: @border solid @border_dim;
+    border-radius: @radius;
+    padding: 6px 10px;
+}
+QComboBox QAbstractItemView {
+    background: @bg;
+    color: @fg;
+    selection-background-color: @sel_bg;
+    selection-color: @sel_fg;
+    border: @border solid @border_dim;
+    outline: 0;
+}
+
+QListView, QListWidget {
+    background: @bg;
+    color: @fg;
+    border: none;
+    outline: 0;
+    padding: 4px 0;
+}
+QListView::item, QListWidget::item {
+    padding: 6px 12px;
+}
+QListView::item:hover, QListWidget::item:hover {
+    background: @bg_alt;
+}
+QListView::item:selected, QListWidget::item:selected {
+    background: @sel_bg;
+    color: @sel_fg;
+}
+
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: @bg;
+    width: 10px;
+    height: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: @border_dim;
+    border-radius: 4px;
+    min-height: 30px;
+    min-width: 30px;
+}
+QScrollBar::handle:hover { background: @dim; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+
+QStatusBar { background: @bg; color: @dim; border: 0; }
+QStatusBar::item { border: 0; }
+
+QToolTip {
+    background: @fg;
+    color: @bg;
+    border: none;
+    padding: 4px 8px;
+    border-radius: @radius;
+}
+
+QMenu {
+    background: @bg;
+    color: @fg;
+    border: @border solid @border_dim;
+    border-radius: @radius;
+    padding: 4px 0;
+}
+QMenu::item { padding: 6px 18px; background: transparent; }
+QMenu::item:selected { background: @sel_bg; color: @sel_fg; }
+QMenu::separator { height: 1px; background: @border_dim; margin: 4px 0; }
+
+QFrame#now_playing {
+    background: @bg_alt;
+    border-top: @border solid @border_dim;
+}
+QFrame#nav {
+    background: @bg_alt;
+    border-right: @border solid @border_dim;
+}

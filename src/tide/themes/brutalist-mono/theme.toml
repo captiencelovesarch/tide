@@ -1,0 +1,34 @@
+[meta]
+name = "brutalist mono"
+slug = "brutalist-mono"
+author = "tide"
+version = 1
+dark = true
+
+[tokens]
+bg          = "#0b0b0b"
+bg_alt      = "#141414"
+fg          = "#e6e6e6"
+dim         = "#6f6f6f"
+accent      = "#d4b95e"
+sel_bg      = "#e6e6e6"
+sel_fg      = "#0b0b0b"
+hover_bg    = "#1a1a1a"
+hover_fg    = "#e6e6e6"
+border_col  = "#e6e6e6"
+border_dim  = "#2a2a2a"
+
+[typography]
+family  = "IBM Plex Mono"
+size_pt = 10
+weight  = 400
+case    = "lower"
+mono    = true
+
+[layout]
+radius_px       = 0
+border_px       = 1
+spacing_px      = 8
+ambient_art     = false
+control_style   = "bracket"
+list_marker     = "> "

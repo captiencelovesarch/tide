@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=tide
+GenericName=Music Player
+Comment=a brutalist youtube music client
+Exec=tide
+Icon=tide
+Terminal=false
+Categories=AudioVideo;Audio;Player;Music;
+Keywords=music;youtube;ytmusic;player;
+MimeType=
+StartupWMClass=tide
+StartupNotify=true

@@ -1,0 +1,51 @@
+# Maintainer: tide maintainer <you@example.com>
+pkgname=tide-git
+_pkgname=tide
+pkgver=1.0.0.r0.gHEAD
+pkgrel=1
+pkgdesc="A brutalist YouTube Music desktop client (VCS version)"
+arch=('any')
+url="https://github.com/YOURUSER/tide"
+license=('GPL-3.0-or-later')
+provides=('tide')
+conflicts=('tide')
+depends=(
+  'python>=3.12'
+  'pyside6'
+  'python-mpv'
+  'mpv'
+  'yt-dlp'
+  'python-ytmusicapi'
+  'python-cryptography'
+  'ttf-ibm-plex'
+)
+optdepends=(
+  'python-pypresence: Discord rich presence integration'
+  'python-secretstorage: GNOME/libsecret backend for cookie import'
+  'kwallet: KDE wallet backend for cookie import'
+)
+makedepends=(
+  'git'
+  'python-build'
+  'python-installer'
+  'python-hatchling'
+)
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  git describe --long --tags 2>/dev/null | sed 's/^v//;s/-/.r/;s/-/./' \
+    || printf '1.0.0.r%s.g%s' \
+       "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$_pkgname"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$_pkgname"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+}

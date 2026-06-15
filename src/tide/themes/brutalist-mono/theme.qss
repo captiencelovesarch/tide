@@ -1,0 +1,146 @@
+/* tide :: brutalist-mono */
+
+* {
+    font-family: "@font_family";
+    font-size: @font_size;
+    color: @fg;
+}
+
+QMainWindow, QDialog, QWidget {
+    background: @bg;
+    color: @fg;
+}
+
+QLabel { background: transparent; color: @fg; }
+QLabel#dim, QLabel.dim { color: @dim; }
+QLabel#accent, QLabel.accent { color: @accent; }
+
+/* search box */
+QLineEdit {
+    background: @bg;
+    color: @fg;
+    border: @border solid @border_col;
+    border-radius: @radius;
+    padding: 6px 10px;
+    selection-background-color: @sel_bg;
+    selection-color: @sel_fg;
+}
+QLineEdit:focus { border-color: @accent; }
+
+/* default Qt buttons used as a fallback — most controls are BracketButton */
+QPushButton {
+    background: @bg;
+    color: @fg;
+    border: @border solid @border_col;
+    border-radius: @radius;
+    padding: 4px 12px;
+}
+QPushButton:hover { background: @sel_bg; color: @sel_fg; }
+QPushButton:disabled { color: @dim; border-color: @border_dim; }
+
+QComboBox {
+    background: @bg;
+    color: @fg;
+    border: @border solid @border_col;
+    border-radius: @radius;
+    padding: 4px 8px;
+}
+QComboBox QAbstractItemView {
+    background: @bg;
+    color: @fg;
+    selection-background-color: @sel_bg;
+    selection-color: @sel_fg;
+    border: @border solid @border_col;
+    outline: 0;
+}
+
+/* results list */
+QListView, QListWidget {
+    background: @bg;
+    color: @fg;
+    border: @border solid @border_col;
+    border-radius: @radius;
+    outline: 0;
+    padding: 4px 0;
+}
+QListView::item, QListWidget::item {
+    padding: 4px 10px;
+    border: none;
+}
+QListView::item:hover, QListWidget::item:hover {
+    background: @hover_bg;
+}
+QListView::item:selected, QListWidget::item:selected {
+    background: @sel_bg;
+    color: @sel_fg;
+}
+
+/* scrollbars: thin & monochrome */
+QScrollBar:vertical {
+    background: @bg;
+    width: 8px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: @border_dim;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover { background: @dim; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar:horizontal {
+    background: @bg;
+    height: 8px;
+    margin: 0;
+}
+QScrollBar::handle:horizontal {
+    background: @border_dim;
+    min-width: 24px;
+}
+QScrollBar::handle:horizontal:hover { background: @dim; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+/* status text */
+QStatusBar { background: @bg; color: @dim; border: 0; }
+QStatusBar::item { border: 0; }
+
+/* tooltips */
+QToolTip {
+    background: @bg;
+    color: @fg;
+    border: @border solid @border_col;
+    padding: 4px 6px;
+}
+
+/* right-click menus */
+QMenu {
+    background: @bg;
+    color: @fg;
+    border: @border solid @border_col;
+    border-radius: @radius;
+    padding: 4px 0;
+}
+QMenu::item {
+    padding: 5px 16px;
+    background: transparent;
+}
+QMenu::item:selected {
+    background: @sel_bg;
+    color: @sel_fg;
+}
+QMenu::separator {
+    height: 1px;
+    background: @border_dim;
+    margin: 4px 0;
+}
+
+/* the now-playing strip uses object name #now_playing for the top border */
+QFrame#now_playing {
+    background: @bg;
+    border-top: @border solid @border_col;
+}
+
+/* nav rail */
+QFrame#nav {
+    background: @bg;
+    border-right: @border solid @border_col;
+}

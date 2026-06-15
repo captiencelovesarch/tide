@@ -1,0 +1,34 @@
+[meta]
+name = "ambient"
+slug = "ambient"
+author = "tide"
+version = 1
+dark = true
+
+[tokens]
+bg          = "#15151a"
+bg_alt      = "#202028"
+fg          = "#f0eef0"
+dim         = "#9794a0"
+accent      = "#c79bff"
+sel_bg      = "#3a3a48"
+sel_fg      = "#f0eef0"
+hover_bg    = "#26262e"
+hover_fg    = "#f0eef0"
+border_col  = "#383844"
+border_dim  = "#2a2a34"
+
+[typography]
+family  = "IBM Plex Sans"
+size_pt = 11
+weight  = 400
+case    = "normal"
+mono    = false
+
+[layout]
+radius_px       = 12
+border_px       = 1
+spacing_px      = 10
+ambient_art     = false
+control_style   = "icon"
+list_marker     = "  "

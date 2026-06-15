@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tide"
+version = "1.0.0"
+description = "a brutalist youtube music client"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "tide" }]
+keywords = ["music", "youtube-music", "mpris", "qt", "linux"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio :: Players",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "ytmusicapi>=1.10",
+    "yt-dlp>=2024.1.1",
+    "python-mpv>=1.0",
+    "cryptography>=41",
+]
+
+[project.optional-dependencies]
+discord = ["pypresence>=4.6"]
+secretservice = ["SecretStorage>=3"]
+
+[project.scripts]
+tide = "tide.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tide"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"tide.desktop" = "share/applications/tide.desktop"
+"assets/icon-512.png" = "share/icons/hicolor/512x512/apps/tide.png"
+"assets/icon-256.png" = "share/icons/hicolor/256x256/apps/tide.png"
+"assets/icon-192.png" = "share/icons/hicolor/192x192/apps/tide.png"
+"assets/icon-128.png" = "share/icons/hicolor/128x128/apps/tide.png"
+"assets/icon-96.png"  = "share/icons/hicolor/96x96/apps/tide.png"
+"assets/icon-64.png"  = "share/icons/hicolor/64x64/apps/tide.png"
+"assets/icon-48.png"  = "share/icons/hicolor/48x48/apps/tide.png"
+"assets/icon-32.png"  = "share/icons/hicolor/32x32/apps/tide.png"
+"assets/icon-24.png"  = "share/icons/hicolor/24x24/apps/tide.png"
+"assets/icon-22.png"  = "share/icons/hicolor/22x22/apps/tide.png"
+"assets/icon-16.png"  = "share/icons/hicolor/16x16/apps/tide.png"
+
+[tool.hatch.build]
+include = ["src/tide/**/*.py", "src/tide/themes/**/*"]

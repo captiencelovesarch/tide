@@ -1,0 +1,34 @@
+[meta]
+name = "nord"
+slug = "nord"
+author = "tide"
+version = 1
+dark = true
+
+[tokens]
+bg          = "#2e3440"
+bg_alt      = "#3b4252"
+fg          = "#eceff4"
+dim         = "#7a8694"
+accent      = "#88c0d0"
+sel_bg      = "#88c0d0"
+sel_fg      = "#2e3440"
+hover_bg    = "#3b4252"
+hover_fg    = "#eceff4"
+border_col  = "#4c566a"
+border_dim  = "#3b4252"
+
+[typography]
+family  = "IBM Plex Sans"
+size_pt = 10
+weight  = 400
+case    = "normal"
+mono    = false
+
+[layout]
+radius_px       = 6
+border_px       = 1
+spacing_px      = 10
+ambient_art     = false
+control_style   = "glyph"
+list_marker     = "  "
