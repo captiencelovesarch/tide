@@ -17,6 +17,12 @@ native Qt6 · 11 themes · 9 visualizers · MPRIS2 · adaptive accent · zero co
 
 ---
 
+<div align="center">
+
+<img src="assets/screenshots/search.png" alt="tide — search view" width="780" />
+
+</div>
+
 ```
 yay -S tide        # release (when AUR registrations reopen)
 # or right now:
@@ -51,6 +57,12 @@ it was designed for one thing: to be **the music app that has a sense of itself*
 - album detail (cover + tracklist + play all / shuffle)
 - search filter tabs: `[songs] [videos] [albums] [artists]`
 
+<div align="center">
+
+<img src="assets/screenshots/explore.png" alt="explore — home shelves" width="780" />
+
+</div>
+
 ### look & feel
 
 - **11 themes**, each with its own personality:
@@ -68,6 +80,20 @@ it was designed for one thing: to be **the music app that has a sense of itself*
   | ambient | IBM Plex Sans | normal | ▶ | lavender |
   | synthwave | IBM Plex Sans | **`L33T`** | ▶ | neon magenta + cyan |
   | adaptive | IBM Plex Sans | normal | ▶ | follows current album art |
+
+<div align="center">
+
+<table>
+<tr>
+<td><img src="assets/screenshots/theme1.png" alt="theme variant 1" width="300" /></td>
+<td><img src="assets/screenshots/theme2.png" alt="theme variant 2" width="300" /></td>
+<td><img src="assets/screenshots/theme3.png" alt="theme variant 3" width="300" /></td>
+</tr>
+</table>
+
+<sub>same app, three themes</sub>
+
+</div>
 
 - **4 layout presets**: `classic`, `focused`, `dj-deck`, `walkman` (portrait phone-shape) — each swaps widget variants (progress style, volume style, album-art shape, controls size, label arrangement)
 - **adaptive accent** — opt-in toggle that animates the theme accent toward the current cover's dominant color
