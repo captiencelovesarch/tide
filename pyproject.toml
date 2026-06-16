@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tide"
-version = "1.2.0.dev0"
+version = "1.2.0"
 description = "a brutalist multi-source music client"
 readme = "README.md"
 requires-python = ">=3.12"
