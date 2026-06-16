@@ -19,7 +19,9 @@ native Qt6 · 5 sources · 11 themes · 9 visualizers · MPRIS2 · adaptive acce
 
 <div align="center">
 
-<img src="assets/screenshots/search.png" alt="tide — search view" width="780" />
+<img src="assets/screenshots/now-playing-adaptive.png" alt="tide — now playing, adaptive theme with album-tinted gradient" width="780" />
+
+<sub>adaptive theme · album-tinted central gradient · soft corners · v1.2.0.1</sub>
 
 </div>
 
@@ -57,6 +59,14 @@ press `Ctrl+8` for the `[source]` panel — every source is one toggle away.
 
 queue is source-agnostic. mix a YT Music search, a Bandcamp deep cut, and a local FLAC in the same queue — tide dispatches each to the right backend. **federated search** mode (toggle in the source panel) runs every enabled source in parallel and tags each result row so you can see where the hit came from.
 
+<div align="center">
+
+<img src="assets/screenshots/source-panel.png" alt="tide — source panel" width="780" />
+
+<sub>`Ctrl+8` — each source one toggle away</sub>
+
+</div>
+
 ## features
 
 ### playback
@@ -67,6 +77,14 @@ queue is source-agnostic. mix a YT Music search, a Bandcamp deep cut, and a loca
 - **lyrics** — plain from YT Music, **synced** via LRClib fallback (active line bolds + auto-scrolls)
 - **drag-to-reorder queue**, sleep timer (Ctrl+I), like button (Ctrl+H), history view, mini-mode (Ctrl+M)
 - **resume on launch** — quit mid-song, relaunch, picks up paused at the same position
+
+<div align="center">
+
+<img src="assets/screenshots/lyrics-synced.png" alt="tide — synced lyrics view" width="780" />
+
+<sub>synced lyrics via LRClib fallback — active line bolds + auto-scrolls</sub>
+
+</div>
 
 ### discovery (Ctrl+6)
 
@@ -130,6 +148,19 @@ queue is source-agnostic. mix a YT Music search, a Bandcamp deep cut, and a loca
 - **customizable loading bar** — five styles in the status bar tracking the resolve → buffer → playing window: `off`, `numbers`, `blocks`, `dots`, `ascii`.
 - **stream-URL prefetch** — once a track has ≤15s remaining, tide pre-resolves the next one. auto-advance is ~instant on cache hit; silent fallback to normal resolve on miss.
 
+<div align="center">
+
+<table>
+<tr>
+<td><img src="assets/screenshots/speed-popover.png" alt="speed popover" width="380" /></td>
+<td><img src="assets/screenshots/settings-appearance.png" alt="settings appearance section" width="380" /></td>
+</tr>
+</table>
+
+<sub>speed popover (left) · appearance settings showing motion / ui scale / corners / nav icons / font (right)</sub>
+
+</div>
+
 ### audio visualizer (Ctrl+7, F11 for fullscreen)
 
 9 theme-aware renderers driven by a PipeWire monitor capture + numpy FFT pipeline:
@@ -145,6 +176,14 @@ queue is source-agnostic. mix a YT Music search, a Bandcamp deep cut, and a loca
 - `matrix-rain` — cascading characters
 
 in-canvas `⚙` cog overrides renderer + audio source on the fly.
+
+<div align="center">
+
+<img src="assets/screenshots/visualizer-synthwave.png" alt="tide — visualizer, synthwave theme + neon-grid renderer" width="780" />
+
+<sub>synthwave theme + `neon-grid` renderer</sub>
+
+</div>
 
 ### system integration
 
