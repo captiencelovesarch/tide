@@ -30,6 +30,30 @@ class Settings:
     layout: str = "classic"
     layout_overrides: dict = field(default_factory=dict)
     adaptive_accent: bool = False
+    # Status-bar loading indicator: "off" | "numbers" | "blocks" | "dots" | "ascii".
+    loading_indicator_style: str = "blocks"
+    # Animation/motion intensity: "off" | "lite" | "full".
+    motion: str = "lite"
+    # UI scale preset: "compact" | "normal" | "large" | "huge".
+    ui_scale: str = "normal"
+    # Playback speed (1.0 = normal). Affects pitch unless preserve_pitch is on.
+    playback_speed: float = 1.0
+    # If True, mpv's scaletempo filter keeps pitch steady when speed changes.
+    # Default off so the tide aesthetic is the slowed/sped-with-pitch one.
+    preserve_pitch: bool = False
+    # When True (and adaptive_accent is also on), the central content area
+    # paints a vertical gradient from theme.bg → adaptive-derived bg_alt.
+    adaptive_background: bool = False
+    # Corner softness: "sharp" (0px), "soft" (6px), "rounded" (12px). Applied
+    # via a persistent radius override on the theming manager so it doesn't
+    # get cleared when the adaptive driver clears its dynamic overrides.
+    corner_style: str = "sharp"
+    # Nav-rail icon set: "off" | "brutalist" | "geometric" | "retro" |
+    # "minimal". Picks a small unicode glyph rendered before each nav label.
+    nav_icon_set: str = "off"
+    # Font-family override. Empty = use the active theme's typography.family.
+    # When set, the theming manager pushes this family on every theme apply.
+    font_family_override: str = ""
     # v1.2 multi-source
     active_source: str = "ytmusic"
     federated_search: bool = False

@@ -33,6 +33,10 @@ def _qcolor(theme, key: str, default: str) -> QColor:
 class Card(QWidget):
     clicked = Signal(object)        # the payload supplied at construction
 
+    # Base sizes at UI scale = 1.0. Class-level so Shelf (and any other
+    # consumer that doesn't hold a Card instance) can still read them. Each
+    # Card instance shadows these with scaled values via
+    # _refresh_scaled_sizes — so `self.THUMB` is scaled, `Card.THUMB` is base.
     THUMB = 144
     TEXT_HEIGHT = 44
     MARGIN = 6
@@ -54,6 +58,7 @@ class Card(QWidget):
         self._payload = payload
         self._circular = circular
         self._theme = theming.manager().current()
+        self._refresh_scaled_sizes()
         theming.manager().theme_changed.connect(self._on_theme)
         art_cache.cache().image_loaded.connect(self._on_art_loaded)
 
@@ -64,8 +69,22 @@ class Card(QWidget):
         # Trigger fetch right away so the visible shelves warm fast.
         art_cache.cache().request(thumbnail_url or "", None)
 
+    def _refresh_scaled_sizes(self) -> None:
+        from . import scale as _scale
+        # Shadow the class-level base with scaled per-instance values.
+        cls = type(self)
+        self.THUMB = _scale.px(cls.THUMB)
+        self.TEXT_HEIGHT = _scale.px(cls.TEXT_HEIGHT)
+        self.MARGIN = _scale.px(cls.MARGIN)
+
     def _on_theme(self, theme) -> None:
         self._theme = theme
+        new_thumb = self.THUMB
+        self._refresh_scaled_sizes()
+        if new_thumb != self.THUMB:
+            # ui_scale change — resize the tile.
+            self.setFixedSize(self.THUMB + 2 * self.MARGIN,
+                              self.THUMB + self.TEXT_HEIGHT + 2 * self.MARGIN)
         self.update()
 
     def _on_art_loaded(self, url: str, _img) -> None:
@@ -148,13 +167,24 @@ class ShelfRow(QScrollArea):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setWidgetResizable(True)
         self.setFrameShape(QScrollArea.NoFrame)
-        self.setFixedHeight(Card.THUMB + Card.TEXT_HEIGHT + 2 * Card.MARGIN + 14)
+        self._apply_scaled_height()
+        # Theme re-emit also fires on ui_scale change, so this is how we
+        # pick up live scale updates without a dedicated channel.
+        theming.manager().theme_changed.connect(lambda _t: self._apply_scaled_height())
 
         self._inner = QWidget()
         self._layout = QHBoxLayout(self._inner)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(8)
         self.setWidget(self._inner)
+
+    def _apply_scaled_height(self) -> None:
+        from . import scale as _scale
+        # Match a scaled Card's outer footprint plus a fixed gutter for text
+        # overflow + scrollbar reserve.
+        self.setFixedHeight(
+            _scale.px(Card.THUMB + Card.TEXT_HEIGHT + 2 * Card.MARGIN) + _scale.px(14)
+        )
 
     def add_card(self, card: Card) -> None:
         self._layout.addWidget(card)

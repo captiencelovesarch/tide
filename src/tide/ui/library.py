@@ -108,9 +108,10 @@ class LibraryView(QWidget):
         self.playlists_list.setUniformItemSizes(True)
         self.playlists_list.itemActivated.connect(self._on_playlist_activated)
 
+        from . import scale as _scale
         idx_col = QVBoxLayout()
-        idx_col.setContentsMargins(16, 14, 16, 8)
-        idx_col.setSpacing(8)
+        idx_col.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        idx_col.setSpacing(_scale.px(8))
         idx_col.addWidget(self.index_heading)
         idx_col.addLayout(actions_row)
         idx_col.addWidget(self.playlists_list, stretch=1)
@@ -148,8 +149,8 @@ class LibraryView(QWidget):
         self.tracks_list.setItemDelegate(self._track_delegate)
 
         det_col = QVBoxLayout()
-        det_col.setContentsMargins(16, 14, 16, 8)
-        det_col.setSpacing(8)
+        det_col.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        det_col.setSpacing(_scale.px(8))
         det_col.addLayout(detail_top)
         det_col.addLayout(detail_actions)
         det_col.addWidget(self.tracks_list, stretch=1)

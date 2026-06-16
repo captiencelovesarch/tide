@@ -32,6 +32,11 @@ class PlaybackRouter(QObject):
         self._backends: dict[str, PlaybackBackend] = {}
         self._active: PlaybackBackend | None = None
         self._volume: int = 80
+        # Playback speed (mpv `speed` property) + whether mpv's scaletempo
+        # filter preserves pitch. Initialized to defaults; app startup pushes
+        # the persisted values from Settings after construction.
+        self._speed: float = 1.0
+        self._pitch_correction: bool = False
 
     def register(self, backend: PlaybackBackend) -> None:
         slug = backend.slug
@@ -45,6 +50,17 @@ class PlaybackRouter(QObject):
         backend.error.connect(self._on_error)
         try:
             backend.set_volume(self._volume)
+        except Exception:
+            pass
+        # Push the current speed + pitch policy so backends registered after
+        # app startup (rare but possible — e.g. a hot-plugged source) match
+        # the user's settings without a manual nudge.
+        try:
+            backend.set_speed(self._speed)
+        except Exception:
+            pass
+        try:
+            backend.set_pitch_correction(self._pitch_correction)
         except Exception:
             pass
         # First registered backend becomes the implicit default (mpv).
@@ -113,6 +129,27 @@ class PlaybackRouter(QObject):
         for b in self._backends.values():
             try:
                 b.set_volume(self._volume)
+            except Exception:
+                pass
+
+    @Slot(float)
+    def set_speed(self, value: float) -> None:
+        """Apply to every backend so a speed-change made before a backend
+        becomes active still takes effect when it does. Backends that don't
+        support speed simply no-op."""
+        self._speed = max(0.25, min(4.0, float(value)))
+        for b in self._backends.values():
+            try:
+                b.set_speed(self._speed)
+            except Exception:
+                pass
+
+    @Slot(bool)
+    def set_pitch_correction(self, enabled: bool) -> None:
+        self._pitch_correction = bool(enabled)
+        for b in self._backends.values():
+            try:
+                b.set_pitch_correction(self._pitch_correction)
             except Exception:
                 pass
 

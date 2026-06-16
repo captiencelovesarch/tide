@@ -612,9 +612,10 @@ class VisualizerView(QWidget):
         bar.addWidget(self._toggle_btn)
         bar.addWidget(self._fullscreen_btn)
 
+        from . import scale as _scale
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        root.setSpacing(_scale.px(8))
         root.addLayout(bar)
         root.addWidget(self._canvas, stretch=1)
 

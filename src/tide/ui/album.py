@@ -94,8 +94,10 @@ class AlbumView(QWidget):
         top_bar.addWidget(self.heading, stretch=1)
 
         # ---- header ----
+        from . import scale as _scale
         self.cover = QLabel()
-        self.cover.setFixedSize(COVER_SIZE, COVER_SIZE)
+        self._cover_size = _scale.px(COVER_SIZE)
+        self.cover.setFixedSize(self._cover_size, self._cover_size)
         self.cover.setStyleSheet("QLabel { border: 1px solid palette(mid); }")
         self.cover.setAlignment(Qt.AlignCenter)
 
@@ -153,9 +155,10 @@ class AlbumView(QWidget):
         self.tracks.setItemDelegate(self._delegate)
 
         # ---- assemble ----
+        from . import scale as _scale
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 8)
-        root.setSpacing(10)
+        root.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        root.setSpacing(_scale.px(10))
         root.addLayout(top_bar)
         root.addLayout(header_row)
         root.addLayout(actions_row)
@@ -249,8 +252,10 @@ class AlbumView(QWidget):
         self._set_cover_placeholder()
 
     def _show_cover(self, img: QImage) -> None:
+        # Scale per the active ui_scale rather than the base constant — the
+        # cover label was sized to match at construction.
         pix = QPixmap.fromImage(img).scaled(
-            COVER_SIZE, COVER_SIZE,
+            self._cover_size, self._cover_size,
             Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
         )
         self.cover.setText("")

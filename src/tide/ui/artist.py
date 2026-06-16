@@ -84,10 +84,13 @@ class ArtistView(QWidget):
         top_bar.addWidget(self.heading, stretch=1)
 
         # ---- header ----
+        from . import scale as _scale
         self.avatar = QLabel()
-        self.avatar.setFixedSize(HEADER_THUMB, HEADER_THUMB)
+        self._avatar_size = _scale.px(HEADER_THUMB)
+        self.avatar.setFixedSize(self._avatar_size, self._avatar_size)
         self.avatar.setStyleSheet(
-            "QLabel { border: 1px solid palette(mid); border-radius: %dpx; }" % (HEADER_THUMB // 2)
+            "QLabel { border: 1px solid palette(mid); border-radius: %dpx; }"
+            % (self._avatar_size // 2)
         )
         self.avatar.setAlignment(Qt.AlignCenter)
 
@@ -164,9 +167,10 @@ class ArtistView(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
 
+        from . import scale as _scale
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 8)
-        root.setSpacing(10)
+        root.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        root.setSpacing(_scale.px(10))
         root.addLayout(top_bar)
         root.addWidget(scroll, stretch=1)
 
@@ -285,8 +289,9 @@ class ArtistView(QWidget):
         self._set_avatar_placeholder()
 
     def _show_avatar(self, img: QImage) -> None:
+        # Scale per the active ui_scale to match the avatar QLabel's size.
         pix = QPixmap.fromImage(img).scaled(
-            HEADER_THUMB, HEADER_THUMB,
+            self._avatar_size, self._avatar_size,
             Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
         )
         self.avatar.setText("")

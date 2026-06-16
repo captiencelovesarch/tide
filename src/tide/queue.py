@@ -152,6 +152,15 @@ class Queue(QAbstractListModel):
     def upcoming_count(self) -> int:
         return max(0, len(self._tracks) - 1 - self._current)
 
+    def peek_next(self) -> Track | None:
+        """Return the track that ``advance()`` would next select, without
+        mutating the queue. Used by the prefetch system to pre-resolve the
+        upcoming stream URL while the current track is still playing."""
+        nxt = self._current + 1
+        if 0 <= nxt < len(self._tracks):
+            return self._tracks[nxt]
+        return None
+
     @property
     def radio_enabled(self) -> bool:
         return self._radio_enabled

@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 from .. import api, history as history_module, layout as layout_module, session as session_module, theming
 from ..player import PlayState, Player
 from ..playback import PlaybackRouter
+from ..playback.prefetch import StreamPrefetch
 from ..sources import StreamRef, registry as source_registry
 from ..queue import Queue, Role
 from .album import AlbumView
@@ -45,6 +46,7 @@ from .artist import ArtistView
 from .explore import ExploreView
 from .history import HistoryView
 from .library import LibraryView
+from .loading_indicator import LoadingIndicator
 from .lyrics import LyricsView
 from .track_row import TrackRowDelegate
 from .variants import (
@@ -233,6 +235,18 @@ class MainWindow(QMainWindow):
         self._geometry_before_mini = None
         self._upper_wrap_widget = None
 
+        # Stream-URL prefetch — kicks off while the current track is finishing
+        # so the next _play_track sees a warm cache and skips the resolve
+        # worker. Best-effort; on miss the normal resolve path runs.
+        self._prefetch = StreamPrefetch(self)
+        # Position-prefetch trigger threshold (seconds remaining). When the
+        # current track's tail crosses this, we request prefetch for the
+        # next queued track. Tuned to comfortably exceed a slow yt-dlp call.
+        self._prefetch_lead_secs = 15.0
+        # Track-scoped guard: a single video_id we've already requested for
+        # the current playback. Reset when the playing track changes.
+        self._prefetch_armed_for: str | None = None
+
         # Sleep timer state
         self._sleep_mode = None              # SleepMode or None
         self._sleep_deadline: float | None = None
@@ -278,6 +292,18 @@ class MainWindow(QMainWindow):
         self.nav_visualizer_btn = BracketButton("visualizer")
         self.nav_source_btn = BracketButton("source")
         self.nav_settings_btn = BracketButton("settings")
+        # Slot map used by _apply_nav_icons to walk both ways (button → slot
+        # for picking the icon, slot → button for hot-swap).
+        self._nav_buttons: dict[str, "BracketButton"] = {
+            "home": self.nav_home_btn,
+            "library": self.nav_library_btn,
+            "queue": self.nav_queue_btn,
+            "lyrics": self.nav_lyrics_btn,
+            "history": self.nav_history_btn,
+            "visualizer": self.nav_visualizer_btn,
+            "source": self.nav_source_btn,
+            "settings": self.nav_settings_btn,
+        }
         self.nav_home_btn.clicked.connect(lambda: self._switch_view("home"))
         self.nav_library_btn.clicked.connect(lambda: self._switch_view("library"))
         self.nav_queue_btn.clicked.connect(lambda: self._switch_view("queue"))
@@ -375,9 +401,10 @@ class MainWindow(QMainWindow):
         self.results.setVisible(False)
         results_scroll.setVisible(False)
 
+        from . import scale as _scale
         search_col = QVBoxLayout()
-        search_col.setContentsMargins(16, 14, 16, 8)
-        search_col.setSpacing(8)
+        search_col.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        search_col.setSpacing(_scale.px(8))
         search_col.addWidget(self.search)
         search_col.addWidget(self._tabs_row_widget)
         search_col.addWidget(self.heading)
@@ -420,8 +447,8 @@ class MainWindow(QMainWindow):
         queue_actions.addStretch(1)
 
         queue_col = QVBoxLayout()
-        queue_col.setContentsMargins(16, 14, 16, 8)
-        queue_col.setSpacing(8)
+        queue_col.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        queue_col.setSpacing(_scale.px(8))
         queue_col.addWidget(self.queue_heading)
         queue_col.addLayout(queue_actions)
         queue_col.addWidget(self.queue_view, stretch=1)
@@ -518,11 +545,18 @@ class MainWindow(QMainWindow):
         # Simple back stack of previous indices so AlbumView/ArtistView can pop.
         self._view_history: list[int] = []
 
+        # Wrap the central stack in a paint-driven background so it can show
+        # the adaptive-tinted vertical gradient and/or soft corners. The
+        # CentralBg sits between the nav rail and the stack; it owns the
+        # stack via layout, so reparenting is automatic.
+        from .central_bg import CentralBg
+        self.central_bg = CentralBg(self.stack)
+
         upper = QHBoxLayout()
         upper.setContentsMargins(0, 0, 0, 0)
         upper.setSpacing(0)
         upper.addWidget(nav)
-        upper.addWidget(self.stack, stretch=1)
+        upper.addWidget(self.central_bg, stretch=1)
         upper_wrap = QWidget()
         upper_wrap.setLayout(upper)
         self._upper_wrap_widget = upper_wrap
@@ -568,6 +602,13 @@ class MainWindow(QMainWindow):
         self.volume = make_volume(self._slot_volume)
         self.volume.volume_changed.connect(self._on_volume_changed)
 
+        # Playback-speed indicator + popover. Shows current speed (e.g.
+        # [1.0×]); click to open the popover, right-click to reset. Wired
+        # to the player + settings below.
+        from .speed import SpeedButton
+        self.speed_btn = SpeedButton()
+        self.speed_btn.speed_changed.connect(self._on_speed_changed)
+
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setProperty("class", "dim")
         self.time_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
@@ -591,6 +632,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("ready")
+        # Loading indicator — drives the status bar with a progress bar while
+        # a track resolves + buffers. Style is read from settings at start
+        # time so the user can change it without restarting.
+        self._loading = LoadingIndicator(self)
+        self._loading.updated.connect(self.statusBar().showMessage)
 
     def _line_heading(self, label: str, total: int = 60) -> str:
         styled = theming.styled_case(label)
@@ -1051,12 +1097,19 @@ class MainWindow(QMainWindow):
     def _play_track(self, track: api.Track) -> None:
         if track is None:
             return
+        # Stop the previous track immediately. Otherwise its audio keeps
+        # playing for the 1–3s the resolve worker takes, which feels broken
+        # on a manual skip.
+        self.player.stop()
         self._current = track
-        self.now_label.setTrack(track.artists, track.title, track.album)
+        self.now_label.setTrackAnimated(track.artists, track.title, track.album)
         self.now_label.setStatus("loading")
         self.progress.reset()
         self.time_label.setText("0:00 / 0:00")
-        self.statusBar().showMessage("resolving stream…")
+        style = getattr(self._settings, "loading_indicator_style", "blocks") \
+            if hasattr(self, "_settings") and self._settings is not None else "blocks"
+        self._loading.set_style(style)
+        self._loading.start("resolving stream")
         self._fetch_art(track)
         # Log to history. Skip if we're restoring a session — that's a resume,
         # not a fresh play.
@@ -1065,6 +1118,18 @@ class MainWindow(QMainWindow):
                 history_module.append(track)
             except Exception:
                 pass
+
+        # The next-track prefetch armer is keyed on what's playing; new track
+        # → fresh window to arm for whatever comes after it.
+        self._prefetch_armed_for = None
+
+        # Cache hit? Skip the resolve worker entirely — load straight into
+        # the player. This is the happy path for "user pressed next while the
+        # current track was nearly done."
+        cached = self._prefetch.lookup(track.video_id)
+        if cached is not None:
+            self._on_resolved(track.video_id, cached)
+            return
 
         thread = QThread(self)
         worker = _ResolveWorker(track)
@@ -1089,7 +1154,9 @@ class MainWindow(QMainWindow):
             # Defensive: handle a bare URL if some path still emits one.
             self.player.load_url(str(ref))
         self.now_label.setStatus("")
-        self.statusBar().showMessage("playing")
+        # Resolve done — switch the indicator's leading text. PLAYING state
+        # (which fires when mpv actually starts audio) finishes the indicator.
+        self._loading.update_message("buffering")
         self.play_btn.setEnabled(True)
         # Like only when the track's source supports rating. Same for radio.
         cur_source = source_registry().get(self._current.source or "ytmusic") if self._current else None
@@ -1106,6 +1173,7 @@ class MainWindow(QMainWindow):
             self.lyrics_view.show_for(self._current)
 
     def _on_resolve_failed(self, video_id: str, msg: str) -> None:
+        self._loading.cancel()
         self.statusBar().showMessage(f"couldn't resolve: {msg}")
         self.now_label.setStatus("error")
         from .toast import show_toast
@@ -1252,9 +1320,14 @@ class MainWindow(QMainWindow):
         they're owned by Qt and get deleted as soon as they finish. Instead
         we track `_art_for_video_id` and discard any reply that doesn't match
         the currently-playing track when it finishes.
+
+        We deliberately do NOT clear the existing art at the top: keeping
+        the prior cover visible until the new one lands gives AlbumArt's
+        crossfade something to fade from. Only when the new track has no
+        thumbnail at all do we wipe to the empty state.
         """
-        self.art.setImage(None)
         if not track.thumbnail:
+            self.art.setImage(None)
             self._art_for_video_id = None
             return
         self._art_for_video_id = track.video_id
@@ -1294,6 +1367,8 @@ class MainWindow(QMainWindow):
         if s == PlayState.PLAYING:
             self.play_btn.setLabel("pause")
             self.play_btn.setGlyph("⏸")
+            # Audio actually started — stop the loading indicator.
+            self._loading.finish("playing")
         elif s == PlayState.PAUSED:
             self.play_btn.setLabel("play")
             self.play_btn.setGlyph("▶")
@@ -1321,6 +1396,24 @@ class MainWindow(QMainWindow):
                 self._session_dirty = True
                 if not self._session_save_timer.isActive():
                     self._session_save_timer.start()
+        # Prefetch the next track once the tail of the current one is within
+        # the lead window. Idempotent (StreamPrefetch.request dedupes), but
+        # the armed-for guard keeps us from hitting it every position tick.
+        self._maybe_arm_prefetch(secs)
+
+    def _maybe_arm_prefetch(self, position_secs: float) -> None:
+        duration = float(self.player.duration or 0.0)
+        if duration <= 0.0:
+            return
+        if duration - position_secs > self._prefetch_lead_secs:
+            return
+        nxt = self.queue.peek_next()
+        if nxt is None or not nxt.video_id:
+            return
+        if self._prefetch_armed_for == nxt.video_id:
+            return
+        self._prefetch_armed_for = nxt.video_id
+        self._prefetch.request(nxt)
 
     def _on_duration(self, secs: float) -> None:
         self.progress.setDuration(secs)
@@ -1347,6 +1440,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("sleep: paused (queue ended)")
 
     def _on_player_error(self, msg: str) -> None:
+        self._loading.cancel()
         self.statusBar().showMessage(f"player error: {msg}")
 
     # ---------- theme + shortcuts ----------
@@ -1380,6 +1474,28 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+H"), self, self._on_like_clicked)
         QShortcut(QKeySequence("Ctrl+M"), self, self.toggle_mini_mode)
         QShortcut(QKeySequence("Ctrl+I"), self, self.open_sleep_timer)
+        # Playback speed shortcuts: [ slower, ] faster, \ reset to 1.0×.
+        # Mirrors the popover's −/+ and reset; the SpeedButton's set_speed
+        # handles clamping + persistence.
+        from .speed import SPEED_STEP
+        QShortcut(QKeySequence("["), self,
+                  lambda: self.speed_btn.set_speed(self.speed_btn.speed() - SPEED_STEP))
+        QShortcut(QKeySequence("]"), self,
+                  lambda: self.speed_btn.set_speed(self.speed_btn.speed() + SPEED_STEP))
+        QShortcut(QKeySequence("\\"), self, self.speed_btn.reset)
+
+    def apply_nav_icons(self, set_name: str) -> None:
+        """Update every nav button's icon based on the named set. Called at
+        startup (from app.py) and on settings save. The "svg" set renders
+        bundled brutalist SVG icons recolored to match the theme; other
+        sets render unicode glyphs inline before the label."""
+        from . import nav_icons
+        for slot, btn in self._nav_buttons.items():
+            if set_name == "svg":
+                btn.setSvgIcon(nav_icons.svg_text_for(slot))
+            else:
+                btn.setSvgIcon(None)
+                btn.setIconGlyph(nav_icons.icon_for(set_name, slot))
 
     def _on_volume_changed(self, value: int) -> None:
         self.player.set_volume(value)
@@ -1402,6 +1518,24 @@ class MainWindow(QMainWindow):
         triggering a re-save."""
         self.volume.setVolume(value, emit=False)
         self.player.set_volume(value)
+
+    def _on_speed_changed(self, value: float) -> None:
+        # Push to the playback router → mpv. Backends that don't support
+        # variable speed (future Librespot/MusicKit) silently no-op.
+        self.player.set_speed(value)
+        # Persist. Same lazy-save pattern as volume — cheap, gracefully
+        # skipped if settings hasn't been attached yet (e.g. mid-startup).
+        current = getattr(self, "_settings", None)
+        if current is None:
+            return
+        if abs(current.playback_speed - value) < 1e-4:
+            return
+        current.playback_speed = float(value)
+        try:
+            from .. import settings as settings_module
+            settings_module.save(current)
+        except Exception:
+            pass
 
     # ---------- sleep timer ----------
 
@@ -1470,6 +1604,7 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(self.next_btn)
         controls_row.addWidget(self.like_btn)
         controls_row.addStretch(1)
+        controls_row.addWidget(self.speed_btn)
         controls_row.addWidget(self.volume)
 
         progress_row = QHBoxLayout()
@@ -1520,6 +1655,7 @@ class MainWindow(QMainWindow):
         volume_row = QHBoxLayout()
         volume_row.setContentsMargins(0, 0, 0, 0)
         volume_row.addStretch(1)
+        volume_row.addWidget(self.speed_btn)
         volume_row.addWidget(self.volume)
         volume_row.addStretch(1)
 
@@ -1829,6 +1965,47 @@ class MainWindow(QMainWindow):
         adaptive = getattr(self, "_adaptive", None)
         if adaptive is not None:
             adaptive.set_enabled(new.adaptive_accent)
+            adaptive.set_background_enabled(new.adaptive_background)
+        # Central-area gradient + corner radius. The CentralBg widget owns
+        # the paint; the theming manager owns the @radius token so other
+        # widgets (inputs, scrollbars, etc.) match the chosen softness.
+        from .central_bg import corner_radius as _corner_radius
+        if hasattr(self, "central_bg"):
+            self.central_bg.set_enabled(new.adaptive_background)
+            self.central_bg.set_radius(_corner_radius(new.corner_style))
+        radius_px = _corner_radius(new.corner_style)
+        theming.manager().set_user_override(
+            "radius", f"{radius_px}px" if radius_px > 0 else None
+        )
+        # Hot-swap nav icons.
+        self.apply_nav_icons(new.nav_icon_set or "off")
+        # Hot-swap font family override. The theming manager re-applies the
+        # current theme so the new font lands on every widget that listens
+        # to theme_changed.
+        theming.manager().set_user_font(new.font_family_override or "")
+        # Push new loading-indicator style to any currently-running indicator.
+        if hasattr(self, "_loading"):
+            self._loading.set_style(new.loading_indicator_style)
+        # Hot-swap motion intensity. Helpers consult the cached value every
+        # call, so animations queued after this point pick up the new level.
+        from . import motion as motion_module
+        motion_module.set_intensity(new.motion)
+        # Hot-swap UI scale. Re-apply the active theme so the QApplication
+        # font + QSS pick up the new size_pt, and any widget that listens to
+        # theme_changed (track row delegate, AlbumArt, MonoProgress, etc.)
+        # re-derives its scaled pixel sizes in the same beat.
+        from . import scale as scale_module
+        if scale_module.current().value != new.ui_scale:
+            scale_module.set_factor(new.ui_scale)
+            current_theme = theming.manager().current()
+            if current_theme is not None:
+                theming.manager().apply(current_theme.slug)
+        # Hot-swap pitch correction. This re-applies the scaletempo filter
+        # immediately so the user hears the change without restarting mpv.
+        try:
+            self.player.set_pitch_correction(bool(new.preserve_pitch))
+        except Exception:
+            pass
 
     # ---------- session persistence ----------
 

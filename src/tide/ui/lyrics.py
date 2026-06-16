@@ -92,9 +92,10 @@ class LyricsView(QWidget):
         self._scroll.setFrameShape(QScrollArea.NoFrame)
         self._scroll.setWidget(self._plain_label)
 
+        from . import scale as _scale
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        layout.setSpacing(_scale.px(8))
         layout.addWidget(self.heading)
         layout.addWidget(self._scroll, stretch=1)
 

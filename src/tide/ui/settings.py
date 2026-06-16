@@ -58,6 +58,15 @@ class SettingsDialog(QDialog):
             layout=current_settings.layout or "classic",
             layout_overrides=dict(current_settings.layout_overrides or {}),
             adaptive_accent=current_settings.adaptive_accent,
+            loading_indicator_style=current_settings.loading_indicator_style or "blocks",
+            motion=current_settings.motion or "lite",
+            ui_scale=current_settings.ui_scale or "normal",
+            playback_speed=current_settings.playback_speed or 1.0,
+            preserve_pitch=current_settings.preserve_pitch,
+            adaptive_background=current_settings.adaptive_background,
+            corner_style=current_settings.corner_style or "sharp",
+            nav_icon_set=current_settings.nav_icon_set or "off",
+            font_family_override=current_settings.font_family_override or "",
         )
 
         self._build_ui()
@@ -111,6 +120,90 @@ class SettingsDialog(QDialog):
         self.adaptive_toggle = QCheckBox("shift accent to album art")
         self.adaptive_toggle.toggled.connect(self._on_adaptive_toggled)
 
+        # Adaptive background — tints the central content area with a soft
+        # vertical gradient pulled from the album palette. Independent of
+        # the accent shift above; either can be on without the other.
+        self.adaptive_bg_toggle = QCheckBox(
+            "tint central area with album-derived gradient"
+        )
+
+        # Corner softness — applies a sticky @radius override on the theming
+        # manager (preserved across adaptive clears). Affects all corners
+        # that use @radius (inputs, scrollbars, the central-area gradient).
+        self.corner_picker = QComboBox()
+        self.corner_picker.addItem("sharp · 0px", "sharp")
+        self.corner_picker.addItem("soft · 6px", "soft")
+        self.corner_picker.addItem("rounded · 12px", "rounded")
+
+        # Nav-rail icon set. Each item label embeds one icon from the set
+        # so the user previews the vibe in the picker itself.
+        self.nav_icons_picker = QComboBox()
+        self.nav_icons_picker.addItem("off · text only", "off")
+        self.nav_icons_picker.addItem("svg · brutalist line-art icons", "svg")
+        self.nav_icons_picker.addItem("classic · ⌂ ▤ ≡ ♪ ⌛ ♬ ⇄ ⚙", "classic")
+        self.nav_icons_picker.addItem("emoji · 🏠 📚 📋 🎤 🕒 🎚 🔌 ⚙", "emoji")
+
+        # Font family — overrides the active theme's typography.family.
+        # Empty string = "use whatever the theme says". Populated below
+        # from bundled tide fonts + system QFontDatabase enumeration.
+        self.font_picker = QComboBox()
+        self.font_picker.addItem("from theme", "")
+        # Tide-bundled fonts always available regardless of system.
+        for f in ("IBM Plex Mono", "JetBrains Mono", "Inter"):
+            self.font_picker.addItem(f"{f} · bundled", f)
+        # System families — filtered to a manageable list (mono fonts +
+        # popular sans). Enumerating every font would be noisy; the user
+        # can type in the box if their pick isn't shown.
+        try:
+            from PySide6.QtGui import QFontDatabase
+            existing = {self.font_picker.itemData(i)
+                        for i in range(self.font_picker.count())}
+            system_families = QFontDatabase.families()
+            # Prefer monospace families up top.
+            mono = [f for f in system_families
+                    if QFontDatabase.isFixedPitch(f) and f not in existing]
+            for f in sorted(mono):
+                self.font_picker.addItem(f, f)
+                existing.add(f)
+        except Exception:
+            pass
+        # Make editable so users can paste any family name.
+        self.font_picker.setEditable(True)
+        self.font_picker.setInsertPolicy(QComboBox.NoInsert)
+
+        # Loading-indicator style. The labels include a tiny example of each
+        # rendering so the user knows what they're picking without trial-and-error.
+        self.loading_picker = QComboBox()
+        self.loading_picker.addItem("off", "off")
+        self.loading_picker.addItem("numbers · 42%", "numbers")
+        self.loading_picker.addItem("blocks · █████░░░░░", "blocks")
+        self.loading_picker.addItem("dots · ●●●●●○○○○○", "dots")
+        self.loading_picker.addItem("ascii · [#####-----]", "ascii")
+
+        # Motion intensity — gates every animation in the app via the motion
+        # module. "lite" is the recommended default (signature + everyday
+        # animations only); "full" enables atmospheric tier when it ships.
+        self.motion_picker = QComboBox()
+        self.motion_picker.addItem("off · instant transitions", "off")
+        self.motion_picker.addItem("lite · signature + everyday", "lite")
+        self.motion_picker.addItem("full · everything including ambient", "full")
+
+        # UI scale — multiplies the active theme's typography size, which
+        # cascades to every widget that uses self.font() / QFontMetrics.
+        self.scale_picker = QComboBox()
+        self.scale_picker.addItem("compact · 0.85×", "compact")
+        self.scale_picker.addItem("normal · 1.00×", "normal")
+        self.scale_picker.addItem("large · 1.15×", "large")
+        self.scale_picker.addItem("huge · 1.30×", "huge")
+
+        # Preserve-pitch toggle — when on, mpv's scaletempo filter keeps
+        # pitch steady as speed changes (utility / audiobook mode). Default
+        # off so the bottom-bar speed control gives the slowed/nightcore
+        # aesthetic with no extra steps.
+        self.preserve_pitch_toggle = QCheckBox(
+            "preserve pitch when changing speed"
+        )
+
         appearance_form = QFormLayout()
         appearance_form.addRow("theme:", self.theme_picker)
         appearance_form.addRow("layout:", self.layout_picker)
@@ -121,6 +214,14 @@ class SettingsDialog(QDialog):
         appearance_form.addRow("  label:", self._slot_pickers["now_label"])
         appearance_form.addRow("thumbnails:", self.thumbnails_picker)
         appearance_form.addRow("adaptive:", self.adaptive_toggle)
+        appearance_form.addRow("", self.adaptive_bg_toggle)
+        appearance_form.addRow("corners:", self.corner_picker)
+        appearance_form.addRow("nav icons:", self.nav_icons_picker)
+        appearance_form.addRow("font:", self.font_picker)
+        appearance_form.addRow("loading bar:", self.loading_picker)
+        appearance_form.addRow("motion:", self.motion_picker)
+        appearance_form.addRow("ui scale:", self.scale_picker)
+        appearance_form.addRow("speed:", self.preserve_pitch_toggle)
         appearance_form.addRow("visualizer audio:", self.audio_device_picker)
 
         # ---- discord ----
@@ -341,6 +442,37 @@ class SettingsDialog(QDialog):
                 cb.setCurrentIndex(idx)
         self.adaptive_toggle.setChecked(self._settings.adaptive_accent)
 
+        loading_idx = self.loading_picker.findData(
+            self._settings.loading_indicator_style or "blocks"
+        )
+        if loading_idx >= 0:
+            self.loading_picker.setCurrentIndex(loading_idx)
+
+        motion_idx = self.motion_picker.findData(self._settings.motion or "lite")
+        if motion_idx >= 0:
+            self.motion_picker.setCurrentIndex(motion_idx)
+
+        scale_idx = self.scale_picker.findData(self._settings.ui_scale or "normal")
+        if scale_idx >= 0:
+            self.scale_picker.setCurrentIndex(scale_idx)
+
+        self.preserve_pitch_toggle.setChecked(bool(self._settings.preserve_pitch))
+        self.adaptive_bg_toggle.setChecked(bool(self._settings.adaptive_background))
+        corner_idx = self.corner_picker.findData(self._settings.corner_style or "sharp")
+        if corner_idx >= 0:
+            self.corner_picker.setCurrentIndex(corner_idx)
+        nav_idx = self.nav_icons_picker.findData(self._settings.nav_icon_set or "off")
+        if nav_idx >= 0:
+            self.nav_icons_picker.setCurrentIndex(nav_idx)
+        font_override = self._settings.font_family_override or ""
+        font_idx = self.font_picker.findData(font_override)
+        if font_idx >= 0:
+            self.font_picker.setCurrentIndex(font_idx)
+        else:
+            # Custom value not in the preset list — show it in the editable
+            # combo's text field directly.
+            self.font_picker.setCurrentText(font_override)
+
         self.discord_toggle.setChecked(self._settings.discord_enabled)
         self.discord_app_id.setText(self._settings.discord_app_id)
         self.discord_app_id.setEnabled(self._settings.discord_enabled)
@@ -411,6 +543,19 @@ class SettingsDialog(QDialog):
         self._settings.layout = self.layout_picker.currentData() or "classic"
         self._settings.layout_overrides = self._gather_overrides()
         self._settings.adaptive_accent = self.adaptive_toggle.isChecked()
+        self._settings.loading_indicator_style = (
+            self.loading_picker.currentData() or "blocks"
+        )
+        self._settings.motion = self.motion_picker.currentData() or "lite"
+        self._settings.ui_scale = self.scale_picker.currentData() or "normal"
+        self._settings.preserve_pitch = self.preserve_pitch_toggle.isChecked()
+        self._settings.adaptive_background = self.adaptive_bg_toggle.isChecked()
+        self._settings.corner_style = self.corner_picker.currentData() or "sharp"
+        self._settings.nav_icon_set = self.nav_icons_picker.currentData() or "off"
+        # Prefer the picker's data (preset family) if it's still selected;
+        # fall back to the editable text for free-form entries.
+        font_value = self.font_picker.currentData() or self.font_picker.currentText().strip()
+        self._settings.font_family_override = font_value or ""
         settings_module.save(self._settings)
         self.accept()
 

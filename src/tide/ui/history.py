@@ -61,9 +61,10 @@ class HistoryView(QWidget):
         self._delegate.attach(self.list)
         self.list.setItemDelegate(self._delegate)
 
+        from . import scale as _scale
         col = QVBoxLayout(self)
-        col.setContentsMargins(16, 14, 16, 8)
-        col.setSpacing(8)
+        col.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        col.setSpacing(_scale.px(8))
         col.addWidget(self.heading)
         col.addLayout(actions)
         col.addWidget(self.list, stretch=1)

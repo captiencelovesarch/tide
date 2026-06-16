@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tide"
-version = "1.2.0"
+version = "1.2.0.1"
 description = "a brutalist multi-source music client"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -55,4 +55,11 @@ packages = ["src/tide"]
 "assets/icon-16.png"  = "share/icons/hicolor/16x16/apps/tide.png"
 
 [tool.hatch.build]
-include = ["src/tide/**/*.py", "src/tide/themes/**/*", "src/tide/layouts/**/*"]
+include = [
+  "src/tide/**/*.py",
+  "src/tide/themes/**/*",
+  "src/tide/layouts/**/*",
+  "src/tide/fonts/*.ttf",
+  "src/tide/fonts/*.otf",
+  "src/tide/icons/**/*.svg",
+]

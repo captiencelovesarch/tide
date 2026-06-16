@@ -109,7 +109,13 @@ def _substitute(qss: str, theme: Theme) -> str:
     lookups.setdefault("radius", f"{int(theme.t('layout', 'radius_px', 0))}px")
     lookups.setdefault("spacing", f"{int(theme.t('layout', 'spacing_px', 8))}px")
     lookups.setdefault("font_family", str(theme.t("typography", "family", "monospace")))
-    lookups.setdefault("font_size", f"{int(theme.t('typography', 'size_pt', 10))}pt")
+    # Pull the scaled font size through scale.round_pt so QSS rules that use
+    # @font_size track the active UI scale preset.
+    from .ui import scale as _scale
+    lookups.setdefault(
+        "font_size",
+        f"{_scale.round_pt(float(theme.t('typography', 'size_pt', 10)))}pt",
+    )
 
     def repl(match: re.Match) -> str:
         name = match.group(1)
@@ -119,6 +125,27 @@ def _substitute(qss: str, theme: Theme) -> str:
 
 
 # ---------- font registration ----------
+
+
+_BUNDLED_FONTS_REGISTERED: bool = False
+
+
+def register_bundled_fonts() -> None:
+    """Load tide's bundled fonts (``src/tide/fonts/``) into the Qt font
+    database so they're selectable regardless of what the user has
+    installed system-wide. Idempotent + safe to call multiple times."""
+    global _BUNDLED_FONTS_REGISTERED
+    if _BUNDLED_FONTS_REGISTERED:
+        return
+    pkg_fonts = Path(__file__).resolve().parent / "fonts"
+    if pkg_fonts.is_dir():
+        for f in pkg_fonts.iterdir():
+            if f.suffix.lower() in (".ttf", ".otf"):
+                try:
+                    QFontDatabase.addApplicationFont(str(f))
+                except Exception:
+                    pass
+    _BUNDLED_FONTS_REGISTERED = True
 
 
 def _register_fonts(theme: Theme) -> None:
@@ -140,7 +167,16 @@ class ThemeManager(QObject):
         super().__init__(parent)
         self._themes: dict[str, Theme] = {}
         self._current: Theme | None = None
-        self._token_overrides: dict[str, str] = {}
+        # Two override layers. _dynamic_overrides is what the adaptive driver
+        # pushes per-track (accent / accent_alt / bg_alt) — it gets cleared
+        # whenever adaptive turns off or a track changes to "no source".
+        # _user_overrides is sticky: persisted user settings like the corner
+        # radius live here so the adaptive clear doesn't wipe them.
+        self._dynamic_overrides: dict[str, str] = {}
+        self._user_overrides: dict[str, str] = {}
+        # Sticky font family override — beats theme.typography.family when
+        # set. Empty string means "use the theme's family".
+        self._user_font: str = ""
 
     def refresh(self) -> None:
         self._themes = discover_themes()
@@ -161,12 +197,14 @@ class ThemeManager(QObject):
             return None
         _register_fonts(theme)
 
-        # Explicit theme switch — drop any runtime token overrides from the
-        # previous theme (adaptive accent etc.). The adaptive driver will
-        # re-establish them for the new base palette if it's still enabled.
+        # Explicit theme switch — drop the dynamic overrides from the
+        # previous theme (adaptive accent etc.). User overrides (corner
+        # radius, etc.) survive because they're not specific to a theme's
+        # palette. The adaptive driver will re-establish dynamic overrides
+        # for the new base palette if it's still enabled.
         prev_slug = self._current.slug if self._current is not None else None
         if slug != prev_slug:
-            self._token_overrides.clear()
+            self._dynamic_overrides.clear()
 
         # Compose the stylesheet with substituted tokens (overrides win).
         effective_theme = self._with_overrides(theme)
@@ -174,8 +212,14 @@ class ThemeManager(QObject):
 
         app = QApplication.instance()
         if app is not None:
-            family = str(theme.t("typography", "family", ""))
-            size_pt = int(theme.t("typography", "size_pt", 10))
+            from .ui import scale as _scale
+            base_family = str(theme.t("typography", "family", ""))
+            # A user-set override beats the theme's family. Stored on the
+            # manager (set via ``set_user_font``) so the same instance is
+            # consulted on every apply.
+            family = self._user_font or base_family
+            base_size_pt = float(theme.t("typography", "size_pt", 10))
+            size_pt = _scale.round_pt(base_size_pt)
             weight = int(theme.t("typography", "weight", 400))
             if family:
                 font = QFont(family)
@@ -189,28 +233,65 @@ class ThemeManager(QObject):
         return effective_theme
 
     def _with_overrides(self, theme: Theme) -> Theme:
-        """Return a Theme whose tokens have the runtime overrides applied."""
-        if not self._token_overrides:
+        """Return a Theme whose tokens have the runtime overrides applied.
+        User overrides win over dynamic ones so a user-set radius isn't
+        wobbled by adaptive."""
+        if not self._dynamic_overrides and not self._user_overrides:
             return theme
         merged = dict(theme.tokens)
-        merged.update(self._token_overrides)
+        merged.update(self._dynamic_overrides)
+        merged.update(self._user_overrides)
         return Theme(
             slug=theme.slug, name=theme.name, path=theme.path,
             tokens=merged, typography=theme.typography, layout=theme.layout,
             qss=theme.qss, dark=theme.dark,
         )
 
+    def set_user_font(self, family: str) -> None:
+        """Set or clear the font-family override. Empty string clears.
+        Re-applies the current theme so the new font lands immediately."""
+        new = (family or "").strip()
+        if new == self._user_font:
+            return
+        self._user_font = new
+        if self._current is not None:
+            self.apply(self._current.slug)
+
+    def user_font(self) -> str:
+        return self._user_font
+
+    def set_user_override(self, key: str, value: str | None) -> None:
+        """Set or remove a sticky user override (persists across adaptive
+        clear, theme switch, etc.). Pass ``value=None`` to remove."""
+        prior = self._user_overrides.get(key)
+        if value is None:
+            if key not in self._user_overrides:
+                return
+            self._user_overrides.pop(key, None)
+        else:
+            if prior == value:
+                return
+            self._user_overrides[key] = value
+        if self._current is None:
+            return
+        effective = self._with_overrides(self._current)
+        qss = _substitute(self._current.qss, effective)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(qss)
+        self.theme_changed.emit(effective)
+
     def override_tokens(self, overrides: dict[str, str]) -> None:
-        """Patch one or more token values at runtime (used by the adaptive
-        driver). Pushes new QSS to the QApplication every call (cheap), but
-        throttles the cascading ``theme_changed`` signal that drives custom-
-        painted widgets to repaint — they only need the latest value, and
-        emitting 60×/sec triggers a stampede of viewport updates across all
-        list views.
+        """Patch one or more *dynamic* token values at runtime (used by the
+        adaptive driver). Pushes new QSS to the QApplication every call
+        (cheap), but throttles the cascading ``theme_changed`` signal that
+        drives custom-painted widgets to repaint — they only need the
+        latest value, and emitting 60×/sec triggers a stampede of viewport
+        updates across all list views.
         """
         if not overrides:
             return
-        self._token_overrides.update(overrides)
+        self._dynamic_overrides.update(overrides)
         if self._current is None:
             return
         effective = self._with_overrides(self._current)
@@ -238,15 +319,20 @@ class ThemeManager(QObject):
                 _QT.singleShot(110, _flush)
 
     def clear_accent_override(self) -> None:
-        """Remove the accent override (and bg_alt) so the base theme returns."""
-        had = bool(self._token_overrides)
-        self._token_overrides.clear()
+        """Remove the dynamic accent / bg_alt overrides so the base theme
+        returns. User overrides (radius etc.) are deliberately preserved —
+        they're sticky settings, not per-track."""
+        had = bool(self._dynamic_overrides)
+        self._dynamic_overrides.clear()
         if had and self._current is not None:
-            qss = _substitute(self._current.qss, self._current)
+            effective = self._with_overrides(self._current)
+            qss = _substitute(self._current.qss, effective)
             app = QApplication.instance()
             if app is not None:
                 app.setStyleSheet(qss)
-            self.theme_changed.emit(self._current)
+            # Emit with the effective theme (which may still contain user
+            # overrides) so subscribers see the actual tokens in play.
+            self.theme_changed.emit(effective)
 
 
 # Process-global theme manager. UI code uses `manager()` to subscribe to

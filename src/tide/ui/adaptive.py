@@ -2,8 +2,10 @@
 dominant color of whatever's playing.
 
 Pipeline:
-    track changes → fetch art (art_cache) → extract palette (median-cut on
-    a 64×64 downscale, in a worker) → pick best accent → animate from
+    track changes → fetch art (art_cache) → extract palette (frequency-
+    counted 4-bit-per-channel histogram on a 64×64 downscale, in a worker)
+    → score candidates by vibrancy × √frequency → normalize the winning
+    hue into a readable accent for the current theme → animate from
     current to target over ~1.5s → push patched stylesheet each frame.
 
 Operates on top of any theme. When the active theme's ``[layout].adaptive``
@@ -13,6 +15,7 @@ look.
 from __future__ import annotations
 
 import colorsys
+import math
 from collections import Counter
 from typing import Callable
 
@@ -36,6 +39,12 @@ from . import art_cache
 ANIM_DURATION_MS = 1500
 ANIM_EASING = QEasingCurve.OutCubic
 
+# Picker tuning. _MIN_VIBRANCY is a chroma×brightness floor below which a
+# bucket is treated as grey/black/white and can't supply a usable hue.
+_MIN_VIBRANCY = 0.15
+# Min hue separation (degrees) between accent and accent_alt.
+_MIN_HUE_SEP = 35.0
+
 
 def _qcolor_lerp(a: QColor, b: QColor, t: float) -> QColor:
     t = max(0.0, min(1.0, t))
@@ -49,9 +58,10 @@ def _qcolor_lerp(a: QColor, b: QColor, t: float) -> QColor:
 # ---------- palette extraction ----------
 
 
-def extract_palette(image: QImage, max_samples: int = 4096) -> list[QColor]:
-    """Return up to ~5 dominant colors from ``image`` via a cheap histogram +
-    median-cut style binning. Runs on whatever thread calls it.
+def extract_palette(image: QImage) -> list[tuple[QColor, int]]:
+    """Return up to 32 dominant colors and their pixel counts via a cheap
+    4-bit-per-channel histogram on a 64×64 downscale. Runs on whatever thread
+    calls it.
     """
     if image is None or image.isNull():
         return []
@@ -74,20 +84,11 @@ def extract_palette(image: QImage, max_samples: int = 4096) -> list[QColor]:
             counts[(r, g, b)] += 1
     if not counts:
         return []
-    # Top buckets become candidate colors.
-    top = counts.most_common(24)
-    palette: list[QColor] = []
-    for (r, g, b), _ in top:
-        col = QColor(r * 17, g * 17, b * 17)  # ×17 = back from 4-bit to 8-bit
-        palette.append(col)
-    return palette
+    # ×17 maps 4-bit (0..15) back to 8-bit (0..255).
+    return [(QColor(r * 17, g * 17, b * 17), n) for (r, g, b), n in counts.most_common(32)]
 
 
-def _saturation(c: QColor) -> float:
-    r, g, b = c.redF(), c.greenF(), c.blueF()
-    _h, l, s = colorsys.rgb_to_hls(r, g, b)
-    # Combine saturation + how far from pure white/black (avoid washed-out picks).
-    return s * (1.0 - abs(l - 0.5) * 0.4)
+# ---------- color helpers ----------
 
 
 def _luminance(c: QColor) -> float:
@@ -95,56 +96,15 @@ def _luminance(c: QColor) -> float:
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
-def pick_accent(palette: list[QColor], theme_bg: QColor) -> QColor | None:
-    """Pick the most saturated color from ``palette`` that still has enough
-    contrast against the theme's background. Returns None if the palette is
-    all washed out — caller should keep the base theme accent.
+def _vibrancy(c: QColor) -> float:
+    """Visual colorfulness in 0..1. HSV chroma weighted by brightness so
+    near-black colors (e.g. rgb(20,10,10), which HLS happily calls 100%
+    saturated) don't score as vibrant.
     """
-    if not palette:
-        return None
-    bg_lum = _luminance(theme_bg)
-    candidates = []
-    for c in palette:
-        sat = _saturation(c)
-        if sat < 0.20:
-            continue
-        # Want adequate contrast: prefer light accents on dark bg and vice versa.
-        target_diff = 0.35
-        contrast = abs(_luminance(c) - bg_lum)
-        if contrast < target_diff:
-            # Boost saturation but reduce confidence.
-            sat *= 0.5
-        candidates.append((sat, c))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
-
-
-def pick_accent_alt(palette: list[QColor], accent: QColor, theme_bg: QColor) -> QColor | None:
-    """Pick a secondary accent that contrasts well with the primary accent.
-
-    Used for the visualizer's neon-grid renderer (which paints with both
-    ``accent`` and ``accent_alt``) so the whole reactive look adapts.
-    """
-    if not palette:
-        return _complementary(accent)
-    bg_lum = _luminance(theme_bg)
-    candidates = []
-    for c in palette:
-        sat = _saturation(c)
-        if sat < 0.20:
-            continue
-        # Want a hue at least 30° away from the primary accent.
-        if _hue_distance(c, accent) < 30:
-            continue
-        contrast = abs(_luminance(c) - bg_lum)
-        score = sat * (0.6 + 0.4 * min(contrast / 0.5, 1.0))
-        candidates.append((score, c))
-    if not candidates:
-        return _complementary(accent)
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
+    r, g, b = c.redF(), c.greenF(), c.blueF()
+    chroma = max(r, g, b) - min(r, g, b)
+    value = max(r, g, b)
+    return chroma * (0.35 + 0.65 * value)
 
 
 def _hue_distance(a: QColor, b: QColor) -> float:
@@ -161,18 +121,112 @@ def _complementary(c: QColor) -> QColor:
     return QColor(int(r * 255), int(g * 255), int(b * 255))
 
 
-def pick_bg_tint(palette: list[QColor]) -> QColor | None:
-    """Pick a desaturated, slightly darker color for the bg_alt tint."""
+def _normalize_accent(c: QColor, bg_lum: float) -> QColor:
+    """Keep the hue, clamp lightness/saturation into a readable accent band
+    against the theme's bg. Otherwise a near-black album cover yields a
+    near-black accent that's invisible on the (also dark) theme.
+    """
+    h, l, s = colorsys.rgb_to_hls(c.redF(), c.greenF(), c.blueF())
+    if bg_lum < 0.5:
+        # Dark theme: bright accent.
+        l = min(max(l, 0.55), 0.78)
+        s = max(s, 0.58)
+    else:
+        # Light theme: deep accent.
+        l = min(max(l, 0.28), 0.48)
+        s = max(s, 0.62)
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return QColor(int(r * 255), int(g * 255), int(b * 255))
+
+
+# ---------- pickers ----------
+
+
+def pick_accent(
+    palette: list[tuple[QColor, int]], theme_bg: QColor
+) -> QColor | None:
+    """Pick the most prominent vibrant hue in ``palette`` and normalize it
+    into a readable accent against ``theme_bg``. Returns None when no bucket
+    has a usable hue (e.g. fully grayscale cover) — caller should keep the
+    base theme accent.
+    """
     if not palette:
         return None
-    # Use the brightest sufficiently-saturated color, then desaturate + darken.
-    palette_sorted = sorted(palette, key=_saturation, reverse=True)
-    base = palette_sorted[0]
-    r, g, b = base.redF(), base.greenF(), base.blueF()
-    h, l, s = colorsys.rgb_to_hls(r, g, b)
-    # Pull toward a calmer version.
-    s = min(s, 0.35)
-    l = min(l, 0.12)
+    total = sum(n for _, n in palette) or 1
+    bg_lum = _luminance(theme_bg)
+    candidates: list[tuple[float, QColor]] = []
+    for color, count in palette:
+        vib = _vibrancy(color)
+        if vib < _MIN_VIBRANCY:
+            continue
+        freq = count / total
+        # √freq lets a moderate-frequency vibrant color beat a 1-pixel splash,
+        # without letting a single dominant muted color shadow a smaller
+        # genuinely-vibrant one. Without this term the picker was choosing
+        # tiny bright outliers as accents.
+        score = vib * math.sqrt(freq)
+        candidates.append((score, color))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return _normalize_accent(candidates[0][1], bg_lum)
+
+
+def pick_accent_alt(
+    palette: list[tuple[QColor, int]], accent: QColor, theme_bg: QColor
+) -> QColor | None:
+    """Pick a secondary accent with a distinct hue from the primary.
+
+    Used by the visualizer's neon-grid renderer (which paints with both
+    ``accent`` and ``accent_alt``) so the whole reactive look adapts.
+    """
+    bg_lum = _luminance(theme_bg)
+    if not palette:
+        return _normalize_accent(_complementary(accent), bg_lum)
+    total = sum(n for _, n in palette) or 1
+    candidates: list[tuple[float, QColor]] = []
+    for color, count in palette:
+        vib = _vibrancy(color)
+        if vib < _MIN_VIBRANCY:
+            continue
+        hd = _hue_distance(color, accent)
+        if hd < _MIN_HUE_SEP:
+            continue
+        freq = count / total
+        # Reward bigger hue separation so we land on a true contrasting tone
+        # instead of a near-neighbor.
+        sep_bonus = min(hd / 180.0, 1.0)
+        score = vib * math.sqrt(freq) * (0.6 + 0.6 * sep_bonus)
+        candidates.append((score, color))
+    if not candidates:
+        return _normalize_accent(_complementary(accent), bg_lum)
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return _normalize_accent(candidates[0][1], bg_lum)
+
+
+def pick_bg_tint(palette: list[tuple[QColor, int]]) -> QColor | None:
+    """Pick a deeply-muted version of the album's dominant body color for the
+    ``bg_alt`` tint. Unlike the accent picker this weights raw frequency —
+    the tint should feel like the cover's main mass, not a small splash.
+    """
+    if not palette:
+        return None
+    total = sum(n for _, n in palette) or 1
+    candidates: list[tuple[float, QColor]] = []
+    for color, count in palette:
+        vib = _vibrancy(color)
+        if vib < 0.08:  # looser than accent — even subtle hues make a fine tint
+            continue
+        freq = count / total
+        score = vib * freq
+        candidates.append((score, color))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    base = candidates[0][1]
+    h, l, s = colorsys.rgb_to_hls(base.redF(), base.greenF(), base.blueF())
+    s = min(s, 0.32)
+    l = min(l, 0.10)
     r, g, b = colorsys.hls_to_rgb(h, l, s)
     return QColor(int(r * 255), int(g * 255), int(b * 255))
 
@@ -184,7 +238,7 @@ class _PaletteWorker(QRunnable):
     """Runs ``extract_palette`` on the QThreadPool to keep the GUI thread free."""
 
     class _Sig(QObject):
-        done = Signal(object)        # list[QColor]
+        done = Signal(object)        # list[tuple[QColor, int]]
 
     def __init__(self, image: QImage) -> None:
         super().__init__()
@@ -210,6 +264,10 @@ class AdaptiveDriver(QObject):
         super().__init__(parent)
         self._queue = queue
         self._enabled = False
+        # When True, push bg_alt overrides even if the theme doesn't ask for
+        # them — used by the CentralBg gradient setting. Independent of the
+        # accent shift; the user can have either, both, or neither.
+        self._background_enabled = False
         self._current_url: str | None = None
 
         self._target_accent: QColor | None = None
@@ -243,8 +301,31 @@ class AdaptiveDriver(QObject):
             self._current_accent = None
             self._target_accent = None
 
+    def set_background_enabled(self, on: bool) -> None:
+        """Toggle the bg_alt extraction path used by the central-area
+        gradient. Independent of ``set_enabled`` (the accent shift) — the
+        user can pick either, both, or neither in settings."""
+        if on == self._background_enabled:
+            return
+        self._background_enabled = on
+        if self.is_enabled():
+            # Re-fire for the current track so bg_alt is computed (or
+            # cleared) immediately rather than waiting for the next track.
+            self._on_track_changed(self._queue.current)
+        elif not on:
+            # Background turned off and accent is off too — clear any
+            # remaining bg_alt override so the theme baseline returns.
+            theming.manager().clear_accent_override()
+
     def is_enabled(self) -> bool:
-        return self._enabled or self._theme_demands_adaptive()
+        return (
+            self._enabled
+            or self._background_enabled
+            or self._theme_demands_adaptive()
+        )
+
+    def _wants_bg_alt(self) -> bool:
+        return self._background_enabled or self._theme_demands_adaptive()
 
     def _theme_demands_adaptive(self) -> bool:
         t = theming.manager().current()
@@ -314,7 +395,7 @@ class AdaptiveDriver(QObject):
         # Pick a contrasting second color for accent_alt (used by neon-grid
         # visualizer + a few QSS spots). Falls back to a complementary hue.
         new_accent_alt = pick_accent_alt(palette, new_accent, bg)
-        new_bg_alt = pick_bg_tint(palette) if self._theme_demands_adaptive() else None
+        new_bg_alt = pick_bg_tint(palette) if self._wants_bg_alt() else None
 
         # Start animation: from current → target.
         self._target_accent = new_accent

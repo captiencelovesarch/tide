@@ -1,6 +1,6 @@
 # Maintainer: tide maintainer <you@example.com>
 pkgname=tide
-pkgver=1.2.0
+pkgver=1.2.0.1
 pkgrel=1
 pkgdesc="A brutalist multi-source music desktop client"
 arch=('any')

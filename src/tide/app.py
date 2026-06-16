@@ -76,9 +76,30 @@ def run(argv: list[str] | None = None) -> int:
 
     user_settings = settings_module.load()
 
+    # Initialize the motion system once, before any UI is built. Reduced-
+    # motion detection needs QGuiApplication.instance() (created above) to
+    # be live; doing it here means every helper sees the right intensity
+    # from the first frame.
+    from .ui import motion as motion_module
+    motion_module.initialize(user_settings.motion)
+
+    # Lock in the UI scale BEFORE the theme applies. theming.apply() multi-
+    # plies the typography size and the QSS @font_size token by scale.factor(),
+    # so the first theme application has to see the correct scale or the
+    # whole window renders at 1.0× and then snaps when settings are touched.
+    from .ui import scale as scale_module
+    scale_module.set_factor(user_settings.ui_scale)
+
     # Apply thumbnail override before any view paints.
     from .ui.track_row import set_thumbnail_override
     set_thumbnail_override(user_settings.show_thumbnails or "theme")
+
+    # Register tide's bundled fonts so they're available regardless of
+    # what's installed system-wide, and push the user's font override (if
+    # any) into the theming manager BEFORE the first apply so the very
+    # first frame uses the right family.
+    theming.register_bundled_fonts()
+    theming.manager().set_user_font(user_settings.font_family_override or "")
 
     # Apply the theme as early as possible so the wizard renders with it.
     theming.manager().refresh()
@@ -170,7 +191,23 @@ def run(argv: list[str] | None = None) -> int:
     from .ui.adaptive import AdaptiveDriver
     adaptive = AdaptiveDriver(window.queue)
     adaptive.set_enabled(user_settings.adaptive_accent)
+    # Also drive bg_alt extraction if the user wants the central-area
+    # gradient. This is independent of the accent shift.
+    adaptive.set_background_enabled(user_settings.adaptive_background)
     window._adaptive = adaptive
+
+    # Apply user's central-area + corner preferences. CentralBg paints
+    # gradient + clips corners; corner radius is also pushed as a sticky
+    # theming override so widgets that use @radius (inputs, scrollbars)
+    # match.
+    from .ui.central_bg import corner_radius as _corner_radius
+    window.central_bg.set_enabled(user_settings.adaptive_background)
+    radius_px = _corner_radius(user_settings.corner_style)
+    window.central_bg.set_radius(radius_px)
+    if radius_px > 0:
+        theming.manager().set_user_override("radius", f"{radius_px}px")
+    # Nav-rail icons (per the user's nav_icon_set preference).
+    window.apply_nav_icons(user_settings.nav_icon_set or "off")
 
     # Once-a-day update check.
     from PySide6.QtCore import QMetaObject, Qt, Q_ARG
@@ -204,6 +241,16 @@ def run(argv: list[str] | None = None) -> int:
     except Exception:
         pass
     window.apply_initial_volume(user_settings.volume)
+    # Push persisted playback speed + pitch policy. set_pitch_correction
+    # MUST come first so the speed change applies under the right filter
+    # (toggling pitch-correction while speed != 1.0 can otherwise cause a
+    # brief pitch-glitch on the next audio chunk).
+    try:
+        player.set_pitch_correction(bool(user_settings.preserve_pitch))
+        player.set_speed(float(user_settings.playback_speed or 1.0))
+        window.speed_btn.set_speed(float(user_settings.playback_speed or 1.0), emit=False)
+    except Exception:
+        pass
 
     rc = app.exec()
     # Best-effort teardown so threads + native handles close cleanly.
@@ -214,6 +261,13 @@ def run(argv: list[str] | None = None) -> int:
     try:
         if window._tray is not None:
             window._tray.teardown()
+    except Exception:
+        pass
+    # Quiesce the prefetcher before the MainWindow (its parent) destructs —
+    # otherwise an in-flight resolve thread gets torn down mid-network call
+    # and segfaults.
+    try:
+        window._prefetch.shutdown()
     except Exception:
         pass
     discord.shutdown()

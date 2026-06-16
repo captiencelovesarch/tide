@@ -140,6 +140,27 @@ class Player(QObject):
     def set_volume(self, percent: int) -> None:
         self._mpv["volume"] = max(0, min(100, percent))
 
+    @Slot(float)
+    def set_speed(self, value: float) -> None:
+        """Change playback speed. With pitch-correction disabled (the
+        default for tide's slowed/sped aesthetic), this also shifts pitch.
+        Clamped to 0.25–4.0 — mpv accepts wider but anything outside this
+        is unintelligible."""
+        try:
+            self._mpv["speed"] = max(0.25, min(4.0, float(value)))
+        except Exception:
+            pass
+
+    @Slot(bool)
+    def set_pitch_correction(self, enabled: bool) -> None:
+        """Toggle mpv's scaletempo audio filter. When False (the default),
+        speed changes shift pitch — the 'slowed + reverb' / 'nightcore' look.
+        When True, pitch is preserved (utility mode for audiobooks etc.)."""
+        try:
+            self._mpv["audio-pitch-correction"] = bool(enabled)
+        except Exception:
+            pass
+
     def shutdown(self) -> None:
         try:
             self._mpv.terminate()

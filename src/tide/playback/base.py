@@ -42,6 +42,15 @@ class PlaybackBackend(QObject):
     @abstractmethod
     def set_volume(self, percent: int) -> None: ...
 
+    # Playback speed + pitch handling. Default no-ops so backends that don't
+    # support variable speed (future Librespot / MusicKit) get a graceful
+    # fallback — the UI's SpeedButton calls these unconditionally.
+    def set_speed(self, value: float) -> None:
+        return None
+
+    def set_pitch_correction(self, enabled: bool) -> None:
+        return None
+
     def shutdown(self) -> None:
         return None
 

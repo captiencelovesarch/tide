@@ -44,6 +44,12 @@ class MpvBackend(PlaybackBackend):
     def set_volume(self, percent: int) -> None:
         self._player.set_volume(percent)
 
+    def set_speed(self, value: float) -> None:
+        self._player.set_speed(value)
+
+    def set_pitch_correction(self, enabled: bool) -> None:
+        self._player.set_pitch_correction(enabled)
+
     def shutdown(self) -> None:
         self._player.shutdown()
 

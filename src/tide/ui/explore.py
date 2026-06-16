@@ -79,9 +79,10 @@ class ExploreView(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
 
+        from . import scale as _scale
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 8)
-        root.setSpacing(10)
+        root.setContentsMargins(*_scale.margins(16, 14, 16, 8))
+        root.setSpacing(_scale.px(10))
         root.addLayout(top)
         root.addWidget(scroll, stretch=1)
 

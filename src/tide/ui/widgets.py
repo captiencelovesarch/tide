@@ -7,8 +7,11 @@ tokens and repaint here.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QRect, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QByteArray, QRect, QSize, Qt, Signal
+from PySide6.QtGui import (
+    QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPen, QPixmap,
+)
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy, QWidget
 
 from .. import theming
@@ -31,6 +34,15 @@ class BracketButton(QPushButton):
         super().__init__(parent)
         self._label = label
         self._glyph = glyph
+        # Optional decorative icon glyph rendered before the label (e.g. a
+        # nav-rail icon set). Distinct from ``_glyph`` which REPLACES the
+        # label when the theme's control_style is "glyph".
+        self._icon: str | None = None
+        # Optional SVG body for an image icon. When set, takes precedence
+        # over ``_icon`` and renders via QPushButton's native QIcon slot
+        # using the active theme's fg color (substituted for the SVG's
+        # ``currentColor`` token).
+        self._svg_text: str | None = None
         self.setFlat(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
@@ -45,8 +57,73 @@ class BracketButton(QPushButton):
         self._glyph = glyph
         self._update_text()
 
+    def setIcon(self, icon) -> None:  # type: ignore[override]
+        """Polymorphic setter. Strings (or None) set the unicode glyph
+        prefix; a QIcon takes the native Qt path. Most callers should use
+        ``setIconGlyph`` / ``setSvgIcon`` directly — this exists so
+        existing code calling ``btn.setIcon("X")`` keeps compiling."""
+        if isinstance(icon, str) or icon is None:
+            self.setIconGlyph(icon)
+        else:
+            super().setIcon(icon)
+
+    def setIconGlyph(self, glyph: str | None) -> None:
+        """Set a small unicode glyph rendered before the label. Pass
+        ``None`` to remove. Clears any active SVG icon — the two modes
+        don't coexist (one or the other, not both)."""
+        self._icon = glyph
+        if glyph is not None:
+            self._svg_text = None
+            super().setIcon(QIcon())
+        self._update_text()
+
+    def setSvgIcon(self, svg_text: str | None) -> None:
+        """Set an SVG-rendered image icon (recolored to match the active
+        theme's fg). Pass ``None`` to remove. Clears any glyph prefix —
+        the modes are mutually exclusive."""
+        self._svg_text = svg_text
+        if svg_text is not None:
+            self._icon = None
+            self._refresh_svg_icon()
+        else:
+            super().setIcon(QIcon())
+        self._update_text()
+
+    def _refresh_svg_icon(self) -> None:
+        if not self._svg_text:
+            return
+        # Recolor: replace SVG's ``currentColor`` token with the active
+        # theme's fg so the icon sits visually with the label text.
+        fg = "#e6e6e6"
+        if getattr(self, "_theme", None) is not None:
+            fg = self._theme.token("fg", "#e6e6e6")
+        svg = self._svg_text.replace("currentColor", fg)
+        try:
+            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        except Exception:
+            return
+        # Pull scale.px so the icon grows with ui_scale alongside text.
+        try:
+            from . import scale as _scale
+            target = _scale.px(16)
+        except Exception:
+            target = 16
+        pix = QPixmap(target, target)
+        pix.fill(Qt.transparent)
+        painter = QPainter(pix)
+        try:
+            renderer.render(painter)
+        finally:
+            painter.end()
+        super().setIcon(QIcon(pix))
+        self.setIconSize(QSize(target, target))
+
     def _apply_theme(self, theme) -> None:
         self._theme = theme
+        # Re-render SVG icon (if any) against the new fg color so it tracks
+        # theme + adaptive accent changes seamlessly.
+        if self._svg_text:
+            self._refresh_svg_icon()
         self._update_text()
         # All styling lives in QSS for BracketButton, set as object name so
         # the stylesheet can target it precisely.
@@ -76,11 +153,17 @@ class BracketButton(QPushButton):
         if getattr(self, "_theme", None) is not None:
             style = str(self._theme.t("layout", "control_style", "bracket"))
         if style == "glyph" and self._glyph:
-            self.setText(self._glyph)
+            base = self._glyph
         elif style == "icon":
-            self.setText(self._label)  # icons come later
+            base = self._label  # full icon-font mode lands when SVG icons ship
         else:
-            self.setText(f"[{self._label}]")
+            base = f"[{self._label}]"
+        # Decorative icon prefix (nav icon set). Prepended to whatever the
+        # style chose so it works in bracket / glyph / icon modes alike.
+        if self._icon:
+            self.setText(f"{self._icon} {base}")
+        else:
+            self.setText(base)
 
 
 class MonoProgress(QWidget):
@@ -104,12 +187,17 @@ class MonoProgress(QWidget):
         self._duration = 0.0
         self._enabled = False
         self._theme = theming.manager().current()
-        self.setFixedHeight(22)
+        from . import scale as _scale
+        self.setFixedHeight(_scale.px(22))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         theming.manager().theme_changed.connect(self._on_theme)
 
     def _on_theme(self, theme) -> None:
         self._theme = theme
+        # Theme re-emit fires after a scale change too; re-apply scaled
+        # height so this progress bar tracks the new ui_scale live.
+        from . import scale as _scale
+        self.setFixedHeight(_scale.px(22))
         self.update()
 
     def setDuration(self, seconds: float) -> None:
@@ -209,14 +297,18 @@ class MonoVolume(QWidget):
         self._volume = 80
         self._theme = theming.manager().current()
         theming.manager().theme_changed.connect(self._on_theme)
-        self.setFixedHeight(22)
-        self.setMinimumWidth(150)
+        from . import scale as _scale
+        self.setFixedHeight(_scale.px(22))
+        self.setMinimumWidth(_scale.px(150))
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("scroll to adjust volume")
 
     def _on_theme(self, theme) -> None:
         self._theme = theme
+        from . import scale as _scale
+        self.setFixedHeight(_scale.px(22))
+        self.setMinimumWidth(_scale.px(150))
         self.update()
 
     def setVolume(self, value: int, *, emit: bool = True) -> None:
@@ -308,8 +400,10 @@ class AlbumArt(QLabel):
 
     def __init__(self, size: int = 96, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._size = size
-        self.setFixedSize(size, size)
+        self._base_size = size
+        from . import scale as _scale
+        self._size = _scale.px(size)
+        self.setFixedSize(self._size, self._size)
         self.setAlignment(Qt.AlignCenter)
         self._pixmap_raw: QPixmap | None = None
         self._theme = theming.manager().current()
@@ -322,6 +416,13 @@ class AlbumArt(QLabel):
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
         bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
         radius = int(theme.t("layout", "radius_px", 0)) if theme else 0
+        # Re-derive scaled size from the base so a ui_scale change picked
+        # up via theme_changed resizes the tile.
+        from . import scale as _scale
+        new_size = _scale.px(self._base_size)
+        if new_size != self._size:
+            self._size = new_size
+            self.setFixedSize(self._size, self._size)
         self.setStyleSheet(
             f"QLabel {{ background: {bg}; border: 1px solid {fg}; "
             f"border-radius: {radius}px; color: {fg}; }}"
@@ -332,12 +433,34 @@ class AlbumArt(QLabel):
             self._render(self._pixmap_raw)
 
     def setImage(self, image: QImage | None) -> None:
+        from . import motion as motion_module
+
         if image is None or image.isNull():
             self._pixmap_raw = None
             self._render_empty()
             return
-        self._pixmap_raw = QPixmap.fromImage(image)
-        self._render(self._pixmap_raw)
+        new_raw = QPixmap.fromImage(image)
+        new_scaled = new_raw.scaled(
+            self._size, self._size,
+            Qt.KeepAspectRatioByExpanding,
+            Qt.FastTransformation,
+        )
+        # Capture what's currently on screen so the crossfade has a "from".
+        # Reading from QLabel.pixmap() lets us cross from whatever the user
+        # last saw, including a mid-crossfade intermediate frame if the
+        # tracks change rapidly — the helper's prior-cancellation makes this
+        # safe.
+        old_display = self.pixmap()
+        self._pixmap_raw = new_raw
+        # The helper snaps when old_display is null/empty (first-ever load
+        # or coming from the "[no art]" state), and respects motion=OFF
+        # globally. No special-casing here.
+        motion_module.crossfade_pixmap(
+            setter=self.setPixmap,
+            old_pixmap=old_display,
+            new_pixmap=new_scaled,
+            owner=self,
+        )
 
     def _render(self, pix: QPixmap) -> None:
         scaled = pix.scaled(
@@ -363,17 +486,94 @@ class NowPlayingLabel(QWidget):
         self._status = ""
         self._theme = theming.manager().current()
         theming.manager().theme_changed.connect(self._on_theme)
+        from . import scale as _scale
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setMinimumHeight(40)
+        self.setMinimumHeight(_scale.px(40))
 
     def _on_theme(self, theme) -> None:
         self._theme = theme
+        from . import scale as _scale
+        self.setMinimumHeight(_scale.px(40))
         self.update()
 
     def setTrack(self, artist: str, title: str, album: str = "") -> None:
         self._artist = artist
         self._title = title
         self._album = album
+        self.update()
+
+    def setTrackAnimated(self, artist: str, title: str, album: str = "") -> None:
+        """Animated variant of ``setTrack``. Decodes the title (and, at
+        FULL intensity, the artist + album rows) via a left-to-right scramble.
+
+        Intensity rules:
+          * OFF — falls through to ``setTrack`` (no animation).
+          * LITE — title decodes only; artist + album snap to new values.
+          * FULL — all three decode concurrently with staggered durations so
+            the title resolves first, then artist, then album (cascade feel
+            without QTimer-based offsets — each scramble is independent).
+
+        Skip-condition: when the new tuple matches the current display,
+        falls through to ``setTrack`` (replay-same-track edge — animating
+        text that's already on screen would look broken).
+        """
+        from . import motion as motion_module
+
+        if (
+            motion_module.intensity() == motion_module.Intensity.OFF
+            or (artist == self._artist and title == self._title and album == self._album)
+        ):
+            self.setTrack(artist, title, album)
+            return
+
+        # Commit the target values up front. The scramble immediately
+        # overwrites ``_title`` (and ``_artist`` / ``_album`` in FULL) with
+        # its frame-0 paint, so the new real values never flash before the
+        # decode begins — but for LITE mode the artist/album rows do need
+        # to be set so the paint reads them correctly.
+        self._artist = artist
+        self._title = title
+        self._album = album
+
+        # Title always decodes (LITE + FULL).
+        motion_module.scramble_text(
+            lambda s: self._scramble_frame("title", s),
+            title,
+            dur=motion_module.DUR_MED,
+            owner=self,
+            kind="scramble/title",
+        )
+
+        if motion_module.intensity() == motion_module.Intensity.FULL:
+            # Longer durations produce a slower decode → arrives later →
+            # cascade feel. No QTimer offsets needed; the scramble's own
+            # linear-stagger schedules each char's reveal across its dur.
+            motion_module.scramble_text(
+                lambda s: self._scramble_frame("artist", s),
+                artist,
+                dur=motion_module.DUR_MED + 150,
+                owner=self,
+                kind="scramble/artist",
+            )
+            motion_module.scramble_text(
+                lambda s: self._scramble_frame("album", s),
+                album,
+                dur=motion_module.DUR_MED + 300,
+                owner=self,
+                kind="scramble/album",
+            )
+
+    def _scramble_frame(self, field: str, frame: str) -> None:
+        """Single per-frame setter for the scramble cascade. Writes into the
+        right state slot and triggers a repaint. Inlined as one method so
+        the closure captured by ``scramble_text`` is just ``(field, frame)``
+        and we avoid creating a lambda per field-call."""
+        if field == "title":
+            self._title = frame
+        elif field == "artist":
+            self._artist = frame
+        elif field == "album":
+            self._album = frame
         self.update()
 
     def setStatus(self, text: str) -> None:

@@ -49,14 +49,18 @@ def show_thumbnails_for(theme) -> bool:
 
 
 class TrackRowDelegate(QStyledItemDelegate):
-    THUMB_SIZE = 40
-    THUMB_MARGIN = 10
-    ROW_HEIGHT = 56
-    ROW_HEIGHT_TEXT_ONLY = 28
+    # Base sizes at UI scale = 1.0. Per-instance scaled values (THUMB_SIZE
+    # etc.) are populated in __init__ and refreshed in _on_theme_changed,
+    # which is also fired right after a ui_scale change.
+    BASE_THUMB_SIZE = 40
+    BASE_THUMB_MARGIN = 10
+    BASE_ROW_HEIGHT = 56
+    BASE_ROW_HEIGHT_TEXT_ONLY = 28
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._theme = theming.manager().current()
+        self._refresh_scaled_sizes()
         theming.manager().theme_changed.connect(self._on_theme_changed)
         # Listen for newly-loaded art. Coalesce a burst of loads into ONE
         # viewport repaint via a single-shot timer — otherwise loading 50
@@ -76,12 +80,20 @@ class TrackRowDelegate(QStyledItemDelegate):
 
     def _on_theme_changed(self, theme) -> None:
         self._theme = theme
+        self._refresh_scaled_sizes()
         for v in list(self._views):
             try:
                 v.viewport().update()
                 v.scheduleDelayedItemsLayout()
             except Exception:
                 pass
+
+    def _refresh_scaled_sizes(self) -> None:
+        from . import scale as _scale
+        self.THUMB_SIZE = _scale.px(self.BASE_THUMB_SIZE)
+        self.THUMB_MARGIN = _scale.px(self.BASE_THUMB_MARGIN)
+        self.ROW_HEIGHT = _scale.px(self.BASE_ROW_HEIGHT)
+        self.ROW_HEIGHT_TEXT_ONLY = _scale.px(self.BASE_ROW_HEIGHT_TEXT_ONLY)
 
     def _on_art_loaded(self, _url: str, _img: QImage) -> None:
         # Coalesce — let the timer fire once for a burst.
