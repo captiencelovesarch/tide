@@ -11,11 +11,13 @@ the window listens to so Search / Library / Explore retarget.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -156,6 +158,69 @@ class _SourceRow(QFrame):
             self.dot.set_state("warn")
 
 
+class _LocalGearDialog(QDialog):
+    """Sub-dialog launched by the [⚙] gear on the Local source row.
+
+    Lets the user pick a different music directory and trigger a manual
+    rescan. Closes immediately on Done; rescans run in the background.
+    """
+
+    dir_changed = Signal(str)
+    rescan_requested = Signal()
+
+    def __init__(self, local_source, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("local files")
+        self._local = local_source
+
+        heading = QLabel(styled_case("local files"))
+        heading.setObjectName("sectionHeading")
+
+        self.dir_label = QLabel(local_source.music_dir)
+        self.dir_label.setObjectName("sourceStatus")
+        self.dir_label.setWordWrap(True)
+
+        pick_btn = QPushButton(styled_case("[change directory]"))
+        pick_btn.clicked.connect(self._pick_dir)
+
+        self.count_label = QLabel(styled_case(f"{local_source.track_count():,} tracks indexed"))
+        self.count_label.setObjectName("sourceStatus")
+
+        rescan_btn = QPushButton(styled_case("[rescan now]"))
+        rescan_btn.clicked.connect(self._on_rescan)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+
+        col = QVBoxLayout()
+        col.setContentsMargins(20, 18, 20, 18)
+        col.setSpacing(10)
+        col.addWidget(heading)
+        col.addWidget(QLabel(styled_case("directory")))
+        col.addWidget(self.dir_label)
+        col.addWidget(pick_btn)
+        col.addSpacing(6)
+        col.addWidget(self.count_label)
+        col.addWidget(rescan_btn)
+        col.addStretch(1)
+        col.addWidget(buttons)
+        self.setLayout(col)
+        self.resize(420, 280)
+
+    def _pick_dir(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self, "pick music directory", self._local.music_dir
+        )
+        if not chosen:
+            return
+        self.dir_label.setText(chosen)
+        self.dir_changed.emit(chosen)
+
+    def _on_rescan(self) -> None:
+        self.count_label.setText(styled_case("indexing…"))
+        self.rescan_requested.emit()
+
+
 class _PlaceholderRow(QFrame):
     """Greyed-out row for sources that ship later in v1.2."""
 
@@ -286,24 +351,54 @@ class SourcePanel(QWidget):
         local = reg.get("local")
         if local is None:
             return
-        chosen = QFileDialog.getExistingDirectory(
-            self, "pick music directory",
-            self._settings.local_music_dir or local.music_dir,
-        )
-        if not chosen:
+        dlg = _LocalGearDialog(local, self)
+        dlg.dir_changed.connect(self._apply_new_local_dir)
+        dlg.rescan_requested.connect(self._rescan_local)
+        dlg.exec()
+
+    def _apply_new_local_dir(self, new_dir: str) -> None:
+        reg = source_registry()
+        local = reg.get("local")
+        if local is None:
             return
-        self._settings.local_music_dir = chosen
-        local.set_music_dir(chosen)
+        self._settings.local_music_dir = new_dir
+        local.set_music_dir(new_dir)
         self.settings_changed.emit()
-        self.local_dir_changed.emit(chosen)
+        self.local_dir_changed.emit(new_dir)
         row = self._rows.get("local")
         if row is not None:
-            # Status text will refresh after the rescan completes; show
-            # an interim hint immediately.
-            row.status_label.setText(styled_case(f"{chosen} · indexing…"))
+            row.status_label.setText(styled_case(f"{new_dir} · indexing…"))
+
+    def _rescan_local(self) -> None:
+        reg = source_registry()
+        local = reg.get("local")
+        if local is None:
+            return
+
+        panel = self
+        row = self._rows.get("local")
+        if row is not None:
+            row.status_label.setText(styled_case(f"{local.music_dir} · indexing…"))
+
+        class _Job(QRunnable):
+            def run(self_inner):
+                try:
+                    local.rescan()
+                except Exception:
+                    pass
+
+        QThreadPool.globalInstance().start(_Job())
+        QTimer.singleShot(1500, panel.refresh_statuses)
+        QTimer.singleShot(5000, panel.refresh_statuses)
 
     def refresh_statuses(self) -> None:
         for row in self._rows.values():
+            row.refresh_status()
+
+    def update_local_status_from_index(self) -> None:
+        """Force a status refresh — useful after a rescan completes."""
+        row = self._rows.get("local")
+        if row is not None:
             row.refresh_status()
 
     def bind_settings(self, settings: Settings) -> None:

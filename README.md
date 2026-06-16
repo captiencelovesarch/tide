@@ -4,9 +4,9 @@
 
 # tide
 
-**a brutalist youtube music client**
+**a brutalist multi-source music client**
 
-native Qt6 · 11 themes · 9 visualizers · MPRIS2 · adaptive accent · zero config-file editing
+native Qt6 · 5 sources · 11 themes · 9 visualizers · MPRIS2 · adaptive accent · zero config-file editing
 
 [![release](https://img.shields.io/github/v/release/captiencelovesarch/tide?style=flat-square&color=d4b95e&labelColor=0b0b0b)](https://github.com/captiencelovesarch/tide/releases/latest)
 [![license](https://img.shields.io/badge/license-GPL--3.0-d4b95e?style=flat-square&labelColor=0b0b0b)](LICENSE)
@@ -35,9 +35,25 @@ then launch `tide`, click **`[import]`**, you're listening. that's the whole set
 
 ## what it is
 
-tide is a **standalone desktop client for youtube music**. native Qt6 — not an Electron skin. it sits on top of `mpv`, talks to YouTube's catalog via `ytmusicapi`, resolves streams via `yt-dlp`, and renders everything in IBM Plex with monochrome + an accent color you can let the album cover dictate.
+tide is a **standalone desktop client for music — from anywhere you can stream it**. native Qt6 — not an Electron skin. it sits on top of `mpv`, talks to YouTube Music via `ytmusicapi`, resolves streams via `yt-dlp`, reads your local files via `mutagen`, and renders everything in IBM Plex with monochrome + an accent color you can let the album cover dictate.
 
 it was designed for one thing: to be **the music app that has a sense of itself**. no shipped defaults are middle-of-the-road. brutalist-mono ships as the default; if you don't like brutalism, swap themes from a dropdown — same app, completely different personality.
+
+## sources (v1.2)
+
+press `Ctrl+8` for the `[source]` panel — every source is one toggle away.
+
+| | tag | search | library | requires |
+|---|---|---|---|---|
+| **youtube music** | `[YT]` | ✓ | ✓ | cookie import |
+| **soundcloud** | `[SC]` | ✓ | — | nothing |
+| **bandcamp** | `[BC]` | ✓ | — | nothing |
+| **mixcloud** | `[MC]` | ✓ | — | nothing |
+| **local files** | `[LO]` | ✓ | ✓ (by album) | a music directory |
+| spotify | `[SP]` | v1.2.1 | v1.2.1 | premium |
+| apple music | `[AM]` | v1.2.2 | v1.2.2 | apple id |
+
+queue is source-agnostic. mix a YT Music search, a Bandcamp deep cut, and a local FLAC in the same queue — tide dispatches each to the right backend. **federated search** mode (toggle in the source panel) runs every enabled source in parallel and tags each result row so you can see where the hit came from.
 
 ## features
 
@@ -169,6 +185,7 @@ probably possible, untested, doesn't make sense without MPRIS / kwallet / parec.
 | `Ctrl+5` | history |
 | `Ctrl+6` | explore |
 | `Ctrl+7` | visualizer |
+| `Ctrl+8` | source panel |
 | `Ctrl+,` | settings |
 | `Ctrl+F` / `Ctrl+L` | focus search bar |
 | `Space` | play / pause |
@@ -189,7 +206,8 @@ right-click any track row for: play now / play next / add to queue / start radio
 | `~/.config/tide/browser.json` | imported YT cookies (chmod 0600) |
 | `~/.config/tide/themes/` | drop your own themes here |
 | `~/.config/tide/layouts/` | drop your own layouts here |
-| `~/.cache/tide/streams/` | stream URL cache (per-source, capped) |
+| `~/.cache/tide/streams/<source>.json` | stream URL cache, one file per source (Bandcamp never expires; others TTL'd) |
+| `~/.cache/tide/local_index.sqlite` | local-files tag index (FTS5) |
 | `~/.cache/tide/art/` | thumbnail cache (auto-pruned to 1000 newest) |
 | `~/.cache/tide/lyrics/` | LRClib lyric cache |
 | `~/.cache/tide/session.json` | resume-on-launch state |
@@ -204,17 +222,19 @@ every settable knob is reachable from the **Settings** dialog. no config-file ed
 python 3.12+
 PySide6 (Qt6, LGPL)
 mpv + python-mpv
-ytmusicapi + yt-dlp
-python-cryptography      (chromium cookie decryption)
-python-numpy             (visualizer FFT)
-python-sounddevice       (audio capture)
-parec                    (PipeWire monitor capture)
-ttf-ibm-plex             (bundled font)
+ytmusicapi + yt-dlp        (YT Music + SoundCloud + Bandcamp + Mixcloud)
+python-mutagen             (local files tag reader)
+python-cryptography        (chromium cookie decryption)
+python-numpy               (visualizer FFT)
+python-sounddevice         (audio capture)
+parec                      (PipeWire monitor capture)
+ttf-ibm-plex               (bundled font)
 
 optional:
-python-pypresence        (Discord rich presence)
-python-secretstorage     (GNOME/libsecret cookie key)
-kwallet                  (KDE wallet cookie key)
+python-pypresence          (Discord rich presence)
+python-secretstorage       (GNOME/libsecret cookie key)
+kwallet                    (KDE wallet cookie key)
+python-watchdog            (live re-index of local files)
 ```
 
 all deps live in Arch's `extra` repo. zero AUR-only python packages. the PKGBUILD is the entire dependency manifest.
@@ -223,7 +243,7 @@ all deps live in Arch's `extra` repo. zero AUR-only python packages. the PKGBUIL
 
 - [x] **v1.0** — initial release (search, library, playlists, queue, lyrics, MPRIS, 10 themes)
 - [x] **v1.1** — QOL kitchen sink (visualizer, scrobbling, layouts, adaptive accent, tray, history, sleep timer, mini-mode, 11 themes)
-- [ ] **v1.2.0** — multi-source: + SoundCloud, Bandcamp, Mixcloud, Local files (in planning)
+- [x] **v1.2.0** — multi-source: + SoundCloud + Bandcamp + Mixcloud + Local files, source panel, federated search
 - [ ] **v1.2.1** — Spotify (Premium via librespot)
 - [ ] **v1.2.2** — Apple Music (MusicKit JS via embedded webview)
 
