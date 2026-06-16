@@ -1,22 +1,23 @@
 [meta]
-name = "catppuccin mocha"
-slug = "catppuccin"
-author = "tide"
-version = 1
-dark = true
+name     = "catppuccin mocha"
+slug     = "catppuccin"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "modern"
 
 [tokens]
-bg          = "#1e1e2e"
-bg_alt      = "#313244"
-fg          = "#cdd6f4"
-dim         = "#7f849c"
-accent      = "#f5c2e7"
-sel_bg      = "#f5c2e7"
-sel_fg      = "#1e1e2e"
-hover_bg    = "#313244"
-hover_fg    = "#cdd6f4"
-border_col  = "#45475a"
-border_dim  = "#313244"
+bg        = "#1e1e2e"
+bg_alt    = "#313244"
+fg        = "#cdd6f4"
+dim       = "#7f849c"
+accent    = "#f5c2e7"
+sel_bg    = "#f5c2e7"
+sel_fg    = "#1e1e2e"
+hover_bg  = "#313244"
+hover_fg  = "#cdd6f4"
+border_col= "#45475a"
+border_dim= "#313244"
 
 [typography]
 family  = "IBM Plex Sans"
@@ -26,10 +27,17 @@ case    = "normal"
 mono    = false
 
 [layout]
-radius_px       = 10
-border_px       = 1
-spacing_px      = 12
-ambient_art     = false
-control_style   = "glyph"
-list_marker     = "  "
-visualizer      = "bars-filled"
+radius_px    = 10
+border_px    = 1
+spacing_px   = 12
+ambient_art  = false
+control_style= "glyph"
+list_marker  = "  "
+visualizer   = "bars-filled"
+
+[slots]
+progress = "bar"
+volume   = "knob"
+album_art= "square"
+controls = "large"
+now_label= "inline"

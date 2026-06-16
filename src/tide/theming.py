@@ -41,6 +41,13 @@ class Theme:
     tokens: dict[str, str] = field(default_factory=dict)
     typography: dict[str, object] = field(default_factory=dict)
     layout: dict[str, object] = field(default_factory=dict)
+    # [slots] table — each theme declares preferred widget variants per slot
+    # so the layout system can default to them and so theme switches across
+    # aesthetics (brutalist ↔ modern) can clear stale user overrides.
+    slots: dict[str, str] = field(default_factory=dict)
+    # "brutalist" or "modern" — drives the rule above plus a couple of
+    # widget choices (BracketButton's bracket-vs-icon render, etc).
+    aesthetic: str = "modern"
     qss: str = ""
     dark: bool = True
 
@@ -48,7 +55,8 @@ class Theme:
         return self.tokens.get(name, default)
 
     def t(self, kind: str, key: str, default=None):
-        bag = {"layout": self.layout, "typography": self.typography}[kind]
+        bag = {"layout": self.layout, "typography": self.typography,
+               "slots": self.slots}[kind]
         return bag.get(key, default)
 
 
@@ -69,6 +77,13 @@ def _read_theme(path: Path) -> Theme | None:
     meta = data.get("meta", {})
     slug = meta.get("slug") or path.name
     qss_text = qss_path.read_text(encoding="utf-8") if qss_path.is_file() else ""
+    # Auto-classify aesthetic when [meta] aesthetic is absent: mono font →
+    # brutalist, anything else → modern. Keeps backwards compatibility with
+    # third-party themes that pre-date this field.
+    aesthetic = str(meta.get("aesthetic", "")).strip().lower()
+    if aesthetic not in ("brutalist", "modern"):
+        typography = data.get("typography", {}) or {}
+        aesthetic = "brutalist" if bool(typography.get("mono", False)) else "modern"
     return Theme(
         slug=slug,
         name=meta.get("name", slug),
@@ -76,6 +91,8 @@ def _read_theme(path: Path) -> Theme | None:
         tokens=dict(data.get("tokens", {})),
         typography=dict(data.get("typography", {})),
         layout=dict(data.get("layout", {})),
+        slots=dict(data.get("slots", {})),
+        aesthetic=aesthetic,
         qss=qss_text,
         dark=bool(meta.get("dark", True)),
     )
@@ -244,6 +261,7 @@ class ThemeManager(QObject):
         return Theme(
             slug=theme.slug, name=theme.name, path=theme.path,
             tokens=merged, typography=theme.typography, layout=theme.layout,
+            slots=theme.slots, aesthetic=theme.aesthetic,
             qss=theme.qss, dark=theme.dark,
         )
 

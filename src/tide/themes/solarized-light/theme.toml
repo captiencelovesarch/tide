@@ -1,22 +1,23 @@
 [meta]
-name = "solarized light"
-slug = "solarized-light"
-author = "tide"
-version = 1
-dark = false
+name     = "solarized light"
+slug     = "solarized-light"
+author   = "tide"
+version  = 1
+dark     = false
+aesthetic= "brutalist"
 
 [tokens]
-bg          = "#fdf6e3"
-bg_alt      = "#eee8d5"
-fg          = "#586e75"
-dim         = "#93a1a1"
-accent      = "#268bd2"
-sel_bg      = "#268bd2"
-sel_fg      = "#fdf6e3"
-hover_bg    = "#eee8d5"
-hover_fg    = "#073642"
-border_col  = "#93a1a1"
-border_dim  = "#d8d3bf"
+bg        = "#fdf6e3"
+bg_alt    = "#eee8d5"
+fg        = "#586e75"
+dim       = "#93a1a1"
+accent    = "#268bd2"
+sel_bg    = "#268bd2"
+sel_fg    = "#fdf6e3"
+hover_bg  = "#eee8d5"
+hover_fg  = "#073642"
+border_col= "#93a1a1"
+border_dim= "#d8d3bf"
 
 [typography]
 family  = "IBM Plex Mono"
@@ -26,10 +27,17 @@ case    = "normal"
 mono    = true
 
 [layout]
-radius_px       = 3
-border_px       = 1
-spacing_px      = 8
-ambient_art     = false
-control_style   = "icon"
-list_marker     = "  "
-visualizer      = "bars-mono"
+radius_px    = 0
+border_px    = 1
+spacing_px   = 8
+ambient_art  = false
+control_style= "bracket"
+list_marker  = "  "
+visualizer   = "bars-mono"
+
+[slots]
+progress = "blocks"
+volume   = "blocks"
+album_art= "square"
+controls = "bracket"
+now_label= "stacked"

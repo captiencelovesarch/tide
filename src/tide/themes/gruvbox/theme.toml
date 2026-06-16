@@ -1,22 +1,23 @@
 [meta]
-name = "gruvbox"
-slug = "gruvbox"
-author = "tide"
-version = 1
-dark = true
+name     = "gruvbox"
+slug     = "gruvbox"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "brutalist"
 
 [tokens]
-bg          = "#282828"
-bg_alt      = "#3c3836"
-fg          = "#ebdbb2"
-dim         = "#928374"
-accent      = "#d79921"
-sel_bg      = "#d79921"
-sel_fg      = "#282828"
-hover_bg    = "#3c3836"
-hover_fg    = "#ebdbb2"
-border_col  = "#504945"
-border_dim  = "#3c3836"
+bg        = "#282828"
+bg_alt    = "#3c3836"
+fg        = "#ebdbb2"
+dim       = "#928374"
+accent    = "#d79921"
+sel_bg    = "#d79921"
+sel_fg    = "#282828"
+hover_bg  = "#3c3836"
+hover_fg  = "#ebdbb2"
+border_col= "#504945"
+border_dim= "#3c3836"
 
 [typography]
 family  = "IBM Plex Mono"
@@ -26,10 +27,17 @@ case    = "lower"
 mono    = true
 
 [layout]
-radius_px       = 4
-border_px       = 1
-spacing_px      = 8
-ambient_art     = false
-control_style   = "bracket"
-list_marker     = "> "
-visualizer      = "bars-mono"
+radius_px    = 0
+border_px    = 1
+spacing_px   = 8
+ambient_art  = false
+control_style= "bracket"
+list_marker  = "> "
+visualizer   = "bars-mono"
+
+[slots]
+progress = "blocks"
+volume   = "blocks"
+album_art= "square"
+controls = "bracket"
+now_label= "stacked"

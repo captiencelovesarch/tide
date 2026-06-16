@@ -1,22 +1,23 @@
 [meta]
-name = "terminal green"
-slug = "terminal-green"
-author = "tide"
-version = 1
-dark = true
+name     = "terminal green"
+slug     = "terminal-green"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "brutalist"
 
 [tokens]
-bg          = "#000000"
-bg_alt      = "#050505"
-fg          = "#00ff66"
-dim         = "#006633"
-accent      = "#00ff66"
-sel_bg      = "#00ff66"
-sel_fg      = "#000000"
-hover_bg    = "#0a0a0a"
-hover_fg    = "#00ff66"
-border_col  = "#00ff66"
-border_dim  = "#004d26"
+bg        = "#000000"
+bg_alt    = "#050505"
+fg        = "#00ff66"
+dim       = "#006633"
+accent    = "#00ff66"
+sel_bg    = "#00ff66"
+sel_fg    = "#000000"
+hover_bg  = "#0a0a0a"
+hover_fg  = "#00ff66"
+border_col= "#00ff66"
+border_dim= "#004d26"
 
 [typography]
 family  = "IBM Plex Mono"
@@ -26,11 +27,18 @@ case    = "upper"
 mono    = true
 
 [layout]
-radius_px       = 0
-border_px       = 1
-spacing_px      = 8
-ambient_art     = false
-show_thumbnails = false
-control_style   = "bracket"
-list_marker     = "> "
-visualizer      = "bars-mono"
+radius_px     = 0
+border_px     = 1
+spacing_px    = 8
+ambient_art   = false
+show_thumbnails= false
+control_style = "bracket"
+list_marker   = "> "
+visualizer    = "bars-mono"
+
+[slots]
+progress = "blocks"
+volume   = "blocks"
+album_art= "square"
+controls = "bracket"
+now_label= "stacked"

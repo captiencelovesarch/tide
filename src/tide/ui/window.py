@@ -1446,9 +1446,52 @@ class MainWindow(QMainWindow):
     # ---------- theme + shortcuts ----------
 
     def _on_theme_changed(self, theme) -> None:
+        prior = self._theme
         self._theme = theme
         self.heading.setText(self._line_heading("results"))
         self.queue_heading.setText(self._line_heading(f"queue · {self.queue.rowCount()}"))
+        # If the theme's aesthetic flipped (brutalist ↔ modern), stale slot
+        # overrides from the previous aesthetic should reset to the new
+        # theme's [slots] prefs so e.g. a "blocks" progress bar from
+        # brutalist-mono doesn't leak into ambient. Only run on actual slug
+        # changes (theming.override_tokens re-emits theme_changed too).
+        try:
+            new_slug = getattr(theme, "slug", None)
+            old_slug = getattr(prior, "slug", None)
+            if new_slug and new_slug != old_slug:
+                self._maybe_apply_theme_slot_prefs(theme, prior)
+        except Exception:
+            pass
+
+    def _maybe_apply_theme_slot_prefs(self, new_theme, prior_theme) -> None:
+        new_aes = getattr(new_theme, "aesthetic", None)
+        old_aes = getattr(prior_theme, "aesthetic", None) if prior_theme is not None else None
+        slot_prefs = getattr(new_theme, "slots", None) or {}
+        if not slot_prefs:
+            return
+        settings = getattr(self, "_settings", None)
+        # On aesthetic FLIP (or first-ever apply), reset user overrides to
+        # the new theme's prefs entirely — anything the user picked on the
+        # prior aesthetic almost certainly doesn't translate.
+        # On same-aesthetic theme swap, keep user overrides (their picks
+        # still fit the new theme's vibe).
+        if old_aes is not None and new_aes == old_aes:
+            return
+        if settings is not None:
+            settings.layout_overrides = dict(slot_prefs)
+            try:
+                from .. import settings as settings_module
+                settings_module.save(settings)
+            except Exception:
+                pass
+        # Push to the layout manager + re-build the strip so new variants
+        # take effect immediately.
+        try:
+            effective = layout_module.manager().update_overrides(dict(slot_prefs))
+            if effective is not None and hasattr(self, "apply_layout"):
+                self.apply_layout(effective)
+        except Exception:
+            pass
 
     def _list_marker(self) -> str:
         return str(self._theme.t("layout", "list_marker", "> ")) if self._theme else "> "

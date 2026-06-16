@@ -1,22 +1,23 @@
 [meta]
-name = "paper"
-slug = "paper"
-author = "tide"
-version = 1
-dark = false
+name     = "paper"
+slug     = "paper"
+author   = "tide"
+version  = 1
+dark     = false
+aesthetic= "modern"
 
 [tokens]
-bg          = "#f4efe6"
-bg_alt      = "#ece6da"
-fg          = "#2a2622"
-dim         = "#8a8278"
-accent      = "#b04a3a"
-sel_bg      = "#2a2622"
-sel_fg      = "#f4efe6"
-hover_bg    = "#ece6da"
-hover_fg    = "#2a2622"
-border_col  = "#8a8278"
-border_dim  = "#d6cfc0"
+bg        = "#f4efe6"
+bg_alt    = "#ece6da"
+fg        = "#2a2622"
+dim       = "#8a8278"
+accent    = "#b04a3a"
+sel_bg    = "#2a2622"
+sel_fg    = "#f4efe6"
+hover_bg  = "#ece6da"
+hover_fg  = "#2a2622"
+border_col= "#8a8278"
+border_dim= "#d6cfc0"
 
 [typography]
 family  = "IBM Plex Sans"
@@ -26,10 +27,17 @@ case    = "normal"
 mono    = false
 
 [layout]
-radius_px       = 2
-border_px       = 1
-spacing_px      = 10
-ambient_art     = false
-control_style   = "icon"
-list_marker     = "  "
-visualizer      = "bars-filled"
+radius_px    = 10
+border_px    = 1
+spacing_px   = 10
+ambient_art  = false
+control_style= "icon"
+list_marker  = "  "
+visualizer   = "bars-filled"
+
+[slots]
+progress = "bar"
+volume   = "knob"
+album_art= "square"
+controls = "large"
+now_label= "inline"

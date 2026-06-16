@@ -1,22 +1,23 @@
 [meta]
-name = "adaptive"
-slug = "adaptive"
-author = "tide"
-version = 1
-dark = true
+name     = "adaptive"
+slug     = "adaptive"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "modern"
 
 [tokens]
-bg          = "#0a0a0a"
-bg_alt      = "#1a1a1a"
-fg          = "#f0f0f0"
-dim         = "#555"
-accent      = "#9b87f5"
-sel_bg      = "#f0f0f0"
-sel_fg      = "#0a0a0a"
-hover_bg    = "#1a1a1a"
-hover_fg    = "#f0f0f0"
-border_col  = "#2a2a2a"
-border_dim  = "#1a1a1a"
+bg        = "#0a0a0a"
+bg_alt    = "#1a1a1a"
+fg        = "#f0f0f0"
+dim       = "#555"
+accent    = "#9b87f5"
+sel_bg    = "#f0f0f0"
+sel_fg    = "#0a0a0a"
+hover_bg  = "#1a1a1a"
+hover_fg  = "#f0f0f0"
+border_col= "#2a2a2a"
+border_dim= "#1a1a1a"
 
 [typography]
 family  = "IBM Plex Sans"
@@ -26,12 +27,19 @@ case    = "normal"
 mono    = false
 
 [layout]
-radius_px       = 6
-border_px       = 1
-spacing_px      = 10
-ambient_art     = false
-adaptive        = true
-show_thumbnails = true
-control_style   = "icon"
-list_marker     = "  "
-visualizer      = "bars-filled"
+radius_px     = 6
+border_px     = 1
+spacing_px    = 10
+ambient_art   = false
+adaptive      = true
+show_thumbnails= true
+control_style = "icon"
+list_marker   = "  "
+visualizer    = "bars-filled"
+
+[slots]
+progress = "bar"
+volume   = "knob"
+album_art= "square"
+controls = "large"
+now_label= "inline"

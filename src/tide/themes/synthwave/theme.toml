@@ -1,23 +1,24 @@
 [meta]
-name = "synthwave"
-slug = "synthwave"
-author = "tide"
-version = 1
-dark = true
+name     = "synthwave"
+slug     = "synthwave"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "modern"
 
 [tokens]
-bg          = "#1a103d"
-bg_alt      = "#261a4a"
-fg          = "#f0e8ff"
-dim         = "#8c7eaf"
-accent      = "#ff5dff"
-accent_alt  = "#5dfdff"
-sel_bg      = "#ff5dff"
-sel_fg      = "#1a103d"
-hover_bg    = "#322060"
-hover_fg    = "#f0e8ff"
-border_col  = "#ff5dff"
-border_dim  = "#3a2670"
+bg        = "#1a103d"
+bg_alt    = "#261a4a"
+fg        = "#f0e8ff"
+dim       = "#8c7eaf"
+accent    = "#ff5dff"
+accent_alt= "#5dfdff"
+sel_bg    = "#ff5dff"
+sel_fg    = "#1a103d"
+hover_bg  = "#322060"
+hover_fg  = "#f0e8ff"
+border_col= "#ff5dff"
+border_dim= "#3a2670"
 
 [typography]
 family  = "IBM Plex Sans"
@@ -27,10 +28,17 @@ case    = "leet"
 mono    = false
 
 [layout]
-radius_px       = 6
-border_px       = 1
-spacing_px      = 10
-ambient_art     = false
-control_style   = "glyph"
-list_marker     = "  "
-visualizer      = "neon-grid"
+radius_px    = 6
+border_px    = 1
+spacing_px   = 10
+ambient_art  = false
+control_style= "glyph"
+list_marker  = "  "
+visualizer   = "neon-grid"
+
+[slots]
+progress = "bar"
+volume   = "knob"
+album_art= "square"
+controls = "large"
+now_label= "inline"
