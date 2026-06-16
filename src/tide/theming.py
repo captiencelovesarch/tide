@@ -161,6 +161,13 @@ class ThemeManager(QObject):
             return None
         _register_fonts(theme)
 
+        # Explicit theme switch — drop any runtime token overrides from the
+        # previous theme (adaptive accent etc.). The adaptive driver will
+        # re-establish them for the new base palette if it's still enabled.
+        prev_slug = self._current.slug if self._current is not None else None
+        if slug != prev_slug:
+            self._token_overrides.clear()
+
         # Compose the stylesheet with substituted tokens (overrides win).
         effective_theme = self._with_overrides(theme)
         qss = _substitute(theme.qss, effective_theme)

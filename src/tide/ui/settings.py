@@ -296,6 +296,23 @@ class SettingsDialog(QDialog):
         root.addLayout(btn_row)
 
     def _populate(self) -> None:
+        # Block currentIndexChanged on EVERY picker we're about to set, so
+        # we don't trigger live-apply cascades (theme, layout, slots) just
+        # for loading the saved values. Side-effect of apply happens on
+        # explicit user change instead.
+        all_pickers = [
+            self.theme_picker, self.thumbnails_picker, self.audio_device_picker,
+            self.layout_picker, *self._slot_pickers.values(),
+        ]
+        for cb in all_pickers:
+            cb.blockSignals(True)
+        try:
+            self._populate_pickers()
+        finally:
+            for cb in all_pickers:
+                cb.blockSignals(False)
+
+    def _populate_pickers(self) -> None:
         themes = theming.discover_themes()
         # Sort by name for stable display.
         for slug, theme in sorted(themes.items(), key=lambda kv: kv[1].name):

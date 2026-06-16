@@ -254,15 +254,25 @@ class AdaptiveDriver(QObject):
 
     # ---------- signal handlers ----------
 
-    def _on_theme_changed(self, _theme) -> None:
+    def _on_theme_changed(self, theme) -> None:
         # theming.override_tokens() re-emits theme_changed on every animation
-        # frame. Ignore those — we don't want to reset our own animation state.
+        # frame. Ignore those.
         if self._anim.state() == QVariantAnimation.Running:
             return
         if self._suppress_theme_handler:
             return
+        # Same base theme (just an override push, layout swap, etc.) — do
+        # NOT re-anchor or re-extract. Doing so caused settings-open lag
+        # spikes (each picker setCurrentIndex re-fires theme_changed, which
+        # spawned a palette worker, which animated, which re-emitted, …).
+        new_slug = getattr(theme, "slug", None)
+        last_slug = getattr(self, "_last_base_slug", None)
+        if new_slug == last_slug:
+            return
+        self._last_base_slug = new_slug
         # Real theme change: re-anchor to the new base palette.
         self._current_accent = None
+        self._current_accent_alt = None
         self._current_bg_alt = None
         if self.is_enabled():
             self._on_track_changed(self._queue.current)
