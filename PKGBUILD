@@ -1,7 +1,7 @@
 # Maintainer: tide maintainer <you@example.com>
 pkgname=tide
 pkgver=1.2.4
-pkgrel=1
+pkgrel=2
 pkgdesc="A brutalist multi-source music desktop client"
 arch=('any')
 url="https://github.com/captiencelovesarch/tide"
@@ -15,7 +15,6 @@ depends=(
   'python-ytmusicapi'
   'python-cryptography'
   'python-numpy'
-  'python-sounddevice'
   'python-mutagen'
   'python-spotipy'
   'ttf-ibm-plex'
