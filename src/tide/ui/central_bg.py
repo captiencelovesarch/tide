@@ -23,7 +23,7 @@ import colorsys
 import math
 import time
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -31,7 +31,6 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPainterPath,
-    QPen,
     QRadialGradient,
 )
 from PySide6.QtWidgets import QHBoxLayout, QWidget
@@ -343,64 +342,64 @@ class CentralBg(QWidget):
             return img
 
         if self._style == "vbeam":
-            # Hill → arch: a low mound resting on the bottom edge that swells
-            # into a tall, filled arch when the bass hits.
+            # Hill → arch of light. Built entirely from elliptical glows —
+            # every brightness contour is a gradient ramp, so nothing here can
+            # produce an outline (same construction as the band/field styles,
+            # which paint only gradients that fade to clear).
             sway = motion * 0.020 * wave(_PERIOD_FIELD_A_S, 1.0)
             breathe = motion * 0.020 * wave(_PERIOD_FLOW_S, 1.8)
             center_x = bw * (0.50 + sway)
             base_y = bh * 1.03
-            arch_h = bh * (0.13 + breathe + 0.62 * pulse)
-            half_w = bw * (0.26 + 0.22 * pulse)
+            arch_h = bh * (0.17 + breathe + 0.62 * pulse)
+            half_w = bw * (0.32 + 0.24 * pulse)
             apex_y = base_y - arch_h
 
-            # Under-glow hugs the current shape (small around the resting
-            # hill, blooming with the arch) so the idle scene stays quiet.
-            floor = QRadialGradient(center_x, bh, max_side * (0.26 + 0.34 * pulse))
-            floor.setColorAt(0.00, _alpha(tone_b, 44 + int(64 * pulse)))
-            floor.setColorAt(0.50, _alpha(tone_a, 16 + int(28 * pulse)))
-            floor.setColorAt(1.00, clear)
-            pp.fillRect(img.rect(), QBrush(floor))
+            def glow(cx: float, cy: float, rx: float, ry: float,
+                     stops: list[tuple[float, QColor]]) -> None:
+                # Elliptical radial glow: a unit radial gradient painted under
+                # a scale transform, filled only over its own extent.
+                pp.save()
+                pp.translate(cx, cy)
+                pp.scale(max(1e-3, rx), max(1e-3, ry))
+                g = QRadialGradient(0.0, 0.0, 1.0)
+                for pos, color in stops:
+                    g.setColorAt(pos, color)
+                pp.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0), QBrush(g))
+                pp.restore()
 
-            def dome(hw: float, height: float) -> QPainterPath:
-                # Two mirrored cubics ≈ elliptical arc (0.5523 = circle
-                # constant): shallow reads as a hill, tall as a round arch.
-                top = base_y - height
-                k = 0.5523
-                path = QPainterPath()
-                path.moveTo(center_x - hw, base_y)
-                path.cubicTo(center_x - hw, base_y - height * k,
-                             center_x - hw * k, top,
-                             center_x, top)
-                path.cubicTo(center_x + hw * k, top,
-                             center_x + hw, base_y - height * k,
-                             center_x + hw, base_y)
-                path.closeSubpath()
-                return path
+            # Wide under-wash anchoring the shape to the bottom edge; grows
+            # with the arch so the idle scene stays quiet.
+            glow(center_x, base_y,
+                 bw * (0.72 + 0.20 * pulse), bh * (0.30 + 0.30 * pulse),
+                 [(0.00, _alpha(tone_a, 46 + int(46 * pulse))),
+                  (0.55, _alpha(tone_a, 18 + int(20 * pulse))),
+                  (1.00, clear)])
 
-            fill = QLinearGradient(center_x, base_y, center_x, apex_y)
-            fill.setColorAt(0.00, _alpha(tone_b, 118 + int(78 * pulse)))
-            fill.setColorAt(0.55, _alpha(tone_a, 62 + int(96 * pulse)))
-            # At rest the crest fades out (soft hill); on a hit the alpha
-            # holds to the rim so the arch reads filled, not hollow.
-            fill.setColorAt(1.00, _alpha(tone_c, 8 + int(128 * pulse)))
-            pp.fillPath(dome(half_w, arch_h), QBrush(fill))
+            # Arch body — the dome itself is just this glow's upper half:
+            # shallow at rest (a soft mound), tall on a bass hit (an arch).
+            glow(center_x, base_y, half_w * 1.35, arch_h * 1.30,
+                 [(0.00, _alpha(tone_b, 128 + int(64 * pulse))),
+                  (0.45, _alpha(tone_a, 56 + int(56 * pulse))),
+                  (0.75, _alpha(tone_a, 18 + int(22 * pulse))),
+                  (1.00, clear)])
 
-            core_h = arch_h * 0.80
-            core = QLinearGradient(center_x, base_y, center_x, base_y - core_h)
-            core.setColorAt(0.00, _alpha(tone_b, 66 + int(84 * pulse)))
-            core.setColorAt(0.70, _alpha(tone_a, 24 + int(66 * pulse)))
-            core.setColorAt(1.00, clear)
-            pp.fillPath(dome(half_w * 0.62, core_h), QBrush(core))
+            # Hot core low in the mound for depth.
+            glow(center_x, base_y, half_w * 0.80, arch_h * 0.85,
+                 [(0.00, _alpha(tone_b, 84 + int(72 * pulse))),
+                  (0.55, _alpha(tone_a, 26 + int(34 * pulse))),
+                  (1.00, clear)])
 
-            if pulse > 0.02:
-                # Crest rim — invisible at rest, snaps the arch outline into
-                # focus on hits.
-                rim_tone = tone_c.lighter(130) if dark else tone_c.darker(120)
-                rim = QPen(_alpha(rim_tone, int(150 * pulse)))
-                rim.setWidthF(max(1.2, max_side * 0.0055))
-                pp.setPen(rim)
-                pp.setBrush(Qt.NoBrush)
-                pp.drawPath(dome(half_w, arch_h))
+            if pulse > 0.01:
+                # Crest bloom — light gathering at the apex on bass. Reads as
+                # a halo, never a rim: it is another edgeless glow. Tucked a
+                # little below the apex and kept in the crest color family so
+                # it fuses with the arch body instead of floating above it.
+                crest_tone = tone_c.lighter(126) if dark else tone_c.darker(116)
+                crest_r = max_side * (0.14 + 0.20 * pulse)
+                glow(center_x, apex_y + arch_h * 0.18, crest_r, crest_r * 0.90,
+                     [(0.00, _alpha(crest_tone, int(96 * pulse))),
+                      (0.50, _alpha(tone_c, int(42 * pulse))),
+                      (1.00, clear)])
             pp.end()
             return img
 
