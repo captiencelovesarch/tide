@@ -231,6 +231,36 @@ class SettingsDialog(QDialog):
         appearance_form.addRow("speed:", self.preserve_pitch_toggle)
         appearance_form.addRow("visualizer audio:", self.audio_device_picker)
 
+        # ---- playback ----
+        playback_heading = QLabel("── playback ───────────────")
+        playback_heading.setProperty("class", "dim")
+
+        self.prefetch_hover_toggle = QCheckBox(
+            "pre-resolve stream on hover"
+        )
+        self.prefetch_warm_picker = QComboBox()
+        self.prefetch_warm_picker.addItem("off", 0)
+        self.prefetch_warm_picker.addItem("top 2", 2)
+        self.prefetch_warm_picker.addItem("top 3", 3)
+        self.prefetch_warm_picker.addItem("top 5", 5)
+
+        prefetch_explainer = QLabel(
+            "gets stream urls ready before you click so playback starts "
+            "instantly. hover pre-resolves the row under the mouse; warm "
+            "results quietly resolves the top few search hits as they land."
+        )
+        prefetch_explainer.setWordWrap(True)
+        prefetch_explainer.setProperty("class", "dim")
+
+        playback_form = QFormLayout()
+        playback_form.addRow("", self.prefetch_hover_toggle)
+        playback_form.addRow("warm results:", self.prefetch_warm_picker)
+
+        playback_col = QVBoxLayout()
+        playback_col.setSpacing(6)
+        playback_col.addLayout(playback_form)
+        playback_col.addWidget(prefetch_explainer)
+
         # ---- discord ----
         discord_heading = QLabel("── discord rich presence ──")
         discord_heading.setProperty("class", "dim")
@@ -407,6 +437,9 @@ class SettingsDialog(QDialog):
         content_col.addWidget(appearance_heading)
         content_col.addLayout(appearance_form)
         content_col.addSpacing(6)
+        content_col.addWidget(playback_heading)
+        content_col.addLayout(playback_col)
+        content_col.addSpacing(6)
         content_col.addWidget(discord_heading)
         content_col.addLayout(discord_col)
         content_col.addSpacing(6)
@@ -521,6 +554,13 @@ class SettingsDialog(QDialog):
             # combo's text field directly.
             self.font_picker.setCurrentText(font_override)
 
+        self.prefetch_hover_toggle.setChecked(bool(self._settings.prefetch_hover))
+        warm_idx = self.prefetch_warm_picker.findData(
+            int(self._settings.prefetch_warm_results or 0)
+        )
+        if warm_idx >= 0:
+            self.prefetch_warm_picker.setCurrentIndex(warm_idx)
+
         self.discord_toggle.setChecked(self._settings.discord_enabled)
         self.discord_app_id.setText(self._settings.discord_app_id)
         self.discord_app_id.setEnabled(self._settings.discord_enabled)
@@ -602,6 +642,10 @@ class SettingsDialog(QDialog):
         self._settings.ui_scale = self.scale_picker.currentData() or "normal"
         self._settings.preserve_pitch = self.preserve_pitch_toggle.isChecked()
         self._settings.ui_sounds_enabled = self.ui_sounds_toggle.isChecked()
+        self._settings.prefetch_hover = self.prefetch_hover_toggle.isChecked()
+        self._settings.prefetch_warm_results = int(
+            self.prefetch_warm_picker.currentData() or 0
+        )
         self._settings.adaptive_background = self.adaptive_bg_toggle.isChecked()
         self._settings.adaptive_background_style = (
             self.adaptive_style_picker.currentData() or "field"

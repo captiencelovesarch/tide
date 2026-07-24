@@ -9,13 +9,16 @@ Stream resolution is delegated to ``yt-dlp`` and cached per source via
 """
 from __future__ import annotations
 
+import os
 import threading
+import time
 from typing import Iterable
 
 import yt_dlp
 from ytmusicapi import YTMusic
 
 from .. import cache
+from .. import perf
 from .base import (
     AlbumDetail,
     AlbumEntry,
@@ -640,6 +643,29 @@ class YTMusicSource(MusicSource):
 
 # ---------- yt-dlp stream URL resolution ----------
 
+# When the authenticated (cookiefile) yt-dlp pass fails, every subsequent
+# resolve pays for the same doomed attempt before falling back to anonymous
+# — roughly doubling the click-to-audio wait until the user re-imports
+# cookies. Remember the failure per cookiefile mtime and skip the auth pass
+# for a while; a cookie re-import rewrites the jar (new mtime) and re-arms
+# it automatically. Worker threads race on this global unlocked — worst
+# case is one extra doomed pass, which is today's behavior anyway.
+_auth_pass_broken: tuple[float, float] | None = None  # (cookiefile mtime, failed_at)
+_AUTH_RETRY_SECS = 30 * 60
+
+
+def _should_try_auth_pass(cookiefile: str) -> bool:
+    if _auth_pass_broken is None:
+        return True
+    broken_mtime, failed_at = _auth_pass_broken
+    try:
+        mtime = os.path.getmtime(cookiefile)
+    except OSError:
+        return False
+    if mtime != broken_mtime:
+        return True
+    return (time.monotonic() - failed_at) >= _AUTH_RETRY_SECS
+
 
 def resolve_stream_url(video_id: str) -> str:
     """Return a playable audio URL for the given YT Music video id.
@@ -648,7 +674,10 @@ def resolve_stream_url(video_id: str) -> str:
     """
     cached_url = cache.get_stream_url(SOURCE_SLUG, video_id)
     if cached_url:
+        perf.mark(f"resolve {video_id}: disk-cache hit")
         return cached_url
+
+    global _auth_pass_broken
 
     opts = {
         "quiet": True,
@@ -669,15 +698,31 @@ def resolve_stream_url(video_id: str) -> str:
     cookiefile = auth.yt_dlp_cookiefile()
 
     info = None
-    if cookiefile:
+    if cookiefile and _should_try_auth_pass(cookiefile):
+        t0 = time.monotonic()
         try:
             with yt_dlp.YoutubeDL({**opts, "cookiefile": cookiefile}) as ydl:
                 info = ydl.extract_info(url, download=False)
+            _auth_pass_broken = None
+            perf.mark(f"resolve {video_id}: auth pass ok "
+                      f"({(time.monotonic() - t0) * 1000:.0f}ms)")
         except Exception:
             info = None
+            try:
+                _auth_pass_broken = (os.path.getmtime(cookiefile),
+                                     time.monotonic())
+            except OSError:
+                pass
+            perf.mark(f"resolve {video_id}: auth pass FAILED "
+                      f"({(time.monotonic() - t0) * 1000:.0f}ms)")
+    elif cookiefile:
+        perf.mark(f"resolve {video_id}: auth pass skipped (recent failure)")
     if info is None:
+        t0 = time.monotonic()
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
+        perf.mark(f"resolve {video_id}: anon pass "
+                  f"({(time.monotonic() - t0) * 1000:.0f}ms)")
 
     stream_url = info.get("url")
     if not stream_url and "requested_formats" in info:

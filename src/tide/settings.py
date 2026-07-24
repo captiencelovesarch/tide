@@ -116,6 +116,10 @@ class Settings:
     # muted while music is playing. Default off so a fresh install is
     # silent until the user opts in via Settings → appearance.
     ui_sounds_enabled: bool = False
+    # v1.2.5 — instant play. Hover/press pre-resolve of stream URLs, and
+    # how many top search results to warm in the background (0 = off).
+    prefetch_hover: bool = True
+    prefetch_warm_results: int = 3
 
 
 def _to_toml(s: Settings) -> str:

@@ -416,6 +416,9 @@ def run(argv: list[str] | None = None) -> int:
     window._discord = discord
     window._lyric_tracker = lyric_tracker
     window._settings = user_settings
+    # Prefetch toggles are consulted at fire time (hover/press handlers were
+    # wired before settings existed), so pushing the attr here is enough.
+    window._prefetch.hover_enabled = bool(user_settings.prefetch_hover)
     # The SourcePanel was constructed with a placeholder Settings; rebind to
     # the real one so toggles persist.
     try:

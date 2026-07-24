@@ -1,6 +1,9 @@
 """Main window: search + results + queue + now-playing strip."""
 from __future__ import annotations
 
+import sys
+import time
+
 from PySide6.QtCore import (
     QObject,
     QThread,
@@ -270,6 +273,23 @@ class MainWindow(QMainWindow):
         # so the next _play_track sees a warm cache and skips the resolve
         # worker. Best-effort; on miss the normal resolve path runs.
         self._prefetch = StreamPrefetch(self)
+        # In-flight join: a click on a track whose prefetch is mid-resolve
+        # waits for THAT resolve instead of racing a duplicate yt-dlp round
+        # trip. The fallback timer hardens against a prefetch worker that
+        # never reports back (hung network call) — after it fires we resolve
+        # ourselves like the old code always did.
+        self._awaiting_prefetch_vid: str | None = None
+        self._await_fallback_timer = QTimer(self)
+        self._await_fallback_timer.setSingleShot(True)
+        self._await_fallback_timer.setInterval(10_000)
+        self._await_fallback_timer.timeout.connect(self._on_prefetch_join_timeout)
+        self._prefetch.resolved.connect(self._on_prefetch_join_resolved)
+        self._prefetch.failed.connect(self._on_prefetch_join_failed)
+        # Click-to-audio timing for the always-on per-play summary line.
+        self._perf_t0: float | None = None
+        self._perf_vid: str = ""
+        self._perf_path: str = "cold"
+        self._perf_resolve_ms: float | None = None
         # Position-prefetch trigger threshold (seconds remaining). When the
         # current track's tail crosses this, we request prefetch for the
         # next queued track. Tuned to comfortably exceed a slow yt-dlp call.
@@ -1054,6 +1074,13 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, tr)
                 self.results.addItem(item)
+            n = int(getattr(getattr(self, "_settings", None),
+                            "prefetch_warm_results", 3) or 0)
+            if n > 0:
+                try:
+                    self._prefetch.warm(items, limit=n)
+                except Exception:
+                    pass
             return
 
         # Cards (albums or artists).
@@ -1273,6 +1300,13 @@ class MainWindow(QMainWindow):
     def _play_track(self, track: api.Track) -> None:
         if track is None:
             return
+        # Any new play supersedes a pending in-flight join.
+        self._awaiting_prefetch_vid = None
+        self._await_fallback_timer.stop()
+        self._perf_t0 = time.monotonic()
+        self._perf_vid = track.video_id
+        self._perf_path = "cold"
+        self._perf_resolve_ms = None
         # Stop the previous track immediately. Otherwise its audio keeps
         # playing for the 1–3s the resolve worker takes, which feels broken
         # on a manual skip.
@@ -1321,9 +1355,23 @@ class MainWindow(QMainWindow):
         # current track was nearly done."
         cached = self._prefetch.lookup(track.video_id)
         if cached is not None:
+            self._perf_path = "prefetch-hit"
             self._on_resolved(track.video_id, cached)
             return
 
+        if self._prefetch.is_inflight(track.video_id):
+            # A hover/press/warm prefetch is already resolving this exact
+            # track — join it instead of racing a duplicate yt-dlp round
+            # trip. prefetch.resolved/failed land on the GUI thread and
+            # continue in _on_prefetch_join_*.
+            self._perf_path = "inflight-join"
+            self._awaiting_prefetch_vid = track.video_id
+            self._await_fallback_timer.start()
+            return
+
+        self._spawn_resolve_worker(track)
+
+    def _spawn_resolve_worker(self, track: api.Track) -> None:
         thread = QThread(self)
         worker = _ResolveWorker(track)
         worker.moveToThread(thread)
@@ -1338,9 +1386,44 @@ class MainWindow(QMainWindow):
         self._resolve_worker = worker
         thread.start()
 
+    # ---------- in-flight prefetch join ----------
+
+    def _on_prefetch_join_resolved(self, video_id: str) -> None:
+        if video_id != self._awaiting_prefetch_vid:
+            return
+        self._awaiting_prefetch_vid = None
+        self._await_fallback_timer.stop()
+        if not self._current or self._current.video_id != video_id:
+            return
+        ref = self._prefetch.lookup(video_id)
+        if ref is not None:
+            self._on_resolved(video_id, ref)
+        else:
+            # Resolved but already expired/invalidated (edge) — do it ourselves.
+            self._spawn_resolve_worker(self._current)
+
+    def _on_prefetch_join_failed(self, video_id: str, _msg: str) -> None:
+        if video_id != self._awaiting_prefetch_vid:
+            return
+        self._awaiting_prefetch_vid = None
+        self._await_fallback_timer.stop()
+        if self._current and self._current.video_id == video_id:
+            # One explicit retry — parity with the duplicate worker the old
+            # code effectively raced here. A second failure surfaces through
+            # _on_resolve_failed as before.
+            self._spawn_resolve_worker(self._current)
+
+    def _on_prefetch_join_timeout(self) -> None:
+        vid = self._awaiting_prefetch_vid
+        self._awaiting_prefetch_vid = None
+        if vid and self._current and self._current.video_id == vid:
+            self._spawn_resolve_worker(self._current)
+
     def _on_resolved(self, video_id: str, ref: object) -> None:
         if not self._current or self._current.video_id != video_id:
             return
+        if self._perf_t0 is not None and self._perf_vid == video_id:
+            self._perf_resolve_ms = (time.monotonic() - self._perf_t0) * 1000.0
         if isinstance(ref, StreamRef):
             self.player.load_ref(ref)
         else:
@@ -1633,6 +1716,7 @@ class MainWindow(QMainWindow):
         for v in views:
             try:
                 self._prefetch.attach_hover(v)
+                self._prefetch.attach_press(v)
             except Exception:
                 pass
 
@@ -1783,6 +1867,22 @@ class MainWindow(QMainWindow):
             self.play_btn.setGlyph("⏸")
             # Audio actually started — stop the loading indicator.
             self._loading.finish("playing")
+            # One summary line per play (not per pause/resume — t0 clears).
+            # This is the ground truth for tuning instant-play behavior.
+            if self._perf_t0 is not None:
+                total_ms = (time.monotonic() - self._perf_t0) * 1000.0
+                resolve = (
+                    f"{self._perf_resolve_ms:.0f}"
+                    if self._perf_resolve_ms is not None else "-"
+                )
+                audio_ms = total_ms - (self._perf_resolve_ms or 0.0)
+                print(
+                    f"tide: play {self._perf_vid} path={self._perf_path} "
+                    f"resolve={resolve}ms audio={audio_ms:.0f}ms "
+                    f"total={total_ms:.0f}ms",
+                    file=sys.stderr,
+                )
+                self._perf_t0 = None
         elif s == PlayState.PAUSED:
             self.play_btn.setLabel("play")
             self.play_btn.setGlyph("▶")
@@ -2492,6 +2592,9 @@ class MainWindow(QMainWindow):
         ui_sounds = getattr(self, "ui_sounds", None)
         if ui_sounds is not None:
             ui_sounds.set_enabled(bool(new.ui_sounds_enabled))
+        # Hover/press prefetch is checked at fire time, so flipping the
+        # attr is the whole live apply. warm_results is read per-search.
+        self._prefetch.hover_enabled = bool(new.prefetch_hover)
         # Push discord changes to the live presence client if it's running.
         discord = getattr(self, "_discord", None)
         if discord is not None:

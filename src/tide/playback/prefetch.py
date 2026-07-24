@@ -38,6 +38,11 @@ if TYPE_CHECKING:
 # cached entry is dropped and lookup() falls back to a cache miss.
 DEFAULT_TTL_SEC = 60 * 60  # 1 hour
 
+# Sources whose resolve_stream is a real network round-trip (yt-dlp
+# extraction). Warming anything else (local paths, subsonic's computed
+# URL, spotify's URI) is pure waste — those resolve instantly.
+_SLOW_RESOLVE_SOURCES = frozenset({"ytmusic", "soundcloud", "bandcamp", "mixcloud"})
+
 
 class _PrefetchWorker(QObject):
     """Mirror of window._ResolveWorker but local to the prefetch system so
@@ -70,6 +75,10 @@ class StreamPrefetch(QObject):
     # Fired whenever a prefetch successfully resolves — purely informational,
     # for tests / status indicators that want to react to a warm cache.
     resolved = Signal(str)   # video_id
+    # Fired when an in-flight prefetch raises. Lets _play_track join an
+    # in-flight resolve and still learn about failure (it falls back to its
+    # own worker). Prefetch itself stays best-effort/silent otherwise.
+    failed = Signal(str, str)   # video_id, msg
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -77,13 +86,29 @@ class StreamPrefetch(QObject):
         # In-flight video_ids — guards request() against spawning duplicate
         # workers for the same track. Cleared in _on_resolved/_on_failed.
         self._inflight: set[str] = set()
-        # NOTE: do NOT keep Python-side refs to QThread/_PrefetchWorker. They
-        # live on Qt's parent-child tree via ``QThread(self)`` and the
-        # worker.moveToThread() association, and self-delete on finish via
-        # deleteLater. Holding our own dict refs and popping them on
-        # thread.finished caused a use-after-free segfault in PySide6 — the
-        # destructor processed deleteLater while our pop was concurrently
-        # invalidating the Python proxy.
+        # Fire-time master switch for pointer-driven prefetch (hover +
+        # press). A settings toggle lands here — checked when a hover/press
+        # fires, NOT at wire time, because settings are injected after the
+        # window (and its view wiring) is constructed.
+        self.hover_enabled: bool = True
+        # Pending warm() list — a single staggered timer chain, replaced
+        # wholesale by each new warm() call.
+        self._warm_queue: list = []
+        self._warm_spacing_ms: int = 500
+        self._warm_timer = QTimer(self)
+        self._warm_timer.setSingleShot(True)
+        self._warm_timer.timeout.connect(self._on_warm_fire)
+        # Strong Python refs to live (thread, worker) pairs. REQUIRED:
+        # PySide6 signal connections hold only weak references to
+        # bound-method slots, so without these refs the worker's Python
+        # wrapper (and with it the C++ object — the worker is unparented)
+        # is garbage-collected the moment request() returns, and
+        # ``thread.started -> worker.run`` never fires. That silently
+        # no-op'd every prefetch in v1.2.4. Entries are reaped on the GUI
+        # thread via the bound-method slot _reap_spawns — never from a
+        # lambda, which PySide6 runs in the *emitting* (worker) thread and
+        # which is how the original ref-holding attempt segfaulted.
+        self._spawns: set = set()
 
     # ---------- public ----------
 
@@ -98,6 +123,10 @@ class StreamPrefetch(QObject):
             self._cache.pop(video_id, None)
             return None
         return ref
+
+    def is_inflight(self, video_id: str) -> bool:
+        """True while a background resolve for ``video_id`` is running."""
+        return video_id in self._inflight
 
     def request(self, track: "Track") -> None:
         """Kick off a background resolve for ``track`` unless it's already
@@ -114,10 +143,10 @@ class StreamPrefetch(QObject):
             return
 
         self._inflight.add(vid)
-        # Qt-owned QThread + worker. Parent on the thread keeps it alive
-        # while running; moveToThread associates the worker with the thread
-        # for slot dispatch; both deleteLater on finish so Qt's event loop
-        # destructs them at a safe moment.
+        # QThread parented on us + unparented worker moved onto it. The
+        # _spawns entry keeps both Python wrappers alive while the thread
+        # runs (see __init__); deleteLater on finish lets Qt destruct the
+        # C++ side at a safe moment, and _reap_spawns then drops the refs.
         thread = QThread(self)
         worker = _PrefetchWorker(track)
         worker.setParent(None)  # required before moveToThread
@@ -127,9 +156,34 @@ class StreamPrefetch(QObject):
         worker.failed.connect(self._on_failed)
         worker.resolved.connect(thread.quit)
         worker.failed.connect(thread.quit)
+        thread.finished.connect(self._reap_spawns)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        self._spawns.add((thread, worker))
         thread.start()
+
+    def warm(self, tracks: list["Track"], limit: int = 5) -> None:
+        """Stagger-prefetch the first ``limit`` of ``tracks`` (e.g. the
+        visible top of a result list). Replaces any pending warm list
+        wholesale — a new context (new search, new album page) makes the
+        old one moot. Tracks fire one per ``_warm_spacing_ms`` so we
+        never burst yt-dlp round-trips.
+        """
+        self._warm_timer.stop()
+        queue: list = []
+        seen: set[str] = set()
+        for t in tracks:
+            if len(queue) >= limit:
+                break
+            if t is None or not t.video_id or t.video_id in seen:
+                continue
+            if (t.source or "ytmusic") not in _SLOW_RESOLVE_SOURCES:
+                continue
+            seen.add(t.video_id)
+            queue.append(t)
+        self._warm_queue = queue
+        if self._warm_queue:
+            self._on_warm_fire()
 
     def attach_hover(self, view, debounce_ms: int = 300) -> None:
         """Wire mouse-hover prefetch to a track-bearing QListView.
@@ -171,7 +225,7 @@ class StreamPrefetch(QObject):
 
         def _on_fire() -> None:
             tr = pending[0]
-            if tr is not None:
+            if tr is not None and self.hover_enabled:
                 self.request(tr)
 
         try:
@@ -179,6 +233,33 @@ class StreamPrefetch(QObject):
         except Exception:
             return
         timer.timeout.connect(_on_fire)
+
+    def attach_press(self, view) -> None:
+        """Wire mouse-press prefetch to a track-bearing QListView.
+
+        Debounce-free sibling of ``attach_hover``: the resolve starts the
+        instant the button goes down, so by the time the release/activation
+        reaches ``_play_track`` the resolve is already in flight and the
+        window joins it instead of spawning its own worker. Costs zero
+        extra network — a press is always followed by a play.
+        """
+        if view is None:
+            return
+
+        def _on_pressed(idx: QModelIndex) -> None:
+            from ..api import Track
+            if not self.hover_enabled:
+                return
+            if not idx.isValid():
+                return
+            track = idx.data(Qt.UserRole)
+            if isinstance(track, Track):
+                self.request(track)
+
+        try:
+            view.pressed.connect(_on_pressed)
+        except Exception:
+            return
 
     def invalidate(self, video_id: str) -> None:
         """Drop a single cached entry. Used when a previous lookup turned
@@ -188,6 +269,8 @@ class StreamPrefetch(QObject):
     def clear(self) -> None:
         """Drop the entire cache. Useful on source/account switches where
         URL signatures from one identity may not work with another."""
+        self._warm_timer.stop()
+        self._warm_queue.clear()
         self._cache.clear()
 
     def shutdown(self, wait_ms: int = 2000) -> None:
@@ -201,6 +284,8 @@ class StreamPrefetch(QObject):
         list of objects Qt knows about, so we can't miss one or stale-ref
         one that's already destructed.
         """
+        self._warm_timer.stop()
+        self._warm_queue.clear()
         threads: list[QThread] = list(self.findChildren(QThread))
         for t in threads:
             try:
@@ -214,6 +299,7 @@ class StreamPrefetch(QObject):
                 t.wait(wait_ms)
             except Exception:
                 pass
+        self._spawns.clear()
         self._inflight.clear()
         self._cache.clear()
 
@@ -224,7 +310,37 @@ class StreamPrefetch(QObject):
         self._inflight.discard(video_id)
         self.resolved.emit(video_id)
 
-    def _on_failed(self, video_id: str, _msg: str) -> None:
+    def _on_failed(self, video_id: str, msg: str) -> None:
         # No retry — _play_track will spawn its own worker on cache miss.
-        # Silent failure is intentional: prefetch is best-effort.
+        # Silent failure is intentional: prefetch is best-effort. The signal
+        # exists for the window's in-flight join, which does retry.
         self._inflight.discard(video_id)
+        self.failed.emit(video_id, msg)
+
+    def _reap_spawns(self) -> None:
+        # Runs on the GUI thread (bound-method slot → queued delivery from
+        # the finishing thread). Drop refs to pairs whose thread is done;
+        # an already-deleted C++ side (RuntimeError) counts as done.
+        finished = set()
+        for entry in self._spawns:
+            thread, _worker = entry
+            try:
+                if thread.isFinished():
+                    finished.add(entry)
+            except RuntimeError:
+                finished.add(entry)
+        self._spawns -= finished
+
+    def _on_warm_fire(self) -> None:
+        # Pop until we find a track that still needs resolving, request it,
+        # and chain the timer for the remainder of the queue.
+        while self._warm_queue:
+            track = self._warm_queue.pop(0)
+            if self.is_inflight(track.video_id):
+                continue
+            if self.lookup(track.video_id) is not None:
+                continue
+            self.request(track)
+            if self._warm_queue:
+                self._warm_timer.start(self._warm_spacing_ms)
+            return
