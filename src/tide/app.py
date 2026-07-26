@@ -10,7 +10,7 @@ locale.setlocale(locale.LC_NUMERIC, "C")
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from . import audio_fx, auth, auth_spotify, cache, config, session as session_module, settings as settings_module, theming, ui_sounds as ui_sounds_module
+from . import audio_fx, auth, auth_spotify, cache, config, qthreads, session as session_module, settings as settings_module, theming, ui_sounds as ui_sounds_module
 from .api import Api
 from .discord_rpc import DiscordPresence
 from .mpris import MprisService
@@ -491,13 +491,20 @@ def run(argv: list[str] | None = None) -> int:
             window._tray.teardown()
     except Exception:
         pass
-    # Quiesce the prefetcher before the MainWindow (its parent) destructs —
-    # otherwise an in-flight resolve thread gets torn down mid-network call
-    # and segfaults.
+    # Quiesce the prefetcher before the MainWindow destructs — otherwise an
+    # in-flight resolve thread gets torn down mid-network call and segfaults.
     try:
         window._prefetch.shutdown()
     except Exception:
         pass
     discord.shutdown()
     mpris.stop()
+    # Wind down every other retained worker thread (search, radio, lyrics,
+    # library/album/artist loads, sign-in flows). Destroying a QThread whose
+    # OS thread is still running is a Qt fatal abort, so none of them may
+    # outlive interpreter teardown. Each wait is capped inside join().
+    try:
+        qthreads.join(wait_ms=1500)
+    except Exception:
+        pass
     return rc

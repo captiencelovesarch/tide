@@ -22,25 +22,16 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from .. import qthreads
 from ..sources.subsonic import SubsonicConfig, SubsonicSource
 
 
-# Strong refs to in-flight (QThread, worker) pairs. The ping thread must
-# NOT be parented to the dialog: callers destroy the dialog right after
-# exec() returns, and destroying a QThread whose OS thread is still inside
-# the (up to 10s) urllib round-trip is a Qt fatal abort. The pair lives
-# here until the thread finishes; thread.finished → deleteLater (processed
-# on the main loop, where ~QThread safely waits out the run's last
-# instants), then thread.destroyed → drop the strong ref. A late done
-# emission into an already-destroyed dialog is auto-disconnected by Qt
-# and dropped.
-_ACTIVE_THREADS: set[tuple[QThread, QObject]] = set()
-
-
-def _keep_alive(thread: QThread, worker: QObject) -> None:
-    entry = (thread, worker)
-    _ACTIVE_THREADS.add(entry)
-    thread.destroyed.connect(lambda *_: _ACTIVE_THREADS.discard(entry))
+# The ping thread must NOT be parented to the dialog: callers destroy the
+# dialog right after exec() returns, and destroying a QThread whose OS thread
+# is still inside the (up to 10s) urllib round-trip is a Qt fatal abort.
+# tide.qthreads holds the (thread, worker) pair instead, until the thread is
+# destroyed. A late done emission into an already-destroyed dialog is
+# auto-disconnected by Qt and dropped.
 
 
 class _PingWorker(QObject):
@@ -209,7 +200,7 @@ class SubsonicSignInDialog(QDialog):
         worker.done.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        _keep_alive(thread, worker)
+        qthreads.retain(thread, worker)
         self._thread = thread
         self._worker = worker
         thread.start()

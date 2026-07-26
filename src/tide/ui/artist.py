@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, theming
+from .. import api, qthreads, theming
 from . import art_cache
 from .card import Card, ShelfRow
 from .track_row import TrackRowDelegate
@@ -203,7 +203,7 @@ class ArtistView(QWidget):
             self._set_avatar_placeholder()
         self.status_message.emit(theming.styled_case("loading artist…"))
 
-        thread = QThread(self)
+        thread = QThread()
         worker = _ArtistWorker(self.api, channel_id)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -215,6 +215,7 @@ class ArtistView(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _on_done(self, detail: api.ArtistDetail | None) -> None:

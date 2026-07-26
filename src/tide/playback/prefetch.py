@@ -27,6 +27,7 @@ from typing import Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QModelIndex, QObject, QThread, QTimer, Qt, Signal
 
+from .. import qthreads
 from ..sources import registry as source_registry
 
 if TYPE_CHECKING:
@@ -42,6 +43,9 @@ DEFAULT_TTL_SEC = 60 * 60  # 1 hour
 # extraction). Warming anything else (local paths, subsonic's computed
 # URL, spotify's URI) is pure waste — those resolve instantly.
 _SLOW_RESOLVE_SOURCES = frozenset({"ytmusic", "soundcloud", "bandcamp", "mixcloud"})
+
+# qthreads registry tag, so shutdown() waits out our resolver threads only.
+_GROUP = "prefetch"
 
 
 class _PrefetchWorker(QObject):
@@ -98,17 +102,14 @@ class StreamPrefetch(QObject):
         self._warm_timer = QTimer(self)
         self._warm_timer.setSingleShot(True)
         self._warm_timer.timeout.connect(self._on_warm_fire)
-        # Strong Python refs to live (thread, worker) pairs. REQUIRED:
-        # PySide6 signal connections hold only weak references to
-        # bound-method slots, so without these refs the worker's Python
-        # wrapper (and with it the C++ object — the worker is unparented)
-        # is garbage-collected the moment request() returns, and
-        # ``thread.started -> worker.run`` never fires. That silently
-        # no-op'd every prefetch in v1.2.4. Entries are reaped on the GUI
-        # thread via the bound-method slot _reap_spawns — never from a
-        # lambda, which PySide6 runs in the *emitting* (worker) thread and
-        # which is how the original ref-holding attempt segfaulted.
-        self._spawns: set = set()
+        # Strong refs to live (thread, worker) pairs are held by
+        # tide.qthreads, which releases them on thread.destroyed. They are
+        # REQUIRED: PySide6 keeps only a weak reference to a bound-method
+        # slot, so without them the worker's Python wrapper (and with it the
+        # C++ object — the worker is unparented) is garbage-collected and
+        # either ``thread.started -> worker.run`` never fires (which silently
+        # no-op'd every prefetch in v1.2.4) or the C++ worker is freed from
+        # the GUI thread mid-run, which segfaults.
 
     # ---------- public ----------
 
@@ -143,23 +144,22 @@ class StreamPrefetch(QObject):
             return
 
         self._inflight.add(vid)
-        # QThread parented on us + unparented worker moved onto it. The
-        # _spawns entry keeps both Python wrappers alive while the thread
-        # runs (see __init__); deleteLater on finish lets Qt destruct the
-        # C++ side at a safe moment, and _reap_spawns then drops the refs.
-        thread = QThread(self)
+        # Unparented thread + unparented worker moved onto it; qthreads.retain
+        # holds both Python wrappers until the thread is destroyed, so the
+        # worker's C++ object can only ever be freed by worker.deleteLater()
+        # on the worker's own thread. See tide/qthreads.py for why anything
+        # less than that is a use-after-free.
+        thread = QThread()
         worker = _PrefetchWorker(track)
-        worker.setParent(None)  # required before moveToThread
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.resolved.connect(self._on_resolved)
         worker.failed.connect(self._on_failed)
         worker.resolved.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(self._reap_spawns)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        self._spawns.add((thread, worker))
+        qthreads.retain(thread, worker, group=_GROUP)
         thread.start()
 
     def warm(self, tracks: list["Track"], limit: int = 5) -> None:
@@ -275,31 +275,19 @@ class StreamPrefetch(QObject):
 
     def shutdown(self, wait_ms: int = 2000) -> None:
         """Quit all in-flight resolver threads and wait briefly for them to
-        exit. Called from app.py on app shutdown — if a network resolve is
-        mid-flight when the window destructs, the parent's destructor would
-        otherwise tear down a still-running QThread and segfault.
+        exit. Called from app.py on app shutdown — a still-running QThread
+        that gets destroyed is a Qt fatal abort, so the resolves have to be
+        wound down before teardown reaches them.
 
-        Threads live as Qt children, so we discover them via
-        ``findChildren`` rather than a Python-side dict — that's the same
-        list of objects Qt knows about, so we can't miss one or stale-ref
-        one that's already destructed.
+        The threads are not our Qt children (parenting a worker thread to a
+        widget is what makes that teardown fatal in the first place), so the
+        sweep goes through the qthreads registry, which tracks every pair we
+        spawned under our group tag. Each wait is capped there so a stuck
+        yt-dlp call can't block exit.
         """
         self._warm_timer.stop()
         self._warm_queue.clear()
-        threads: list[QThread] = list(self.findChildren(QThread))
-        for t in threads:
-            try:
-                t.quit()
-            except Exception:
-                pass
-        for t in threads:
-            try:
-                # Cap each wait so a stuck yt-dlp call doesn't block exit.
-                # Qt will terminate any survivor when its parent destructs.
-                t.wait(wait_ms)
-            except Exception:
-                pass
-        self._spawns.clear()
+        qthreads.join(group=_GROUP, wait_ms=wait_ms)
         self._inflight.clear()
         self._cache.clear()
 
@@ -316,20 +304,6 @@ class StreamPrefetch(QObject):
         # exists for the window's in-flight join, which does retry.
         self._inflight.discard(video_id)
         self.failed.emit(video_id, msg)
-
-    def _reap_spawns(self) -> None:
-        # Runs on the GUI thread (bound-method slot → queued delivery from
-        # the finishing thread). Drop refs to pairs whose thread is done;
-        # an already-deleted C++ side (RuntimeError) counts as done.
-        finished = set()
-        for entry in self._spawns:
-            thread, _worker = entry
-            try:
-                if thread.isFinished():
-                    finished.add(entry)
-            except RuntimeError:
-                finished.add(entry)
-        self._spawns -= finished
 
     def _on_warm_fire(self) -> None:
         # Pop until we find a track that still needs resolving, request it,

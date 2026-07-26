@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import auth_spotify
+from .. import auth_spotify, qthreads
 
 
 # ---------- shelved-state confirmation ----------
@@ -64,21 +64,12 @@ def confirm_spotify_enable(parent: QWidget | None = None) -> bool:
     return dlg.exec() == QMessageBox.Yes
 
 
-# Strong refs to in-flight (QThread, worker) pairs. The thread must NOT be
-# parented to the dialog: callers destroy the dialog right after exec()
-# returns, and destroying a QThread whose OS thread is still running is a
-# Qt fatal abort. Instead the pair lives here until the thread finishes;
-# thread.finished → deleteLater (processed on the main loop, where
-# ~QThread safely waits out the run's last instants), then
-# thread.destroyed → drop the strong ref. Late done/failed emissions into
-# an already-destroyed dialog are auto-disconnected by Qt and dropped.
-_ACTIVE_THREADS: set[tuple[QThread, QObject]] = set()
-
-
-def _keep_alive(thread: QThread, worker: QObject) -> None:
-    entry = (thread, worker)
-    _ACTIVE_THREADS.add(entry)
-    thread.destroyed.connect(lambda *_: _ACTIVE_THREADS.discard(entry))
+# The OAuth thread must NOT be parented to the dialog: callers destroy the
+# dialog right after exec() returns, and destroying a QThread whose OS thread
+# is still running is a Qt fatal abort. tide.qthreads holds the (thread,
+# worker) pair instead, until the thread is destroyed. Late done/failed
+# emissions into an already-destroyed dialog are auto-disconnected by Qt and
+# dropped.
 
 
 class _AuthWorker(QObject):
@@ -204,7 +195,7 @@ class SpotifySignInDialog(QDialog):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        _keep_alive(thread, worker)
+        qthreads.retain(thread, worker)
         self._thread = thread
         self._worker = worker
         thread.start()
@@ -224,7 +215,7 @@ class SpotifySignInDialog(QDialog):
         # Every close path (cancel button, Esc, titlebar ✕, accept) funnels
         # through done(). If the OAuth thread is mid-wait on the loopback
         # server, cancel() wakes it so it raises and winds down promptly
-        # instead of blocking for up to 300s; the _keep_alive registry keeps
+        # instead of blocking for up to 300s; the qthreads registry keeps
         # the QThread safe to outlive the dialog either way. After a
         # successful flow cancel() is a no-op.
         if self._flow is not None:

@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import (
     ClassInfo,
     QObject,
+    QTimer,
     Property,
     Signal,
     Slot,
@@ -290,8 +291,7 @@ class MprisService(QObject):
         """Listen to the window's volume widget so external MPRIS clients
         see slider moves live. The router has no volume-changed signal of
         its own, and the widget is rebuilt on layout swaps — so we re-hook
-        via ``destroyed`` (by the time it fires, ``window.volume`` already
-        points at the replacement)."""
+        when the old one is destroyed."""
         widget = getattr(self._window, "volume", None)
         if widget is None or widget is self._volume_widget:
             return
@@ -303,8 +303,16 @@ class MprisService(QObject):
         self._volume_widget = widget
 
     def _on_volume_widget_destroyed(self, *_args) -> None:
+        # Fired from inside the old widget's ~QObject. Re-hooking right here
+        # is unsafe: ``window.volume`` often still points at the very widget
+        # being destroyed, and calling connect() on a half-destructed QObject
+        # segfaults inside PySide's SignalManager (the wrapper is only
+        # invalidated once destruction *completes*, so the RuntimeError guard
+        # in _hook_volume_widget cannot catch it). Defer to the next event
+        # loop turn, by which point the widget is gone and the layout swap
+        # has published its replacement.
         self._volume_widget = None
-        self._hook_volume_widget()
+        QTimer.singleShot(0, self._hook_volume_widget)
 
     # ---------- state accessors used by adaptors ----------
 

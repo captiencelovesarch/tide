@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, theming
+from .. import api, qthreads, theming
 from . import art_cache
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
@@ -192,7 +192,7 @@ class AlbumView(QWidget):
             self._set_cover_placeholder()
         self.status_message.emit(theming.styled_case(f"loading album…"))
 
-        thread = QThread(self)
+        thread = QThread()
         worker = _AlbumWorker(self.api, browse_id)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -204,6 +204,7 @@ class AlbumView(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _on_done(self, detail: api.AlbumDetail | None) -> None:

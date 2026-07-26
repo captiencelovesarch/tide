@@ -18,28 +18,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .. import auth, browser_import as bi
+from .. import auth, browser_import as bi, qthreads
 
 
 YT_MUSIC_URL = "https://music.youtube.com/"
 
 
-# Strong refs to in-flight (QThread, worker) pairs. The import thread must
-# NOT be parented to the dialog: callers destroy the dialog right after
-# exec() returns, and destroying a QThread whose OS thread is still busy
-# copying/decrypting browser cookie DBs is a Qt fatal abort. The pair
-# lives here until the thread finishes; thread.finished → deleteLater
-# (processed on the main loop, where ~QThread safely waits out the run's
-# last instants), then thread.destroyed → drop the strong ref. Late
-# done/failed emissions into an already-destroyed dialog are
+# The import thread must NOT be parented to the dialog: callers destroy the
+# dialog right after exec() returns, and destroying a QThread whose OS thread
+# is still busy copying/decrypting browser cookie DBs is a Qt fatal abort.
+# tide.qthreads holds the (thread, worker) pair instead, until the thread is
+# destroyed. Late done/failed emissions into an already-destroyed dialog are
 # auto-disconnected by Qt and dropped.
-_ACTIVE_THREADS: set[tuple[QThread, QObject]] = set()
-
-
-def _keep_alive(thread: QThread, worker: QObject) -> None:
-    entry = (thread, worker)
-    _ACTIVE_THREADS.add(entry)
-    thread.destroyed.connect(lambda *_: _ACTIVE_THREADS.discard(entry))
 
 
 class _ImportWorker(QObject):
@@ -160,7 +150,7 @@ class SignInDialog(QDialog):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        _keep_alive(thread, worker)
+        qthreads.retain(thread, worker)
         self._import_thread = thread
         self._import_worker = worker
         thread.start()

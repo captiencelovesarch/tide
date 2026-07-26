@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, theming
+from .. import api, qthreads, theming
 
 
 class _LyricsWorker(QObject):
@@ -332,7 +332,7 @@ class LyricsView(QWidget):
         # in — clicking it surfaces a "not wired yet" status until then.
         self.mute_btn.setEnabled(True)
 
-        thread = QThread(self)
+        thread = QThread()
         worker = _LyricsWorker(self.api, track)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -344,6 +344,7 @@ class LyricsView(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def update_position(self, seconds: float) -> None:

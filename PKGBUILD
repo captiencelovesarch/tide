@@ -1,6 +1,6 @@
-# Maintainer: tide maintainer <you@example.com>
+# Maintainer: captience <antoniojennings@icloud.com>
 pkgname=tide
-pkgver=1.2.5
+pkgver=1.2.6
 pkgrel=1
 pkgdesc="A brutalist multi-source music desktop client"
 arch=('any')

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, theming
+from .. import api, qthreads, theming
 from .card import Card, ShelfRow
 from .widgets import BracketButton
 
@@ -104,7 +104,7 @@ class ExploreView(QWidget):
         self.heading.setText(_line_heading("explore · loading…"))
         self.status_message.emit(theming.styled_case("loading explore…"))
 
-        thread = QThread(self)
+        thread = QThread()
         worker = _HomeWorker(self.api)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -116,6 +116,7 @@ class ExploreView(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def ensure_loaded(self) -> None:

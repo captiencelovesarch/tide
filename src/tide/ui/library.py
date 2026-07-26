@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, theming
+from .. import api, qthreads, theming
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
 
@@ -188,7 +188,7 @@ class LibraryView(QWidget):
             self.playlists_list.addItem(placeholder)
             return
         self.index_heading.setText(_line_heading("loading…"))
-        thread = QThread(self)
+        thread = QThread()
         worker = _PlaylistsWorker(self.api)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -200,6 +200,7 @@ class LibraryView(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._pls_thread = thread
         self._pls_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _on_playlists(self, items: list[api.PlaylistEntry]) -> None:
@@ -233,7 +234,7 @@ class LibraryView(QWidget):
         self.stack.setCurrentIndex(1)
         self.status_message.emit(theming.styled_case(f"loading {entry.title}…"))
 
-        thread = QThread(self)
+        thread = QThread()
         worker = _PlaylistDetailWorker(self.api, entry.playlist_id, self._detail_gen)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -245,6 +246,7 @@ class LibraryView(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._detail_thread = thread
         self._detail_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _on_detail(self, gen: int, detail: api.PlaylistDetail) -> None:

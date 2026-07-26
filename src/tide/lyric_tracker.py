@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from . import lyrics_provider
+from . import lyrics_provider, qthreads
 
 if TYPE_CHECKING:
     from .player import Player
@@ -139,7 +139,7 @@ class LyricTracker(QObject):
         self.lyric_changed.emit(value)
 
     def _fetch(self, track) -> None:
-        thread = QThread(self)
+        thread = QThread()
         worker = _FetchWorker(self._track_api(track), track)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -149,6 +149,7 @@ class LyricTracker(QObject):
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _track_api(self, track):

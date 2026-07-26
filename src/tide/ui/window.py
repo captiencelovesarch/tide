@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, history as history_module, layout as layout_module, session as session_module, theming
+from .. import api, history as history_module, layout as layout_module, qthreads, session as session_module, theming
 from ..player import PlayState, Player
 from ..playback import PlaybackRouter
 from ..playback.prefetch import StreamPrefetch
@@ -1009,7 +1009,7 @@ class MainWindow(QMainWindow):
             return
 
         self.statusBar().showMessage(f"searching {self._search_filter}: {q}")
-        thread = QThread(self)
+        thread = QThread()
         worker = _SearchWorker(self.api, q, self._search_filter, gen)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1021,6 +1021,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._search_thread = thread
         self._search_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _set_search_filter(self, name: str) -> None:
@@ -1246,7 +1247,7 @@ class MainWindow(QMainWindow):
                     self.found.emit(arts[0] if arts else None)
                 except Exception as e:
                     self.failed.emit(str(e))
-        thread = _QT(self)
+        thread = _QT()
         worker = _LookupWorker(self.api, name)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1264,6 +1265,7 @@ class MainWindow(QMainWindow):
         # Hold refs so they don't GC.
         self._artist_lookup_thread = thread
         self._artist_lookup_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _open_playlist_entry(self, entry: api.PlaylistEntry) -> None:
@@ -1372,7 +1374,7 @@ class MainWindow(QMainWindow):
         self._spawn_resolve_worker(track)
 
     def _spawn_resolve_worker(self, track: api.Track) -> None:
-        thread = QThread(self)
+        thread = QThread()
         worker = _ResolveWorker(track)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1384,6 +1386,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._resolve_thread = thread
         self._resolve_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     # ---------- in-flight prefetch join ----------
@@ -1467,7 +1470,7 @@ class MainWindow(QMainWindow):
         self._refresh_like_button()
         self.like_btn.setEnabled(False)
 
-        thread = QThread(self)
+        thread = QThread()
         worker = _RateWorker(self.api, self._current.video_id, target)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1479,6 +1482,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._rate_thread = thread
         self._rate_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _on_rate_done(self, video_id: str, liked: bool) -> None:
@@ -1617,7 +1621,7 @@ class MainWindow(QMainWindow):
                 old.quit()
             except Exception:
                 pass
-        thread = QThread(self)
+        thread = QThread()
         worker = _InstrumentalSearchWorker(vocal_track)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1629,6 +1633,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._instrumental_swap_thread = thread
         self._instrumental_swap_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _on_instrumental_found(self, vocal_track, match) -> None:
@@ -1765,7 +1770,7 @@ class MainWindow(QMainWindow):
         if not self.api.supports("radio"):
             self.queue.disable_radio()
             return
-        thread = QThread(self)
+        thread = QThread()
         worker = _RadioWorker(self.api, seed_video_id, list(exclude))
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1777,6 +1782,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._radio_thread = thread
         self._radio_worker = worker
+        qthreads.retain(thread, worker)
         thread.start()
 
     def _on_radio_done(self, tracks: list) -> None:
@@ -2714,7 +2720,7 @@ class MainWindow(QMainWindow):
             self._fetch_art(current)
 
             # Resolve + load, then seek + pause. Failures fall back to "just loaded".
-            thread = QThread(self)
+            thread = QThread()
             worker = _ResolveWorker(current)
             worker.moveToThread(thread)
             saved_pos = snapshot.position_seconds
@@ -2744,6 +2750,7 @@ class MainWindow(QMainWindow):
             thread.finished.connect(thread.deleteLater)
             self._resolve_thread = thread
             self._resolve_worker = worker
+            qthreads.retain(thread, worker)
             thread.start()
         finally:
             self._restoring_session = False

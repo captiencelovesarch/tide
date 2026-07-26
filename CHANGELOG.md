@@ -4,6 +4,24 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [1.2.6] — 2026-07-26 — instant play + worker-thread crash fix — first AUR release
+
+Supersedes the never-released 1.2.5. Rolls the instant-play work up with the use-after-free fix that was tearing down launch and playback, and ships tide to the Arch User Repository for the first time — `yay -S tide`.
+
+### Added
+- **Instant play** — clicking a track used to pay the full ~4.5 s yt-dlp resolve every time, because the prefetch that was supposed to have already done the work never ran (see the worker-lifetime fix below). With prefetch actually alive, resolution now starts before you commit: hovering a row begins a background resolve, and `attach_press` starts one on *mouse-down*, before activation even fires. `_play_track` joins an in-flight resolve instead of racing a duplicate one (10 s fallback timer, one retry on failure).
+- **Result warming** — staggered pre-resolve of the top N search results, restricted to slow-resolve sources and replaced wholesale on each new search.
+- **Playback settings section** — hover-prefetch toggle and a warm-results picker (off/2/3/5), applied live.
+- **Shutdown thread join** — `qthreads.join()` asks retained worker threads to quit and waits briefly (capped per thread), so an in-flight network resolve can't have its thread ripped out from under it at exit.
+
+### Fixed
+- **Worker threads are no longer freed while still running.** PySide6 gives *Python* ownership of a QObject built without a parent, so the C++ object is deleted as soon as the last Python reference to its wrapper drops. A worker moved onto a QThread that lost its last reference got freed from the GUI thread while its own thread was still dispatching events to it — a use-after-free surfacing as SIGSEGV inside `QObject::~QObject`, preceded by Qt's *"shared QObject was deleted directly. The program is malformed and may crash."* Signal connections don't help: PySide6 holds only a **weak** reference to a bound-method slot, so `thread.started.connect(worker.run)` keeps nothing alive. Per-instance attributes don't either — the next call overwrites them and drops the previous worker mid-flight. Every `(thread, worker)` pair now lives in a registry until the QThread emits `destroyed`, and worker threads are deliberately left unparented so a widget teardown can't abort on a still-running thread. This is what crashed tide on a fast track change, on overlapping prefetches, and on a quick second click into a library/album/artist page.
+- **Prefetch workers stopped being no-ops.** `StreamPrefetch`'s resolver workers were silently garbage-collected the moment `request()` returned — the module deliberately kept no Python references, as an earlier attempt to dodge a segfault. Every hover and neighborhood prefetch in 1.2.4 therefore did nothing at all.
+- **Doomed yt-dlp double round-trips are skipped.** After the authenticated pass fails, it's skipped for 30 minutes per cookiefile mtime rather than paying the failing round-trip on every resolve.
+
+### Packaging
+- First AUR release. `sha256sums` now carries a real checksum instead of `SKIP`, and the maintainer line is populated.
+
 ## [1.2.4] — 2026-07-02 — security hardening + live lyrics + bug fixes
 
 Supersedes the never-released 1.2.3.2. A full security pass (world-readable credential fix, art-fetch SSRF/local-file-read guard, mpv protocol allowlist, Subsonic cleartext-password enforcement, and remote-metadata UI-injection hardening) lands alongside live synced lyrics in Discord Rich Presence, the app-wide adaptive backdrop, browser-free YouTube Music playback, and the rest of the accuracy/robustness fixes below.
