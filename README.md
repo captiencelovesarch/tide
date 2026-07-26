@@ -9,6 +9,7 @@
 native Qt6 · 7 sources · 11 themes · 10 visualizers · 4 layouts · MPRIS2 · audio fx rack · adaptive accent + backdrop · pitch-shifting speed · zero config-file editing
 
 [![release](https://img.shields.io/github/v/release/captiencelovesarch/tide?style=flat-square&color=d4b95e&labelColor=0b0b0b)](https://github.com/captiencelovesarch/tide/releases/latest)
+[![aur](https://img.shields.io/aur/version/tide?style=flat-square&color=d4b95e&labelColor=0b0b0b&label=aur)](https://aur.archlinux.org/packages/tide)
 [![license](https://img.shields.io/badge/license-GPL--3.0-d4b95e?style=flat-square&labelColor=0b0b0b)](LICENSE)
 [![arch](https://img.shields.io/badge/distro-arch_linux-d4b95e?style=flat-square&labelColor=0b0b0b)](https://archlinux.org)
 [![qt6](https://img.shields.io/badge/qt-6-d4b95e?style=flat-square&labelColor=0b0b0b)](https://www.qt.io)
@@ -26,9 +27,7 @@ native Qt6 · 7 sources · 11 themes · 10 visualizers · 4 layouts · MPRIS2 ·
 </div>
 
 ```sh
-yay -S python-spotipy      # the one dependency that lives on the AUR
-git clone https://github.com/captiencelovesarch/tide.git
-cd tide && makepkg -si
+yay -S tide
 ```
 
 then launch `tide`, click **`[import]`**, you're listening. that's the whole setup.
@@ -225,6 +224,17 @@ details in [SECURITY.md](SECURITY.md) and the [changelog](CHANGELOG.md).
 
 ### arch linux
 
+tide is on the [AUR](https://aur.archlinux.org/packages/tide):
+
+```sh
+yay -S tide
+```
+
+that's it — your AUR helper pulls every dependency, including `python-spotipy` (the only one that isn't in the official repos). `paru -S tide` works the same way.
+
+<details>
+<summary>building from source instead</summary>
+
 ```sh
 yay -S python-spotipy      # AUR — the only dep not in the official repos
 git clone https://github.com/captiencelovesarch/tide.git
@@ -232,7 +242,11 @@ cd tide
 makepkg -si
 ```
 
-tide ends up at `/usr/bin/tide`. desktop launcher + icon get installed for KDE/GNOME menus. everything except `python-spotipy` resolves from the official repos; when AUR registrations reopen, `yay -S tide` will handle all of it.
+note that the PKGBUILD builds from the **tagged release tarball**, not your checkout — so this gets you the same package as the AUR, just built by hand. to build the working tree instead, use `PKGBUILD-git`.
+
+</details>
+
+tide ends up at `/usr/bin/tide`. desktop launcher + icon get installed for KDE/GNOME menus.
 
 ### sign in
 
@@ -328,7 +342,7 @@ python-watchdog            live re-index of local files
 librespot                  spotify connect device (playback shelved upstream)
 ```
 
-every dependency except `python-spotipy` (AUR) lives in Arch's official repos. the PKGBUILD is the entire dependency manifest.
+every dependency except `python-spotipy` (AUR) lives in Arch's official repos, and `yay -S tide` resolves all of them for you. the PKGBUILD is the entire dependency manifest.
 
 ## roadmap
 
