@@ -32,7 +32,7 @@ makedepends=(
   'python-hatchling'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')   # refresh after v1.2.0 tarball is published
+sha256sums=('32dd40fe366a3f3d06b8698844fb712450d915f49566890824724f038e9ad365')
 
 build() {
   cd "$pkgname-$pkgver"
