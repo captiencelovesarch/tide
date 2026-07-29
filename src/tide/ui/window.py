@@ -241,6 +241,15 @@ class _InstrumentalSearchWorker(QObject):
 
 
 class MainWindow(QMainWindow):
+    # How far [prev] can walk back across queue replacements.
+    PLAY_HISTORY_MAX = 100
+    # How often to re-check that the active source's session still authenticates.
+    AUTH_HEARTBEAT_MS = 10 * 60 * 1000
+    # How often to compare the recorded cookie expiry against the clock.
+    EXPIRY_WATCH_MS = 30 * 60 * 1000
+    # Warn this far ahead of the recorded expiry.
+    EXPIRY_WARN_SECONDS = 3 * 24 * 3600
+
     def __init__(self, api_obj: api.Api, player: PlaybackRouter | Player) -> None:
         super().__init__()
         self.setWindowTitle("tide")
@@ -310,6 +319,11 @@ class MainWindow(QMainWindow):
         self._last_position: float = 0.0
         self._restoring_session: bool = False
         self._session_dirty: bool = False
+        # Cross-queue play history for [prev]. queue.back() only walks the
+        # current queue array, and _play_now() clears that array on every
+        # pick, so this is the only thing that survives a queue replacement.
+        self._play_history: list[api.Track] = []
+        self._navigating_back: bool = False
 
         # Debounced session save — fires ~2s after the last change.
         self._session_save_timer = QTimer(self)
@@ -601,6 +615,23 @@ class MainWindow(QMainWindow):
         self._auth_expired_toasted: set[str] = set()
         source_registry().auth_expired.connect(self._on_source_auth_expired)
 
+        # Auth heartbeat. Cookie death used to surface only when the user
+        # happened to touch the API — i.e. mid-session, as songs quietly
+        # started resolving to the wrong thing. Poll a cheap authenticated
+        # endpoint on a timer so expiry announces itself instead.
+        self._auth_heartbeat = QTimer(self)
+        self._auth_heartbeat.setInterval(self.AUTH_HEARTBEAT_MS)
+        self._auth_heartbeat.timeout.connect(self._run_auth_heartbeat)
+        self._auth_heartbeat.start()
+        # And warn *before* the recorded cookie expiry lands, so a refresh can
+        # happen at a moment of the user's choosing rather than mid-song.
+        self._expiry_warned = False
+        self._expiry_watch = QTimer(self)
+        self._expiry_watch.setInterval(self.EXPIRY_WATCH_MS)
+        self._expiry_watch.timeout.connect(self._check_session_expiry)
+        self._expiry_watch.start()
+        QTimer.singleShot(8000, self._check_session_expiry)
+
         # ----- audio FX panel -----
         from .audio_fx_view import AudioFxView
         self.audio_fx_view = AudioFxView()
@@ -803,6 +834,79 @@ class MainWindow(QMainWindow):
         name = getattr(src, "name", "") or "youtube music"
         self.search.setPlaceholderText(f"search {name}…")
 
+    def _run_auth_heartbeat(self) -> None:
+        """Fire one cheap authenticated round-trip off-thread.
+
+        The source's own sentinel classifies the result: an auth-shaped
+        failure flips its expired flag and emits through the registry, which
+        lands on _on_source_auth_expired. Network blips raise non-auth errors
+        and are swallowed — a dead wifi link must never look like expiry."""
+        from PySide6.QtCore import QRunnable, QThreadPool
+        reg = source_registry()
+        for slug in ("ytmusic",):
+            source = reg.get(slug)
+            if source is None or not reg.is_enabled(slug):
+                continue
+            probe = getattr(source, "probe_auth", None)
+            if probe is None:
+                continue
+            try:
+                if not source.is_authenticated():
+                    continue          # already known-dead; don't re-probe
+            except Exception:
+                continue
+
+            class _Probe(QRunnable):
+                # Bind through __init__, not the enclosing scope: a closure
+                # over the loop variable would resolve at run() time, so
+                # every probe would hit the last source in the loop.
+                def __init__(self_inner, fn) -> None:
+                    super().__init__()
+                    self_inner._fn = fn
+
+                def run(self_inner) -> None:
+                    try:
+                        self_inner._fn()
+                    except Exception:
+                        pass
+
+            QThreadPool.globalInstance().start(_Probe(probe))
+
+    def _check_session_expiry(self) -> None:
+        """Warn ahead of the recorded YT Music cookie expiry.
+
+        Unknown expiry (None) means we simply have no data — an older import,
+        or session-scoped cookies — and must NOT be read as 'expiring'."""
+        if self._expiry_warned:
+            return
+        from .. import auth as auth_module
+        try:
+            remaining = auth_module.seconds_until_expiry()
+        except Exception:
+            return
+        if remaining is None or remaining > self.EXPIRY_WARN_SECONDS:
+            return
+        reg = source_registry()
+        if not reg.is_enabled("ytmusic"):
+            return
+        if "ytmusic" in self._auth_expired_toasted:
+            return      # already shouting about a dead session; don't pile on
+        self._expiry_warned = True
+        from .toast import show_toast
+        if remaining <= 0:
+            text = "youtube music: token has expired"
+        else:
+            days = int(remaining // 86400)
+            hours = int(remaining // 3600)
+            when = f"{days}d" if days >= 1 else f"{hours}h"
+            text = f"youtube music: token expires in {when}"
+        show_toast(
+            self.toast_host(),
+            text,
+            action_label="refresh token",
+            on_action=lambda: self._begin_source_reauth("ytmusic"),
+        )
+
     def _on_source_auth_expired(self, slug: str) -> None:
         """A source's saved session stopped authenticating (expired cookies).
 
@@ -816,12 +920,14 @@ class MainWindow(QMainWindow):
         source = source_registry().get(slug)
         name = getattr(source, "name", slug) or slug
         from .toast import show_toast
+        # Short on purpose. The old three-sentence version explained the
+        # whole failure mode in a 420px box, and "sign in" undersold what
+        # actually happens — the browser is nearly always still signed in,
+        # so one click re-imports the cookies with no interaction at all.
         show_toast(
-            self,
-            f"{name}: session expired — the imported cookies no longer work, "
-            "so search, library and home may come up empty or fail. "
-            "sign in again to fix it.",
-            action_label="sign in",
+            self.toast_host(),
+            f"{name}: token expired",
+            action_label="refresh token",
             on_action=lambda: self._begin_source_reauth(slug),
         )
         # Keep the Sources tab honest too (dot → warn, status → expired).
@@ -832,9 +938,72 @@ class MainWindow(QMainWindow):
             pass
 
     def _begin_source_reauth(self, slug: str) -> None:
-        """Toast-action handler. The modal must NOT open inside the click
-        handler (PySide6 + py3.14 segfault) — defer a tick, then run the
-        source panel's shared re-auth flow."""
+        """Toast-action handler for [refresh token].
+
+        For YT Music, try a silent cookie re-import first — the browser is
+        usually still signed in, so the whole thing resolves in one click with
+        no dialog. Only when no browser holds a live session do we fall back
+        to the wizard, which is the case where the user genuinely has to go
+        log in again."""
+        if slug == "ytmusic":
+            from .wizard import refresh_token_async
+            self.statusBar().showMessage("refreshing youtube music token…")
+            self._refresh_slug = slug
+            refresh_token_async(self._on_token_refreshed, self._on_token_refresh_failed)
+            return
+        self._open_source_reauth(slug)
+
+    def _on_token_refreshed(self, profile_label: str) -> None:
+        """Bound method (never a lambda) — worker signals deliver into the
+        emitting thread when connected to lambdas."""
+        slug = getattr(self, "_refresh_slug", "ytmusic")
+        if not profile_label:
+            # No browser had a live session: the user really is signed out.
+            self.statusBar().showMessage("no signed-in browser found")
+            self._open_source_reauth(slug)
+            return
+        source = source_registry().get(slug)
+        # Rebuild the source's client against the cookies we just wrote.
+        try:
+            rebuilt = bool(source.reload_client())
+        except Exception:
+            rebuilt = False
+        self._auth_expired_toasted.discard(slug)
+        self._expiry_warned = False      # fresh cookies → warn again next time
+        from .toast import show_toast
+        if not rebuilt:
+            show_toast(self.toast_host(), "token refreshed — restart tide to use it")
+            return
+        self.statusBar().showMessage(f"token refreshed from {profile_label}")
+        show_toast(self.toast_host(), f"token refreshed from {profile_label}")
+        self._refresh_after_reauth(slug)
+
+    def _on_token_refresh_failed(self, message: str) -> None:
+        slug = getattr(self, "_refresh_slug", "ytmusic")
+        self.statusBar().showMessage(f"token refresh failed: {message}")
+        self._open_source_reauth(slug)
+
+    def _refresh_after_reauth(self, slug: str) -> None:
+        if source_registry().active_slug != slug:
+            return
+        # Reload the views that went stale/empty under the dead session.
+        try:
+            self.explore_view.reload()
+        except Exception:
+            pass
+        try:
+            self.library_view.reload_playlists()
+        except Exception:
+            pass
+        try:
+            self.source_view.refresh_statuses()
+        except Exception:
+            pass
+
+    def _open_source_reauth(self, slug: str) -> None:
+        """Fallback path: open the source's own sign-in flow. The modal must
+        NOT open inside the click handler (PySide6 + py3.14 segfault) — defer
+        a tick, then run the source panel's shared re-auth flow."""
         def _open() -> None:
             try:
                 ok = self.source_view.reauth_source(slug)
@@ -848,17 +1017,8 @@ class MainWindow(QMainWindow):
                 return
             source = source_registry().get(slug)
             from .toast import show_toast
-            show_toast(self, f"{getattr(source, 'name', slug)}: signed back in")
-            if source_registry().active_slug == slug:
-                # Reload the views that went stale/empty under the dead session.
-                try:
-                    self.explore_view.reload()
-                except Exception:
-                    pass
-                try:
-                    self.library_view.reload_playlists()
-                except Exception:
-                    pass
+            show_toast(self.toast_host(), f"{getattr(source, 'name', slug)}: signed back in")
+            self._refresh_after_reauth(slug)
         QTimer.singleShot(0, _open)
 
     def _on_source_enabled_changed(self, slug: str, enabled: bool) -> None:
@@ -1017,7 +1177,6 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_search_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._search_thread = thread
         self._search_worker = worker
@@ -1260,7 +1419,6 @@ class MainWindow(QMainWindow):
         worker.failed.connect(lambda m: self.statusBar().showMessage(f"artist lookup failed: {m}"))
         worker.found.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         # Hold refs so they don't GC.
         self._artist_lookup_thread = thread
@@ -1302,6 +1460,15 @@ class MainWindow(QMainWindow):
     def _play_track(self, track: api.Track) -> None:
         if track is None:
             return
+        # Remember what we're leaving so [prev] can come back to it even when
+        # the queue got replaced underneath us. Skipped while navigating back
+        # (that would just re-push what we popped) and while restoring a
+        # session (nothing was actually "played" yet).
+        if (self._current is not None
+                and not self._navigating_back
+                and not self._restoring_session
+                and self._current.video_id != track.video_id):
+            self._push_play_history(self._current)
         # Any new play supersedes a pending in-flight join.
         self._awaiting_prefetch_vid = None
         self._await_fallback_timer.stop()
@@ -1382,7 +1549,6 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_resolve_failed)
         worker.resolved.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._resolve_thread = thread
         self._resolve_worker = worker
@@ -1456,7 +1622,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"couldn't resolve: {msg}")
         self.now_label.setStatus("error")
         from .toast import show_toast
-        show_toast(self, f"couldn't get audio · {msg[:80]}")
+        show_toast(self.toast_host(), f"couldn't get audio · {msg[:80]}")
 
     def _on_play_clicked(self) -> None:
         self.player.toggle()
@@ -1478,7 +1644,6 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_rate_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._rate_thread = thread
         self._rate_worker = worker
@@ -1512,14 +1677,64 @@ class MainWindow(QMainWindow):
         # If we're more than 3s into the song, restart it. Else go back.
         if self.player.duration > 0 and self._last_position > 3:
             self.player.seek(0)
+            # Reset eagerly instead of waiting for mpv's next position tick.
+            # Without this, a quick second press re-read the stale pre-seek
+            # position and restarted the track again instead of going back.
+            self._last_position = 0.0
+            self.progress.setPosition(0)
             return
         tr = self.queue.back()
         if tr:
             self._play_track(tr)
+            return
+        # Nothing before us *in the queue* — but "play now" replaces the queue
+        # wholesale, so picking tracks one at a time leaves current at row 0
+        # forever and queue.back() never has anywhere to go. Fall back to the
+        # cross-queue play history, which is what "previous track" means to
+        # anyone who isn't thinking about tide's queue model.
+        prev = self._pop_play_history()
+        if prev is not None:
+            self._play_from_history(prev)
+
+    # ---------- cross-queue play history ----------
+
+    def _push_play_history(self, track: api.Track) -> None:
+        if track is None:
+            return
+        if self._play_history and self._play_history[-1].video_id == track.video_id:
+            return
+        self._play_history.append(track)
+        del self._play_history[:-self.PLAY_HISTORY_MAX]
+
+    def _pop_play_history(self) -> api.Track | None:
+        return self._play_history.pop() if self._play_history else None
+
+    def _play_from_history(self, track: api.Track) -> None:
+        """Play a track pulled off the history stack without re-recording it
+        (that would make prev/next ping-pong between two songs forever)."""
+        # Keep the queue's idea of "current" in step, or the queue view stays
+        # highlighting the track we just left and up-next reads wrong.
+        row = next(
+            (i for i, t in enumerate(self.queue.tracks) if t.video_id == track.video_id),
+            -1,
+        )
+        if row < 0:
+            self.queue.add_prev(track)
+            row = max(0, self.queue.current_index - 1)
+        self._navigating_back = True
+        try:
+            self.queue.set_current(row)
+            self._play_track(track)
+        finally:
+            self._navigating_back = False
 
     def _refresh_nav_buttons(self) -> None:
         self.next_btn.setEnabled(self.queue.can_advance() or self.queue.radio_enabled)
-        self.prev_btn.setEnabled(self.queue.can_go_back() or self.player.duration > 0)
+        self.prev_btn.setEnabled(
+            self.queue.can_go_back()
+            or bool(self._play_history)
+            or self.player.duration > 0
+        )
 
     # ---------- queue / radio plumbing ----------
 
@@ -1629,7 +1844,6 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_instrumental_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._instrumental_swap_thread = thread
         self._instrumental_swap_worker = worker
@@ -1778,7 +1992,6 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_radio_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._radio_thread = thread
         self._radio_worker = worker
@@ -2568,6 +2781,11 @@ class MainWindow(QMainWindow):
             else:
                 self.resize(1100, 720)
 
+    def toast_host(self) -> QWidget:
+        """Where toasts should render. Always the main window today — kept as
+        a single point of redirection for any future multi-window mode."""
+        return self
+
     def open_settings(self) -> None:
         # Defer the modal past the click handler — opening a QDialog directly
         # inside the button's clicked emission segfaults on PySide6 + py3.14
@@ -2746,7 +2964,6 @@ class MainWindow(QMainWindow):
             worker.failed.connect(_on_failed)
             worker.resolved.connect(thread.quit)
             worker.failed.connect(thread.quit)
-            thread.finished.connect(worker.deleteLater)
             thread.finished.connect(thread.deleteLater)
             self._resolve_thread = thread
             self._resolve_worker = worker

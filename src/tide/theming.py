@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
@@ -264,6 +264,15 @@ class ThemeManager(QObject):
         # Sticky font family override — beats theme.typography.family when
         # set. Empty string means "use the theme's family".
         self._user_font: str = ""
+        # Deferred-restyle state. QApplication.setStyleSheet repolishes every
+        # widget in the process, and the widget style participates in that
+        # repolish — running it synchronously inside a signal emission is the
+        # PySide6 + py3.14 deadlock that froze the app whenever an adaptive
+        # palette landed. All restyles go through _queue_restyle instead.
+        self._pending_qss: str | None = None
+        self._pending_font: QFont | None = None
+        self._restyle_scheduled: bool = False
+        self._applied_qss: str | None = None
 
     def refresh(self) -> None:
         self._themes = discover_themes()
@@ -308,16 +317,49 @@ class ThemeManager(QObject):
             base_size_pt = float(theme.t("typography", "size_pt", 10))
             size_pt = _scale.round_pt(base_size_pt)
             weight = int(theme.t("typography", "weight", 400))
+            font: QFont | None = None
             if family:
                 font = QFont(family)
                 font.setPointSize(size_pt)
                 font.setWeight(QFont.Weight(weight))
-                app.setFont(font)
-            app.setStyleSheet(qss)
+            self._queue_restyle(qss, font)
 
         self._current = theme
         self.theme_changed.emit(effective_theme)
         return effective_theme
+
+    # ---------- deferred full-app restyle ----------
+
+    def _queue_restyle(self, qss: str, font: QFont | None = None) -> None:
+        """Schedule the app-wide stylesheet (and optionally font) for the next
+        event-loop turn.
+
+        Never call ``QApplication.setStyleSheet`` directly: it repolishes every
+        live widget, the widget style runs its own code (connections included)
+        during that repolish, and doing all of it inside whatever signal is
+        currently emitting is how the Breeze deadlock happened. Deferring also
+        coalesces — a burst of adaptive token nudges costs one repolish.
+        """
+        self._pending_qss = qss
+        if font is not None:
+            self._pending_font = font
+        if self._restyle_scheduled:
+            return
+        self._restyle_scheduled = True
+        QTimer.singleShot(0, self._flush_restyle)
+
+    def _flush_restyle(self) -> None:
+        self._restyle_scheduled = False
+        qss, self._pending_qss = self._pending_qss, None
+        font, self._pending_font = self._pending_font, None
+        app = QApplication.instance()
+        if app is None:
+            return
+        if font is not None:
+            app.setFont(font)
+        if qss is not None and qss != self._applied_qss:
+            app.setStyleSheet(qss)
+            self._applied_qss = qss
 
     def _with_overrides(self, theme: Theme) -> Theme:
         """Return a Theme whose tokens have the runtime overrides applied.
@@ -364,9 +406,7 @@ class ThemeManager(QObject):
             return
         effective = self._with_overrides(self._current)
         qss = _substitute(self._current.qss, effective)
-        app = QApplication.instance()
-        if app is not None:
-            app.setStyleSheet(qss)
+        self._queue_restyle(qss)
         self.theme_changed.emit(effective)
 
     def override_tokens(self, overrides: dict[str, str]) -> None:
@@ -384,9 +424,7 @@ class ThemeManager(QObject):
             return
         effective = self._with_overrides(self._current)
         qss = _substitute(self._current.qss, effective)
-        app = QApplication.instance()
-        if app is not None:
-            app.setStyleSheet(qss)
+        self._queue_restyle(qss)
         # Throttle: emit at most ~10Hz during a burst of overrides.
         import time as _t
         now = _t.monotonic()
@@ -415,9 +453,7 @@ class ThemeManager(QObject):
         if had and self._current is not None:
             effective = self._with_overrides(self._current)
             qss = _substitute(self._current.qss, effective)
-            app = QApplication.instance()
-            if app is not None:
-                app.setStyleSheet(qss)
+            self._queue_restyle(qss)
             # Emit with the effective theme (which may still contain user
             # overrides) so subscribers see the actual tokens in play.
             self.theme_changed.emit(effective)

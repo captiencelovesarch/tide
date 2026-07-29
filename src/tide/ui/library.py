@@ -196,7 +196,6 @@ class LibraryView(QWidget):
         worker.failed.connect(self._on_playlists_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._pls_thread = thread
         self._pls_worker = worker
@@ -242,7 +241,6 @@ class LibraryView(QWidget):
         worker.failed.connect(self._on_detail_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._detail_thread = thread
         self._detail_worker = worker

@@ -145,10 +145,10 @@ class StreamPrefetch(QObject):
 
         self._inflight.add(vid)
         # Unparented thread + unparented worker moved onto it; qthreads.retain
-        # holds both Python wrappers until the thread is destroyed, so the
-        # worker's C++ object can only ever be freed by worker.deleteLater()
-        # on the worker's own thread. See tide/qthreads.py for why anything
-        # less than that is a use-after-free.
+        # holds both Python wrappers until the thread is destroyed, and its
+        # ref-drop on the GUI thread is what frees the worker — never a
+        # worker-thread deleteLater. See tide/qthreads.py for both failure
+        # modes (use-after-free one way, GIL/mutex deadlock the other).
         thread = QThread()
         worker = _PrefetchWorker(track)
         worker.moveToThread(thread)
@@ -157,7 +157,6 @@ class StreamPrefetch(QObject):
         worker.failed.connect(self._on_failed)
         worker.resolved.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         qthreads.retain(thread, worker, group=_GROUP)
         thread.start()

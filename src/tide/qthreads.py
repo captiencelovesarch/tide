@@ -27,9 +27,25 @@ thread is still running. That is what crashed tide on a fast track change
 library/album/artist page.
 
 So every ``(thread, worker)`` pair lives in the registry below until the
-QThread emits ``destroyed``, which happens on the GUI thread *after*
-``worker.deleteLater()`` has already run on the worker's own thread — the only
-thread allowed to destroy it.
+QThread emits ``destroyed``. Dropping the registry entry is what destroys the
+worker: the last Python reference goes on the GUI thread, so the C++ object
+dies on the GUI thread, strictly after its QThread has finished.
+
+Never connect ``thread.finished`` to ``worker.deleteLater``
+-----------------------------------------------------------
+That was the original pattern here, and it deadlocked the whole app. The
+deferred delete runs inside ``QThreadPrivate::finish`` **on the worker's own
+thread**; destroying a PySide QObject there means Shiboken grabs Qt's pooled
+connection mutex (inside ``~QObject``) and then blocks waiting for the GIL.
+Meanwhile the GUI thread — which holds the GIL whenever Python runs — can be
+inside any ``QObject::connect`` (a restyle repolish makes hundreds), waiting
+on that same pooled mutex: lock inversion, permanent freeze, then the
+compositor's kill. Qt hashes unrelated objects onto a shared pool of
+connection mutexes, so the two threads don't need to touch the same object to
+collide. PySide wrapper destruction must therefore only ever happen on the
+GUI thread — which the registry guarantees. ``thread.deleteLater`` is fine:
+the QThread *object* lives on the GUI thread, so its deferred delete runs
+there.
 
 Threads are also deliberately left **unparented**. Destroying a QThread whose
 OS thread is still running is a Qt fatal abort, so a worker thread must never
@@ -45,8 +61,7 @@ Usage::
     thread.started.connect(worker.run)
     worker.done.connect(self._on_done)
     worker.done.connect(thread.quit)
-    thread.finished.connect(worker.deleteLater)
-    thread.finished.connect(thread.deleteLater)
+    thread.finished.connect(thread.deleteLater)   # NOT worker.deleteLater
     qthreads.retain(thread, worker)        # before start()
     thread.start()
 """

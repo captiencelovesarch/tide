@@ -340,7 +340,6 @@ class LyricsView(QWidget):
         worker.failed.connect(self._on_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker

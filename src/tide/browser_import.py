@@ -216,10 +216,37 @@ def _looks_printable(b: bytes) -> bool:
 # ---------- the public entry point ----------
 
 
+# Cookies whose lifetime actually gates an authenticated session. If any one
+# of these lapses, ytmusicapi starts 401ing — so the session's effective
+# expiry is the EARLIEST of them, not the latest.
+AUTH_COOKIES = (
+    "__Secure-3PAPISID",
+    "__Secure-3PSID",
+    "SAPISID",
+    "SID",
+)
+
+# Chromium stores expires_utc as microseconds since 1601-01-01 (the Windows
+# FILETIME epoch), which is 11644473600 seconds before the unix epoch.
+_CHROME_EPOCH_OFFSET = 11644473600
+
+
+def _chrome_time_to_unix(expires_utc: int) -> float | None:
+    """Convert a Chromium expires_utc to a unix timestamp. 0 means 'session
+    cookie' (dies with the browser) and has no meaningful expiry."""
+    if not expires_utc:
+        return None
+    return expires_utc / 1_000_000 - _CHROME_EPOCH_OFFSET
+
+
 @dataclass
 class ImportResult:
     profile: BrowserProfile
     cookies: dict[str, str] = field(default_factory=dict)
+    # Unix timestamp at which this session's earliest auth cookie lapses, or
+    # None when every auth cookie is session-scoped / unreadable. Surfaced so
+    # tide can warn BEFORE playback starts silently degrading.
+    expires_at: float | None = None
 
     @property
     def looks_signed_in(self) -> bool:
@@ -271,7 +298,8 @@ def import_cookies(profile: BrowserProfile) -> ImportResult:
             conn.close()
 
     out: dict[str, str] = {}
-    for host_key, name, value, encrypted_value, _expires in rows:
+    expiries: dict[str, float] = {}
+    for host_key, name, value, encrypted_value, expires in rows:
         if name in out:
             continue  # already have a fresher one (ORDER BY expires DESC)
         try:
@@ -285,5 +313,13 @@ def import_cookies(profile: BrowserProfile) -> ImportResult:
             continue
         if decoded:
             out[name] = decoded
+            if name in AUTH_COOKIES:
+                unix = _chrome_time_to_unix(expires or 0)
+                if unix is not None:
+                    expiries[name] = unix
 
-    return ImportResult(profile=profile, cookies=out)
+    return ImportResult(
+        profile=profile,
+        cookies=out,
+        expires_at=min(expiries.values()) if expiries else None,
+    )

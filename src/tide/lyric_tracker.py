@@ -145,7 +145,6 @@ class LyricTracker(QObject):
         thread.started.connect(worker.run)
         worker.done.connect(self._on_fetched)
         worker.done.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker

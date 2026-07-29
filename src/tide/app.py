@@ -8,7 +8,7 @@ import sys
 # mpv requires LC_NUMERIC=C; set it before anything else can touch locale.
 locale.setlocale(locale.LC_NUMERIC, "C")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
 
 from . import audio_fx, auth, auth_spotify, cache, config, qthreads, session as session_module, settings as settings_module, theming, ui_sounds as ui_sounds_module
 from .api import Api
@@ -116,6 +116,14 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     app = QApplication.instance() or QApplication(sys.argv)
+    # Pin the widget style: tide is styled entirely by theme QSS, and the
+    # platform style underneath is not inert — KDE's Breeze plugin makes
+    # QObject::connect calls during every full-app repolish, which deadlocks
+    # inside QApplication.setStyleSheet on PySide6 + py3.14. Fusion is the
+    # neutral built-in, and it renders the themes identically on every desktop.
+    fusion = QStyleFactory.create("Fusion")
+    if fusion is not None:
+        app.setStyle(fusion)
     app.setApplicationName("tide")
     app.setOrganizationName("tide")
     app.setDesktopFileName("tide")

@@ -193,7 +193,6 @@ class SpotifySignInDialog(QDialog):
         worker.failed.connect(self._on_failed)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         qthreads.retain(thread, worker)
         self._thread = thread

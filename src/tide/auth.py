@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from ytmusicapi import YTMusic
@@ -53,10 +54,19 @@ def have_auth() -> bool:
     return config.BROWSER_AUTH_FILE.is_file()
 
 
-def save_browser_auth(cookies: dict[str, str], user_agent: str | None = None) -> Path:
+def save_browser_auth(
+    cookies: dict[str, str],
+    user_agent: str | None = None,
+    expires_at: float | None = None,
+) -> Path:
     """Persist a browser-style auth dict that ytmusicapi can consume.
 
     `cookies` is a name->value dict harvested from the embedded webview.
+
+    `expires_at` is the session's earliest auth-cookie expiry (unix time),
+    recorded in a **sidecar** file rather than in browser.json — ytmusicapi
+    reads that file as a literal headers dict and sends every key it finds,
+    so an extra field would end up on the wire as a bogus HTTP header.
     """
     if REQUIRED_COOKIE not in cookies:
         raise ValueError(f"missing required cookie {REQUIRED_COOKIE} — user not fully signed in")
@@ -81,7 +91,73 @@ def save_browser_auth(cookies: dict[str, str], user_agent: str | None = None) ->
         config.BROWSER_AUTH_FILE,
         json.dumps(headers, indent=2, sort_keys=True),
     )
+    _write_secret(
+        _meta_file(),
+        json.dumps({"expires_at": expires_at, "imported_at": time.time()}, indent=2),
+    )
     return config.BROWSER_AUTH_FILE
+
+
+def _meta_file() -> Path:
+    return config.CONFIG_DIR / "browser_meta.json"
+
+
+def session_expires_at() -> float | None:
+    """Unix time the saved YT Music session lapses, or None if unknown.
+
+    Unknown is the honest answer for sessions imported before tide started
+    recording this, and for cookie jars whose auth cookies are all
+    session-scoped — callers must not treat None as "expired".
+    """
+    try:
+        data = json.loads(_meta_file().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    value = data.get("expires_at")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def seconds_until_expiry() -> float | None:
+    """Seconds left on the saved session, or None if unknown. Negative once
+    the recorded expiry has passed."""
+    at = session_expires_at()
+    return None if at is None else at - time.time()
+
+
+def refresh_from_browser() -> str | None:
+    """Re-harvest cookies from whichever browser still holds a live YouTube
+    Music session and overwrite the saved auth. Returns the profile label on
+    success, or None if no browser had a usable session.
+
+    This is the whole point of the one-click "refresh token" path: an expired
+    tide session almost always means *tide's copy* of the cookies went stale
+    while the browser itself is still signed in, so re-importing needs no
+    interaction at all. Only when every profile comes back signed-out does the
+    user actually have to go log in again.
+
+    Blocking (SQLite reads + a kwallet/libsecret round-trip per profile) —
+    call it off the GUI thread.
+    """
+    from . import browser_import as bi
+
+    last_error: Exception | None = None
+    for profile in bi.available_profiles():
+        try:
+            result = bi.import_cookies(profile)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if not result.looks_signed_in:
+            continue
+        try:
+            save_browser_auth(result.cookies, expires_at=result.expires_at)
+        except Exception as exc:
+            last_error = exc
+            continue
+        return profile.label
+    if last_error is not None and not bi.available_profiles():
+        raise last_error
+    return None
 
 
 def yt_client() -> YTMusic:
@@ -147,6 +223,7 @@ def yt_dlp_cookiefile() -> str | None:
 
 def clear_saved_auth() -> None:
     config.BROWSER_AUTH_FILE.unlink(missing_ok=True)
+    _meta_file().unlink(missing_ok=True)
     # Old, broken OAuth file from earlier dev — clean it up too.
     config.OAUTH_FILE.unlink(missing_ok=True)
     # Drop the derived yt-dlp cookie jar so a signed-out user resolves

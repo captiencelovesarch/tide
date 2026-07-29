@@ -198,7 +198,6 @@ class SubsonicSignInDialog(QDialog):
         thread.started.connect(worker.run)
         worker.done.connect(self._on_test_done)
         worker.done.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         qthreads.retain(thread, worker)
         self._thread = thread
