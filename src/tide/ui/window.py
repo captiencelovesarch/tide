@@ -2213,8 +2213,14 @@ class MainWindow(QMainWindow):
             return
         self.setAttribute(Qt.WA_TranslucentBackground, want)
         if self.isVisible():
-            self.hide()
-            self.show()
+            # Deferred: this runs inside theme_changed's emission, and a
+            # top-level hide/show inside a signal emission is the PySide6 +
+            # py3.14 crash pattern (same rule as the mini's toggle).
+            def _remap() -> None:
+                if self.isVisible():
+                    self.hide()
+                    self.show()
+            QTimer.singleShot(0, _remap)
 
     def _on_theme_changed(self, theme) -> None:
         prior = self._theme

@@ -156,19 +156,42 @@ class SettingsDialog(QDialog):
             self.font_picker.addItem(f"{f} · bundled", f)
         try:
             from PySide6.QtGui import QFont, QFontDatabase
+            from PySide6.QtWidgets import QListView
+
+            def _preview_font(family: str) -> QFont:
+                # Pin the size so one display face can't blow up row heights,
+                # and so every preview resolves against a bounded engine.
+                font = QFont(family)
+                font.setPointSize(10)
+                return font
+
             existing = {self.font_picker.itemData(i)
                         for i in range(self.font_picker.count())}
             for i in range(1, self.font_picker.count()):
                 self.font_picker.setItemData(
-                    i, QFont(self.font_picker.itemData(i)), Qt.FontRole
+                    i, _preview_font(self.font_picker.itemData(i)), Qt.FontRole
                 )
+            latin = QFontDatabase.WritingSystem.Latin
             for f in sorted(QFontDatabase.families()):
                 if f in existing or f.startswith("."):
-                    continue    # skip dupes + private system faces
+                    continue    # dupes + private system faces
+                systems = QFontDatabase.writingSystems(f)
+                if systems and latin not in systems:
+                    # Symbol/emoji/CJK-only faces are useless as a UI font,
+                    # and rendering their names in themselves is a glyph-
+                    # fallback stress test Qt has been seen to lose.
+                    continue
                 self.font_picker.addItem(f, f)
                 self.font_picker.setItemData(
-                    self.font_picker.count() - 1, QFont(f), Qt.FontRole
+                    self.font_picker.count() - 1, _preview_font(f), Qt.FontRole
                 )
+            # One prototype row sizes the whole popup. Without this, every
+            # app restyle made the popup's list view re-measure EVERY row in
+            # its own font (shapeText × hundreds of families × fallback
+            # queries) — the layout storm a real session died inside.
+            view = self.font_picker.view()
+            if isinstance(view, QListView):
+                view.setUniformItemSizes(True)
         except Exception:
             pass
         # Make editable so users can paste any family name. Typed names

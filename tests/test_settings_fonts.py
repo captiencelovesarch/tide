@@ -19,9 +19,14 @@ def _app() -> QApplication:
 
 
 def _proportional_family() -> str | None:
+    latin = QFontDatabase.WritingSystem.Latin
     for f in QFontDatabase.families():
-        if not QFontDatabase.isFixedPitch(f) and not f.startswith("."):
-            return f
+        if QFontDatabase.isFixedPitch(f) or f.startswith("."):
+            continue
+        systems = QFontDatabase.writingSystems(f)
+        if systems and latin not in systems:
+            continue    # the picker filters non-Latin faces out
+        return f
     return None
 
 
