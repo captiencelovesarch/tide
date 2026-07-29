@@ -76,11 +76,21 @@ class Toast(QFrame):
             f"QPushButton {{ background: transparent; color: {accent}; "
             f"border: 1px solid {accent}; border-radius: 3px; padding: 3px 10px; }}"
             f"QPushButton:hover {{ background: {accent}; color: {bg}; }}"
+            # The ✕ is square and glyph-only: the 10px side padding above
+            # ate all but 4px of its fixed 24px width, so it rendered as a
+            # clipped dot instead of a cross.
+            f"QPushButton#ToastDismiss {{ padding: 0px; }}"
         )
 
         self._label = QLabel(theming.styled_case(message), self)
         self._label.setWordWrap(True)
-        self._label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # heightForWidth is what makes a wrapped label report its REAL height
+        # once the toast width is capped below. Without it the label keeps
+        # advertising its single-line hint, the frame gets sized to one line,
+        # and every message longer than ~50 chars renders clipped.
+        label_policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        label_policy.setHeightForWidth(True)
+        self._label.setSizePolicy(label_policy)
         # Toast text can carry remote-derived error strings (e.g. a server
         # error message); plain-text it so markup never renders as HTML.
         self._label.setTextFormat(Qt.PlainText)
@@ -98,7 +108,9 @@ class Toast(QFrame):
             self._lifetime_ms = 0
 
         self._dismiss_btn = QPushButton("✕", self)
-        self._dismiss_btn.setFixedWidth(24)
+        self._dismiss_btn.setObjectName("ToastDismiss")
+        self._dismiss_btn.setFixedSize(24, 24)
+        self._dismiss_btn.setToolTip("dismiss")
         self._dismiss_btn.clicked.connect(self.dismiss)
         layout.addWidget(self._dismiss_btn)
 
@@ -111,7 +123,14 @@ class Toast(QFrame):
         parent_w = parent.width() if parent else 800
         max_w = min(420, max(260, parent_w - 80))
         self.setMaximumWidth(max_w)
-        self.adjustSize()
+        # Settle on the final width first, then ask the layout how tall the
+        # text actually needs to be AT that width. adjustSize() alone uses
+        # sizeHint(), which for a wrapped label is the unwrapped one-liner.
+        w = min(max_w, max(self.sizeHint().width(), self.minimumSizeHint().width()))
+        h = self.heightForWidth(w)
+        if h <= 0:
+            h = self.sizeHint().height()
+        self.resize(w, h)
 
         if parent is not None:
             parent.installEventFilter(self)

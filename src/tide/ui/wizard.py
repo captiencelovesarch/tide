@@ -47,6 +47,42 @@ class _ImportWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class _RefreshWorker(QObject):
+    """Silent re-import: no dialog, no browser round-trip, no user steps."""
+    done = Signal(str)      # profile label, or "" when no live session found
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            self.done.emit(auth.refresh_from_browser() or "")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+def refresh_token_async(on_done, on_failed=None) -> QThread:
+    """Kick off a background token refresh. ``on_done`` receives the browser
+    profile label on success, or "" when no browser held a live session.
+
+    Both callbacks MUST be bound methods, not lambdas — a lambda connected to
+    a worker signal runs in the *emitting* thread, which is exactly how you
+    get GUI calls off the GUI thread in this codebase.
+    """
+    thread = QThread()      # unparented — must outlive whatever started it
+    worker = _RefreshWorker()
+    worker.moveToThread(thread)
+    thread.started.connect(worker.run)
+    worker.done.connect(on_done)
+    if on_failed is not None:
+        worker.failed.connect(on_failed)
+    worker.done.connect(thread.quit)
+    worker.failed.connect(thread.quit)
+    thread.finished.connect(worker.deleteLater)
+    thread.finished.connect(thread.deleteLater)
+    qthreads.retain(thread, worker)
+    thread.start()
+    return thread
+
+
 class SignInDialog(QDialog):
     """Modal sign-in. Imports cookies from a user-chosen browser."""
 
@@ -164,7 +200,7 @@ class SignInDialog(QDialog):
             self._import_btn.setEnabled(True)
             return
         try:
-            auth.save_browser_auth(result.cookies)
+            auth.save_browser_auth(result.cookies, expires_at=result.expires_at)
         except Exception as exc:
             self._status.setText(f"couldn't save session: {exc}")
             self._import_btn.setEnabled(True)

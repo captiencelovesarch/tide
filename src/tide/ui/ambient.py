@@ -28,8 +28,15 @@ class AmbientController(QObject):
         super().__init__(parent)
         self._player = player
         self._central_bg = central_bg
+        # Every backdrop that wants the envelope. The main window's is always
+        # target zero; the mini player adds/removes its own while on screen.
+        self._targets = [central_bg]
         self._feed = audio_capture.feed()
         self._enabled = False
+        # The mini player's backdrop breathes whether or not the app-wide
+        # pulse toggle is on — it has its own setting, and the reactive
+        # gradient is the point of the mode.
+        self._mini_active = False
         self._holding = False
 
         self._player.state_changed.connect(self._on_state)
@@ -42,12 +49,24 @@ class AmbientController(QObject):
         if on == self._enabled:
             return
         self._enabled = on
-        if on:
-            # Start capturing immediately if we're already playing.
-            self._reconcile()
-        else:
-            self._release()
-            self._central_bg.set_pulse(0.0)
+        self._reconcile()
+
+    def set_mini_active(self, on: bool) -> None:
+        """Hold the capture for the mini player's own backdrop pulse."""
+        on = bool(on)
+        if on == self._mini_active:
+            return
+        self._mini_active = on
+        self._reconcile()
+
+    def add_target(self, central_bg) -> None:
+        if central_bg is not None and central_bg not in self._targets:
+            self._targets.append(central_bg)
+
+    def remove_target(self, central_bg) -> None:
+        if central_bg in self._targets:
+            self._targets.remove(central_bg)
+            self._set_pulse(0.0, [central_bg])
 
     def is_enabled(self) -> bool:
         return self._enabled
@@ -64,13 +83,24 @@ class AmbientController(QObject):
     def _on_state(self, _state) -> None:
         self._reconcile()
 
+    def _wants_pulse(self) -> bool:
+        return self._enabled or self._mini_active
+
+    def _set_pulse(self, level: float, targets=None) -> None:
+        for target in (self._targets if targets is None else targets):
+            try:
+                target.set_pulse(level)
+            except RuntimeError:
+                # Target's C++ side is gone (window torn down mid-fade).
+                pass
+
     def _reconcile(self) -> None:
-        if self._enabled and self._is_playing():
+        if self._wants_pulse() and self._is_playing():
             self._acquire()
         else:
             self._release()
             # Let the glow settle back down when playback stops.
-            self._central_bg.set_pulse(0.0)
+            self._set_pulse(0.0)
 
     def _acquire(self) -> None:
         if self._holding:
@@ -92,5 +122,5 @@ class AmbientController(QObject):
         self._holding = False
 
     def _on_pulse(self, level: float) -> None:
-        if self._enabled and self._holding:
-            self._central_bg.set_pulse(level)
+        if self._wants_pulse() and self._holding:
+            self._set_pulse(level)

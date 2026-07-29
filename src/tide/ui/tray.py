@@ -80,8 +80,13 @@ class TideTray(QObject):
             self._toggle_window()
 
     def _toggle_window(self) -> None:
-        if self.window.isVisible() and not self.window.isMinimized():
-            self.window.hide()
+        # "The window" is whichever one is active — the mini player stands in
+        # for the main window while mini mode is on.
+        target = getattr(self.window, "active_app_window", lambda: self.window)()
+        if target.isVisible() and not target.isMinimized():
+            target.hide()
+        elif hasattr(self.window, "present_active"):
+            self.window.present_active()
         else:
             self.window.showNormal()
             self.window.raise_()

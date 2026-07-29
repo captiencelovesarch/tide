@@ -528,9 +528,14 @@ class MprisService(QObject):
 
     def raise_window(self) -> None:
         try:
-            self._window.showNormal()
-            self._window.raise_()
-            self._window.activateWindow()
+            # Raise the mini player instead when mini mode is active.
+            present = getattr(self._window, "present_active", None)
+            if present is not None:
+                present()
+            else:
+                self._window.showNormal()
+                self._window.raise_()
+                self._window.activateWindow()
         except Exception:
             pass
 

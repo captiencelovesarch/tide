@@ -57,6 +57,15 @@ def _anon_lyrics_client() -> YTMusic:
 _AUTH_ERROR_MARKERS = ("http 401", "unauthenticated", "authentication credential")
 
 
+# The *other* way a YT Music session dies, and the one that actually bit:
+# YouTube keeps answering HTTP 200 and simply serves the signed-out payload.
+# The account menu comes back with no activeAccountHeaderRenderer, so
+# ytmusicapi's parser raises a KeyError walking to the account name. Nothing
+# in that path is a 401, which is why _AUTH_ERROR_MARKERS never matched and
+# the app degraded silently into anonymous results instead of saying so.
+_SIGNED_OUT_MARKERS = ("activeaccountheaderrenderer", "accountname")
+
+
 def _is_auth_error(exc: Exception) -> bool:
     """True when an exception from ytmusicapi looks like dead cookie auth.
 
@@ -68,6 +77,29 @@ def _is_auth_error(exc: Exception) -> bool:
     """
     text = str(exc).lower()
     return any(marker in text for marker in _AUTH_ERROR_MARKERS)
+
+
+def _is_signed_out_payload(exc: Exception) -> bool:
+    """True when a 200-OK response carried the anonymous account menu.
+
+    Deliberately narrow: only the account-header lookup is checked, and only
+    from ``probe_auth``. A broad "any KeyError means signed out" rule would
+    turn every future YouTube layout tweak into a bogus sign-in prompt.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in _SIGNED_OUT_MARKERS)
+
+
+def _ago(seconds: float) -> str:
+    """Coarse duration for status lines: '3d', '5h', '12m', 'just now'."""
+    seconds = max(0.0, seconds)
+    if seconds >= 86400:
+        return f"{int(seconds // 86400)}d"
+    if seconds >= 3600:
+        return f"{int(seconds // 3600)}h"
+    if seconds >= 60:
+        return f"{int(seconds // 60)}m"
+    return "<1m"
 
 
 class _AuthSentinel:
@@ -174,6 +206,8 @@ class YTMusicSource(MusicSource):
         self.yt = _AuthSentinel(yt, self._on_auth_error)
         self._signed_out = False
         self._auth_expired = False
+        # Unix time of the last probe that came back genuinely signed in.
+        self._last_auth_ok: float | None = None
 
     # ---------- auth surface ----------
 
@@ -193,12 +227,29 @@ class YTMusicSource(MusicSource):
     def probe_auth(self) -> None:
         """One cheap authenticated round-trip.
 
-        Called off-thread at startup so expired cookies are reported the
-        moment the app opens, not whenever the user first browses. Raises
-        on failure; the sentinel takes care of classifying/reporting, so
-        callers can swallow freely.
+        Called off-thread at startup and on a timer so a dead session is
+        reported on its own, rather than at whatever random moment the user
+        next changes songs. Raises on failure; classification/reporting is
+        handled here and by the sentinel, so callers can swallow freely.
+
+        Two distinct deaths are checked, because YouTube uses both:
+          * HTTP 401 — caught by the sentinel wrapping this call.
+          * HTTP 200 carrying the *signed-out* account menu — no error status
+            at all, just anonymous data. This is the one that made playback
+            "randomly" return things the user doesn't recognise, and it needs
+            an explicit check because nothing about it looks like a failure.
         """
-        self.yt.get_account_info()
+        try:
+            info = self.yt.get_account_info()
+        except Exception as exc:
+            if _is_signed_out_payload(exc):
+                self._on_auth_error()
+            raise
+        # Parsed fine but nameless == anonymous session.
+        if isinstance(info, dict) and not info.get("accountName"):
+            self._on_auth_error()
+            raise RuntimeError("youtube music returned a signed-out session")
+        self._last_auth_ok = time.time()
 
     def is_authenticated(self) -> bool:
         return self.yt is not None and not self._signed_out and not self._auth_expired
@@ -221,6 +272,24 @@ class YTMusicSource(MusicSource):
         auth.clear_saved_auth()
         self._signed_out = True
 
+    def reload_client(self) -> bool:
+        """Rebuild the live client from whatever is currently saved on disk.
+
+        The silent "refresh token" path rewrites ``browser.json`` from the
+        user's browser without any dialog; this is how the already-running
+        source picks those cookies up instead of needing a restart. Returns
+        True iff a client could be built.
+        """
+        from .. import auth
+        try:
+            self.yt = _AuthSentinel(auth.yt_client(), self._on_auth_error)
+        except Exception:
+            return False
+        self._signed_out = False
+        self._auth_expired = False
+        self._last_auth_ok = None      # unverified until the next probe
+        return True
+
     def begin_auth(self, parent_widget) -> bool:
         """Run the import wizard and refresh this live source's client so the
         user can sign back in *without restarting tide* — the recovery path
@@ -231,22 +300,36 @@ class YTMusicSource(MusicSource):
         flips back to authenticated immediately.
         """
         from ..ui.wizard import SignInDialog
-        from .. import auth
         dlg = SignInDialog(parent_widget)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return False
-        try:
-            self.yt = _AuthSentinel(auth.yt_client(), self._on_auth_error)
-        except Exception:
-            return False
-        self._signed_out = False
-        self._auth_expired = False
-        return True
+        return self.reload_client()
 
     def status_text(self) -> str:
         if self._auth_expired and not self._signed_out:
-            return "session expired — sign in to fix"
-        return "signed in (cookie import)" if self.is_authenticated() else "sign in via [import]"
+            return "token expired — use [refresh token] to fix"
+        if not self.is_authenticated():
+            return "sign in via [import]"
+        # Lead with when the session was last *verified*, not with the cookie
+        # deadline. Google invalidates sessions server-side long before the
+        # cookie timestamp lapses — a jar stamped "expires in 394 days" can be
+        # dead today — so the countdown alone would be false reassurance.
+        parts = ["signed in (cookie import)"]
+        if self._last_auth_ok is not None:
+            parts.append(f"verified {_ago(time.time() - self._last_auth_ok)} ago")
+        from .. import auth
+        try:
+            remaining = auth.seconds_until_expiry()
+        except Exception:
+            remaining = None
+        # Only worth saying when the cookie deadline is actually the binding
+        # constraint; otherwise it's noise.
+        if remaining is not None and remaining <= 14 * 86400:
+            parts.append(
+                "cookies expired" if remaining <= 0
+                else f"cookies expire in {_ago(remaining)}"
+            )
+        return " · ".join(parts)
 
     # ---------- required ----------
 

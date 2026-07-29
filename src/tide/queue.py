@@ -214,6 +214,22 @@ class Queue(QAbstractListModel):
         self._tracks.insert(target, track)
         self.endInsertRows()
 
+    def add_prev(self, track: Track) -> None:
+        """Insert immediately BEFORE the current track.
+
+        Used by the window's cross-queue [prev] history: a track we're
+        stepping back to belongs behind what's playing. Inserting it *after*
+        (add_next) put it one row ahead of the track we just left, so the
+        next back() walked forward into that track instead of continuing
+        backwards through history.
+        """
+        target = self._current if self._current >= 0 else 0
+        self.beginInsertRows(QModelIndex(), target, target)
+        self._tracks.insert(target, track)
+        if self._current >= target:
+            self._current += 1
+        self.endInsertRows()
+
     def remove(self, row: int) -> None:
         if not (0 <= row < len(self._tracks)):
             return
