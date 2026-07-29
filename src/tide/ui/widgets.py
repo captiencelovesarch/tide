@@ -399,6 +399,11 @@ class MonoVolume(QWidget):
 class AlbumArt(QLabel):
     """Sharp-scaled album art tile. Empty state shows a `[ no art ]` glyph."""
 
+    # Left-click released inside the tile. Declared on the base class so the
+    # circle/polaroid variants inherit it — the now-playing strip uses it to
+    # open the mini player, the mini player uses it to come back.
+    clicked = Signal()
+
     def __init__(self, size: int = 96, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._base_size = size
@@ -408,10 +413,55 @@ class AlbumArt(QLabel):
         self.setAlignment(Qt.AlignCenter)
         self._pixmap_raw: QPixmap | None = None
         self._radius = 0
+        self._pressed = False
+        self._press_pos = None
+        # The 1px fg border is part of the tile look in lists/strip; big
+        # standalone art (the mini player) turns it off via set_framed.
+        self._framed = True
         self._theme = theming.manager().current()
         self._apply_theme(self._theme)
         theming.manager().theme_changed.connect(self._apply_theme)
         self._render_empty()
+
+    def set_framed(self, framed: bool) -> None:
+        framed = bool(framed)
+        if framed != self._framed:
+            self._framed = framed
+            self._apply_theme(self._theme)
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton:
+            self._pressed = True
+            self._press_pos = ev.position().toPoint()
+            # Accept so the press doesn't propagate to a parent that starts a
+            # window drag (the mini player moves itself on body presses).
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:
+        # A press that travels is a drag, not a click. Hand it to the window
+        # system as a move so the art stays a grabbable surface.
+        if self._pressed:
+            from PySide6.QtWidgets import QApplication
+            moved = (ev.position().toPoint() - self._press_pos).manhattanLength()
+            if moved >= QApplication.startDragDistance():
+                self._pressed = False
+                win = self.window()
+                handle = win.windowHandle() if win is not None else None
+                if handle is not None:
+                    handle.startSystemMove()
+                ev.accept()
+                return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        was_pressed = self._pressed
+        self._pressed = False
+        # Release outside the tile = cancelled press, same as a QPushButton.
+        if was_pressed and ev.button() == Qt.LeftButton and self.rect().contains(ev.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(ev)
 
     def _apply_theme(self, theme) -> None:
         self._theme = theme
@@ -430,8 +480,9 @@ class AlbumArt(QLabel):
         if new_size != self._size:
             self._size = new_size
             self.setFixedSize(self._size, self._size)
+        border = f"1px solid {fg}" if self._framed else "none"
         self.setStyleSheet(
-            f"QLabel {{ background: {bg}; border: 1px solid {fg}; "
+            f"QLabel {{ background: {bg}; border: {border}; "
             f"border-radius: {radius}px; color: {fg}; }}"
         )
         if self._pixmap_raw is None:

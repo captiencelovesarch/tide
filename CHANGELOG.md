@@ -4,6 +4,33 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [unreleased] — the mini player deserves to exist now
+
+Mini mode used to be the main window with everything hidden, shrunk to 340×360 with its title bar still on. Full redo: it is now a **dedicated frameless window** (`ui/mini.py`) with the adaptive gradient painted edge to edge, and the old shrink-in-place behavior is gone.
+
+### Added
+- **Click the album art to enter it.** Single click on the now-playing art (any variant — square, circle, polaroid) opens the mini; clicking the mini's art brings the full window back. Ctrl+M still toggles both ways, Esc and `[⤢ expand]` exit, and drag-anywhere moves it (press-and-drag on the art works too).
+- **The backdrop is alive.** The mini paints the same album-palette gradient as the adaptive theme — and it keeps working *even when both main adaptive toggles are off* (`AdaptiveDriver.set_mini_active` counts the mini as a palette consumer while it's on screen). With "bass pulse" on (default), the gradient breathes with the actual low-end envelope from the audio capture. Style is changeable from the mini's right-click menu or Settings → appearance → mini player: follow main / living fields / diagonal band / bass arch / off.
+- **The window border is the progress bar.** A thin accent ring traced around the frameless edge fills clockwise with playback, and clicking anywhere along the border seeks there. Prefer the classic look? `progress: thin bar` swaps it.
+- **Live lyric ticker** — one always-visible synced-lyric line under the artist, scramble-animated, fed by its own `LyricTracker` (the Discord one keeps its own enable state). Long lines don't get chopped to "…": the ticker wraps up to three lines and the window smoothly grows *down* to make room (width can't budge — Wayland anchors a widening window at its left edge — and the label's height is pinned per line, never per scramble frame, so the anti-spazz guarantee holds). The `[lyrics]` button expands a full synced-lyrics panel in place; its open/closed state is remembered.
+- **`[pin]`** — keep the mini above other windows, from the button, the right-click menu, or Settings. On Wayland no client-side hint can do this (xdg-shell has no keep-above), so tide asks **KWin directly over its scripting D-Bus**; on X11 it's the plain `WindowStaysOnTopHint`. Re-applied on every show (a remap loses the flag), and on non-KDE Wayland compositors it degrades to a toast pointing at window rules.
+- **Art ⇄ visualizer flip** — the album-art tile can swap for a live visualizer canvas (right-click → "visualizer tile", or the checkbox in Settings → mini player). It reuses the main visualizer's renderers (theme-picked) painting straight over the breathing backdrop, and the audio capture is only held while the mini is on screen with the vis tile showing and music actually playing.
+- **Zen** — leave the mouse alone for a beat and the labels and controls fade out while the window itself draws up in one linear motion, until only the art card (gradient frame, ring and all) is left sitting on the desk. Any hover wakes it and the window grows back. Off-switchable ("auto-hide controls").
+- **Lyrics always get room.** The same collapse serves the lyrics panel: if opening it would push the window past the bottom of the screen, the controls fold away immediately so the panel fits — and idle re-collapses them while the squeeze is needed, whether or not zen is enabled.
+- **Bass resize (opt-in)** — with "bass resize" on, the card *physically* swells with the low-end envelope, up to 8px a side with the border ring riding along, quantized to whole pixels. It grows **from its center**: the window pre-reserves the full pad as a transparent gutter and the card breathes into it, so the window geometry never changes — necessary on Wayland, where a genuinely growing window would stay pinned at its top-left and only ever expand right/down. Flip it in the right-click menu or Settings → mini player.
+- **Scroll anywhere = volume**, with a quick glow kick in the backdrop as feedback when it isn't already pulsing.
+- **"start in mini player"** — the `mini_mode_default` setting existed since v1.1 and was never read; it now works and has a checkbox.
+- Theme personality carries over wholesale: bracket buttons, per-theme text case (l33t in synthwave, UPPER in terminal-green), theme fonts, adaptive accent — the mini is unmistakably tide in every theme.
+
+### Changed
+- Compact layouts (walkman) no longer piggyback on mini mode — `apply_layout` handles chrome via its visibility flags alone, which also fixes Ctrl+M inside walkman force-showing the nav rail against the layout's wishes.
+- Toasts, the tray toggle, and MPRIS `Raise` all target whichever window is active, so nothing renders into (or raises) a hidden main window while the mini is up.
+- The mini's album art drops the 1px tile border (`AlbumArt.set_framed(False)`) — big art reads better bare over the gradient; list/strip tiles keep their frame.
+
+### Fixed
+- Quitting from the tray while the mini is open closes it cleanly instead of leaving a headless window keeping a dead player company; closing the mini from the compositor exits to the full window instead of stranding the app with no windows at all.
+- **The mini no longer spazzes when a new lyric line lands.** The title/artist/ticker labels are pinned to the art's width: without the pin, every scramble frame re-measured the label (non-mono theme fonts give each random-glyph frame a different pixel width) and the fixed-size layout re-negotiated the *window* per frame — a visible shudder on every ticker update, zen included. Scrambles are also skipped entirely while zen has the ticker invisible.
+
 ## [1.2.7] — 2026-07-29 — the prev button works, expiry stops being a surprise, and a freeze-crash dies
 
 Four annoyances from the first AUR release, all small on the surface and none small underneath.

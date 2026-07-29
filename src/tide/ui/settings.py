@@ -208,6 +208,32 @@ class SettingsDialog(QDialog):
             "ui sounds (nav · modals · toggles · auto-mutes during playback)"
         )
 
+        # ---- mini player (v1.2.7 redo — dedicated frameless window,
+        # opened by clicking the now-playing art or Ctrl+M). Everything
+        # here is also reachable from the mini's own right-click menu.
+        self.mini_default_toggle = QCheckBox("start in mini player")
+        self.mini_backdrop_picker = QComboBox()
+        self.mini_backdrop_picker.addItem("follow main backdrop style", "follow")
+        self.mini_backdrop_picker.addItem("living fields · layered ambience", "field")
+        self.mini_backdrop_picker.addItem("diagonal band · classic sweep", "band")
+        self.mini_backdrop_picker.addItem("bass arch · hill swells on bass", "vbeam")
+        self.mini_backdrop_picker.addItem("off · flat card", "off")
+        self.mini_progress_picker = QComboBox()
+        self.mini_progress_picker.addItem("border ring · the window edge fills", "ring")
+        self.mini_progress_picker.addItem("thin bar", "thin")
+        self.mini_pin_toggle = QCheckBox("pin on top of other windows")
+        self.mini_ticker_toggle = QCheckBox("live synced-lyric ticker line")
+        self.mini_zen_toggle = QCheckBox("auto-hide controls when idle")
+        self.mini_pulse_toggle = QCheckBox("backdrop breathes with the bass")
+        self.mini_pulse_resize_toggle = QCheckBox(
+            "window breathes too · resizes on bass"
+        )
+        # The resize rides the pulse envelope — no pulse, nothing to ride.
+        self.mini_pulse_toggle.toggled.connect(
+            self.mini_pulse_resize_toggle.setEnabled
+        )
+        self.mini_vis_toggle = QCheckBox("visualizer instead of album art")
+
         appearance_form = QFormLayout()
         appearance_form.addRow("theme:", self.theme_picker)
         appearance_form.addRow("layout:", self.layout_picker)
@@ -230,6 +256,19 @@ class SettingsDialog(QDialog):
         appearance_form.addRow("ui scale:", self.scale_picker)
         appearance_form.addRow("speed:", self.preserve_pitch_toggle)
         appearance_form.addRow("visualizer audio:", self.audio_device_picker)
+
+        mini_heading = QLabel("── mini player ────────────")
+        mini_heading.setProperty("class", "dim")
+        appearance_form.addRow(mini_heading)
+        appearance_form.addRow("", self.mini_default_toggle)
+        appearance_form.addRow("  backdrop:", self.mini_backdrop_picker)
+        appearance_form.addRow("  progress:", self.mini_progress_picker)
+        appearance_form.addRow("", self.mini_pin_toggle)
+        appearance_form.addRow("", self.mini_ticker_toggle)
+        appearance_form.addRow("", self.mini_zen_toggle)
+        appearance_form.addRow("", self.mini_pulse_toggle)
+        appearance_form.addRow("", self.mini_pulse_resize_toggle)
+        appearance_form.addRow("", self.mini_vis_toggle)
 
         # ---- playback ----
         playback_heading = QLabel("── playback ───────────────")
@@ -554,6 +593,27 @@ class SettingsDialog(QDialog):
             # combo's text field directly.
             self.font_picker.setCurrentText(font_override)
 
+        self.mini_default_toggle.setChecked(bool(self._settings.mini_mode_default))
+        mini_bd_idx = self.mini_backdrop_picker.findData(
+            self._settings.mini_backdrop_style or "follow"
+        )
+        if mini_bd_idx >= 0:
+            self.mini_backdrop_picker.setCurrentIndex(mini_bd_idx)
+        mini_pr_idx = self.mini_progress_picker.findData(
+            self._settings.mini_progress_style or "ring"
+        )
+        if mini_pr_idx >= 0:
+            self.mini_progress_picker.setCurrentIndex(mini_pr_idx)
+        self.mini_pin_toggle.setChecked(bool(self._settings.mini_pin))
+        self.mini_ticker_toggle.setChecked(bool(self._settings.mini_ticker))
+        self.mini_zen_toggle.setChecked(bool(self._settings.mini_zen))
+        self.mini_pulse_toggle.setChecked(bool(self._settings.mini_pulse))
+        self.mini_pulse_resize_toggle.setChecked(
+            bool(self._settings.mini_pulse_resize))
+        self.mini_pulse_resize_toggle.setEnabled(bool(self._settings.mini_pulse))
+        self.mini_vis_toggle.setChecked(
+            bool(self._settings.mini_show_visualizer))
+
         self.prefetch_hover_toggle.setChecked(bool(self._settings.prefetch_hover))
         warm_idx = self.prefetch_warm_picker.findData(
             int(self._settings.prefetch_warm_results or 0)
@@ -651,6 +711,21 @@ class SettingsDialog(QDialog):
             self.adaptive_style_picker.currentData() or "field"
         )
         self._settings.adaptive_pulse = self.adaptive_pulse_toggle.isChecked()
+        self._settings.mini_mode_default = self.mini_default_toggle.isChecked()
+        self._settings.mini_backdrop_style = (
+            self.mini_backdrop_picker.currentData() or "follow"
+        )
+        self._settings.mini_progress_style = (
+            self.mini_progress_picker.currentData() or "ring"
+        )
+        self._settings.mini_pin = self.mini_pin_toggle.isChecked()
+        self._settings.mini_ticker = self.mini_ticker_toggle.isChecked()
+        self._settings.mini_zen = self.mini_zen_toggle.isChecked()
+        self._settings.mini_pulse = self.mini_pulse_toggle.isChecked()
+        self._settings.mini_pulse_resize = (
+            self.mini_pulse_resize_toggle.isChecked()
+        )
+        self._settings.mini_show_visualizer = self.mini_vis_toggle.isChecked()
         self._settings.corner_style = self.corner_picker.currentData() or "sharp"
         self._settings.nav_icon_set = self.nav_icons_picker.currentData() or "off"
         # Prefer the picker's data (preset family) if it's still selected;

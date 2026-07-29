@@ -294,7 +294,11 @@ def run(argv: list[str] | None = None) -> int:
     if saved_session is not None and saved_session.tracks:
         window.restore_session(saved_session)
 
-    window.show()
+    # "start in mini player": skip showing the main window entirely — the
+    # mini opens further down, once settings/adaptive/ambient are attached
+    # (set_mini_mode consults all three).
+    if not user_settings.mini_mode_default:
+        window.show()
 
     # System integration: MPRIS2 (media keys + KDE/GNOME panel controls).
     mpris = MprisService(player, window.queue, window)
@@ -407,7 +411,7 @@ def run(argv: list[str] | None = None) -> int:
         # its own). No URL → informational toast with no clickable action.
         safe_url = url if url.startswith("https://github.com/") else ""
         show_toast(
-            window,
+            window.toast_host(),
             f"new tide release: {tag}",
             action_label="view" if safe_url else None,
             on_action=(lambda: QDesktopServices.openUrl(_QUrl(safe_url))) if safe_url else None,
@@ -465,6 +469,12 @@ def run(argv: list[str] | None = None) -> int:
     ui_sounds = ui_sounds_module.UiSoundPlayer(parent=window)
     ui_sounds.set_enabled(bool(user_settings.ui_sounds_enabled))
     window.ui_sounds = ui_sounds
+
+    # Everything set_mini_mode needs (window._settings, window._adaptive,
+    # window._ambient) is attached above — safe to open the mini now. The
+    # never-shown main window stays hidden; its hide() inside is a no-op.
+    if user_settings.mini_mode_default:
+        window.set_mini_mode(True)
 
     from .player import PlayState as _PlayState
 

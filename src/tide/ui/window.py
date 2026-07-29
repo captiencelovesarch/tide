@@ -275,7 +275,7 @@ class MainWindow(QMainWindow):
         self._rate_worker: _RateWorker | None = None
         self._liked_current: bool = False
         self._mini_mode: bool = False
-        self._geometry_before_mini = None
+        self._mini = None                   # lazy MiniPlayer window
         self._upper_wrap_widget = None
 
         # Stream-URL prefetch — kicks off while the current track is finishing
@@ -682,10 +682,7 @@ class MainWindow(QMainWindow):
         self._slot_controls = layout.slots.get("controls", "bracket")
 
         self.art = make_album_art(self._slot_album_art, 96)
-        # Double-click art = mini-mode toggle.
-        def _art_double_click(_ev):
-            self.toggle_mini_mode()
-        self.art.mouseDoubleClickEvent = _art_double_click   # type: ignore[assignment]
+        self._wire_art_click(self.art)
         self.now_label = make_now_label(self._slot_now_label)
         self.up_next = QLabel("")
         self.up_next.setProperty("class", "dim")
@@ -1608,6 +1605,8 @@ class MainWindow(QMainWindow):
         can_like = bool(cur_source and cur_source.supports("rating"))
         can_radio = bool(cur_source and cur_source.supports("radio"))
         self.like_btn.setEnabled(can_like)
+        if self._mini is not None:
+            self._mini.set_like_enabled(can_like)
         self.radio_btn.setEnabled(can_radio)
         # Best-effort like-state lookup in the background; UI defaults to ♡.
         self._liked_current = False
@@ -1635,6 +1634,8 @@ class MainWindow(QMainWindow):
         self._liked_current = target
         self._refresh_like_button()
         self.like_btn.setEnabled(False)
+        if self._mini is not None:
+            self._mini.set_like_enabled(False)
 
         thread = QThread()
         worker = _RateWorker(self.api, self._current.video_id, target)
@@ -1654,6 +1655,8 @@ class MainWindow(QMainWindow):
         if self._current and self._current.video_id == video_id:
             self.statusBar().showMessage("liked" if liked else "removed like")
             self.like_btn.setEnabled(True)
+            if self._mini is not None:
+                self._mini.set_like_enabled(True)
 
     def _on_rate_failed(self, video_id: str, msg: str) -> None:
         # Revert optimistic flip.
@@ -1661,12 +1664,16 @@ class MainWindow(QMainWindow):
             self._liked_current = not self._liked_current
             self._refresh_like_button()
             self.like_btn.setEnabled(True)
+            if self._mini is not None:
+                self._mini.set_like_enabled(True)
         self.statusBar().showMessage(f"couldn't update like: {msg}")
 
     def _refresh_like_button(self) -> None:
         glyph = "♥" if self._liked_current else "♡"
         self.like_btn.setLabel(glyph)
         self.like_btn.setGlyph(glyph)
+        if self._mini is not None:
+            self._mini.set_liked(self._liked_current)
 
     def _on_next_clicked(self) -> None:
         tr = self.queue.advance()
@@ -1735,6 +1742,9 @@ class MainWindow(QMainWindow):
             or bool(self._play_history)
             or self.player.duration > 0
         )
+        if self._mini is not None:
+            self._mini.set_nav_enabled(self.prev_btn.isEnabled(),
+                                       self.next_btn.isEnabled())
 
     # ---------- queue / radio plumbing ----------
 
@@ -2612,15 +2622,11 @@ class MainWindow(QMainWindow):
         prev_mode = getattr(self, "_layout_mode", "classic")
         self._layout_mode = new_mode
         if new_mode != prev_mode:
-            # Toggle mini-mode style hiding and rebuild strip orientation.
-            if new_mode == "compact":
-                if not self._mini_mode:
-                    self.set_mini_mode(True)
-                self._rebuild_strip("compact")
-            else:
-                if self._mini_mode:
-                    self.set_mini_mode(False)
-                self._rebuild_strip("classic")
+            # Chrome hiding is fully covered by the visibility flags above;
+            # compact layouts only need the strip re-oriented. (They used to
+            # also call set_mini_mode, which now opens a separate window —
+            # and whose old behavior was redundant here anyway.)
+            self._rebuild_strip("compact" if new_mode == "compact" else "classic")
         self.resize(*layout.window_default)
 
         self.statusBar().showMessage(
@@ -2648,9 +2654,7 @@ class MainWindow(QMainWindow):
 
     def _swap_album_art(self, slug: str) -> None:
         new = make_album_art(slug, 96)
-        def _art_double_click(_ev):
-            self.toggle_mini_mode()
-        new.mouseDoubleClickEvent = _art_double_click   # type: ignore[assignment]
+        self._wire_art_click(new)
         self._replace_in_layout(self.art, new)
         self.art = new
 
@@ -2759,31 +2763,94 @@ class MainWindow(QMainWindow):
 
     # ---------- mini-mode ----------
 
+    def _wire_art_click(self, art) -> None:
+        """Single click on the now-playing art opens the mini player."""
+        art.clicked.connect(self.toggle_mini_mode)
+        art.setCursor(Qt.PointingHandCursor)
+        art.setToolTip("mini player")
+
     def toggle_mini_mode(self) -> None:
+        # Deferred: reached from mouse handlers (art click) and shortcuts —
+        # window show/hide inside the emission is the PySide6 + py3.14 crash
+        # pattern (see open_settings below).
+        QTimer.singleShot(0, self._toggle_mini_now)
+
+    def _toggle_mini_now(self) -> None:
         self.set_mini_mode(not self._mini_mode)
 
+    def exit_mini_mode(self) -> None:
+        self.set_mini_mode(False)
+
     def set_mini_mode(self, on: bool) -> None:
+        """Swap between the main window and the dedicated mini player.
+
+        The mini is a separate frameless top-level (ui/mini.py) — the old
+        shrink-the-main-window mini died in v1.2.7's redo.
+        """
         if on == self._mini_mode:
             return
         self._mini_mode = on
+        adaptive = getattr(self, "_adaptive", None)
+        ambient = getattr(self, "_ambient", None)
         if on:
-            self._geometry_before_mini = self.saveGeometry()
-            if self._upper_wrap_widget is not None:
-                self._upper_wrap_widget.setVisible(False)
-            self.statusBar().setVisible(False)
-            self.resize(340, 360)
+            if self._mini is None:
+                from .mini import MiniPlayer
+                self._mini = MiniPlayer(self)
+            if adaptive is not None:
+                adaptive.set_mini_active(True)
+            if ambient is not None:
+                # The mini itself is the target — it fans the envelope into
+                # its backdrop and (optionally) the bass-resize breathing.
+                ambient.add_target(self._mini)
+            self._mini.sync_now(
+                self._current,
+                self.player.duration,
+                self._last_position,
+                self.player.state,
+                self._liked_current,
+            )
+            self._mini.show()
+            self._mini.raise_()
+            self._mini.activateWindow()
+            self.hide()
         else:
-            if self._upper_wrap_widget is not None:
-                self._upper_wrap_widget.setVisible(True)
-            self.statusBar().setVisible(True)
-            if self._geometry_before_mini is not None:
-                self.restoreGeometry(self._geometry_before_mini)
-            else:
-                self.resize(1100, 720)
+            if self._mini is not None:
+                if ambient is not None:
+                    ambient.remove_target(self._mini)
+                self._mini.hide()
+            if adaptive is not None:
+                adaptive.set_mini_active(False)
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+    def _apply_mini_backdrop(self) -> None:
+        """Live-apply mini_* settings to an open mini (settings-dialog save)."""
+        if self._mini is not None and self._mini_mode:
+            self._mini.apply_settings()
+
+    # ---------- multi-window helpers (tray / MPRIS) ----------
+
+    def active_app_window(self) -> QWidget:
+        """The window the user currently interacts with — mini or main."""
+        if self._mini_mode and self._mini is not None:
+            return self._mini
+        return self
+
+    def present_active(self) -> None:
+        w = self.active_app_window()
+        if w is self:
+            self.showNormal()
+        else:
+            w.show()
+        w.raise_()
+        w.activateWindow()
 
     def toast_host(self) -> QWidget:
-        """Where toasts should render. Always the main window today — kept as
-        a single point of redirection for any future multi-window mode."""
+        """Where toasts should render — the hidden main window can't show
+        them while the mini is up."""
+        if self._mini_mode and self._mini is not None and self._mini.isVisible():
+            return self._mini
         return self
 
     def open_settings(self) -> None:
@@ -2857,6 +2924,8 @@ class MainWindow(QMainWindow):
         ambient = getattr(self, "_ambient", None)
         if ambient is not None:
             ambient.set_pulse_enabled(new.adaptive_pulse and new.adaptive_background)
+        # Live-apply mini player prefs if the mini is currently up.
+        self._apply_mini_backdrop()
         radius_px = _corner_radius(new.corner_style)
         theming.manager().set_user_override(
             "radius", f"{radius_px}px" if radius_px > 0 else None
@@ -2988,6 +3057,17 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             return
+        # Real quit: the mini is a separate top-level and would outlive
+        # super().closeEvent, leaving the app idling headless with a dead
+        # player. Commit to quitting (the mini's own closeEvent reroutes
+        # compositor closes to exit-mini unless _wants_quit says otherwise),
+        # then close it before the player goes down.
+        self._wants_quit = True
+        if self._mini is not None:
+            try:
+                self._mini.close()
+            except RuntimeError:
+                pass
         if self._session_dirty:
             self._save_session_now()
         else:

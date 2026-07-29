@@ -272,6 +272,10 @@ class AdaptiveDriver(QObject):
         # Independent of the accent shift; the user can have either, both,
         # or neither.
         self._background_enabled = False
+        # The mini player paints an adaptive backdrop unconditionally — that
+        # look IS the feature — so it counts as an ambient consumer for as
+        # long as it is on screen, regardless of the app-wide toggles above.
+        self._mini_active = False
         self._current_url: str | None = None
 
         self._palette_jobs: set[_PaletteWorker] = set()
@@ -305,15 +309,38 @@ class AdaptiveDriver(QObject):
             # remaining ambient override so the theme baseline returns.
             theming.manager().clear_accent_override()
 
+    def set_mini_active(self, on: bool) -> None:
+        """Mark the mini player as an active consumer of the album palette.
+
+        Keeps extraction running (and ``ambient_bg`` flowing) while the mini
+        window is up even when both app-wide adaptive toggles are off. The
+        accent override rides along, as it already does for the
+        background-only case; the main window is hidden while mini is open,
+        so nothing else is looking at it until we clear it on the way out.
+        """
+        on = bool(on)
+        if on == self._mini_active:
+            return
+        self._mini_active = on
+        if on:
+            self._on_track_changed(self._queue.current)
+        elif not self.is_enabled():
+            theming.manager().clear_accent_override()
+
     def is_enabled(self) -> bool:
         return (
             self._enabled
             or self._background_enabled
+            or self._mini_active
             or self._theme_demands_adaptive()
         )
 
     def _wants_ambient_bg(self) -> bool:
-        return self._background_enabled or self._theme_demands_adaptive()
+        return (
+            self._background_enabled
+            or self._mini_active
+            or self._theme_demands_adaptive()
+        )
 
     def _theme_demands_adaptive(self) -> bool:
         t = theming.manager().current()

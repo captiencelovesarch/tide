@@ -27,6 +27,33 @@ class Settings:
     volume: int = 80
     sleep_preset_minutes: int = 30
     mini_mode_default: bool = False
+    # v1.2.7 mini player redo — the dedicated frameless window (ui/mini.py).
+    # Backdrop: "follow" = use adaptive_background_style; or a concrete
+    # "field" | "band" | "vbeam", or "off" for a flat card.
+    mini_backdrop_style: str = "follow"
+    # "ring" = window border fills as the progress bar; "thin" = classic bar.
+    mini_progress_style: str = "ring"
+    # Live synced-lyric line under the artist.
+    mini_ticker: bool = True
+    # Controls fade out after the mouse leaves the mini alone for a beat.
+    mini_zen: bool = True
+    # Mini backdrop swells with the bass envelope (independent of the main
+    # window's adaptive_pulse — it has to be; the whole mode is the backdrop).
+    mini_pulse: bool = True
+    # The mini's card physically swells from its center with the bass
+    # (frame + ring breathe into a pre-reserved transparent gutter, so the
+    # window geometry itself never changes — Wayland would anchor a growing
+    # window at its top-left). Opt-in as a look preference.
+    mini_pulse_resize: bool = False
+    # Remembered state of the mini's lyrics panel.
+    mini_lyrics_open: bool = False
+    # Keep the mini above other windows. Wayland: applied by asking KWin
+    # over D-Bus (no client-side hint exists); X11: WindowStaysOnTopHint.
+    mini_pin: bool = False
+    # Show a live visualizer canvas in place of the album-art tile. The
+    # shared capture (consumer "mini") only runs while the vis page is on
+    # screen and the player is actually playing.
+    mini_show_visualizer: bool = False
     # "theme" = use theme default, "on" = always show, "off" = never show
     show_thumbnails: str = "theme"
     # Empty = auto-detect default sink monitor; otherwise PulseAudio source name.
