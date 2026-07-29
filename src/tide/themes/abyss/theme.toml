@@ -1,0 +1,44 @@
+[meta]
+name     = "abyss"
+slug     = "abyss"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "modern"
+
+[tokens]
+bg        = "#04090e"
+bg_alt    = "#0a141c"
+fg        = "#cfe8e4"
+dim       = "#4e6a72"
+accent    = "#2ee6c8"
+accent_alt= "#46e0a0"
+sel_bg    = "#2ee6c8"
+sel_fg    = "#04090e"
+hover_bg  = "#0e1c26"
+hover_fg  = "#d8f2ee"
+border_col= "#16323e"
+border_dim= "#0c1a22"
+
+[typography]
+family  = "Inter"
+size_pt = 10
+weight  = 400
+case    = "lower"
+mono    = false
+
+[layout]
+radius_px    = 6
+border_px    = 1
+spacing_px   = 10
+ambient_art  = true
+control_style= "glyph"
+list_marker  = "  "
+visualizer   = "circle-burst"
+
+[slots]
+progress = "bar"
+volume   = "knob"
+album_art= "square"
+controls = "large"
+now_label= "stacked"

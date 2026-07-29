@@ -262,8 +262,10 @@ class ThemeManager(QObject):
         self._dynamic_overrides: dict[str, str] = {}
         self._user_overrides: dict[str, str] = {}
         # Sticky font family override — beats theme.typography.family when
-        # set. Empty string means "use the theme's family".
+        # set. Empty string means "use the theme's family". Same idea for
+        # the size override: 0 means "use the theme's size_pt".
         self._user_font: str = ""
+        self._user_font_size: int = 0
         # Deferred-restyle state. QApplication.setStyleSheet repolishes every
         # widget in the process, and the widget style participates in that
         # repolish — running it synchronously inside a signal emission is the
@@ -314,12 +316,14 @@ class ThemeManager(QObject):
             # manager (set via ``set_user_font``) so the same instance is
             # consulted on every apply.
             family = self._user_font or base_family
-            base_size_pt = float(theme.t("typography", "size_pt", 10))
+            base_size_pt = float(
+                self._user_font_size or theme.t("typography", "size_pt", 10)
+            )
             size_pt = _scale.round_pt(base_size_pt)
             weight = int(theme.t("typography", "weight", 400))
             font: QFont | None = None
-            if family:
-                font = QFont(family)
+            if family or self._user_font_size:
+                font = QFont(family) if family else QFont()
                 font.setPointSize(size_pt)
                 font.setWeight(QFont.Weight(weight))
             self._queue_restyle(qss, font)
@@ -389,6 +393,19 @@ class ThemeManager(QObject):
 
     def user_font(self) -> str:
         return self._user_font
+
+    def set_user_font_size(self, size_pt: int) -> None:
+        """Set or clear the font-size override in points. 0 clears.
+        Re-applies the current theme so the new size lands immediately."""
+        new = max(0, int(size_pt))
+        if new == self._user_font_size:
+            return
+        self._user_font_size = new
+        if self._current is not None:
+            self.apply(self._current.slug)
+
+    def user_font_size(self) -> int:
+        return self._user_font_size
 
     def set_user_override(self, key: str, value: str | None) -> None:
         """Set or remove a sticky user override (persists across adaptive

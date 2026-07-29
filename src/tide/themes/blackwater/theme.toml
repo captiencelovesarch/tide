@@ -1,0 +1,45 @@
+[meta]
+name     = "blackwater"
+slug     = "blackwater"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "modern"
+
+[tokens]
+bg        = "#000000"
+bg_alt    = "#0a0c0d"
+fg        = "#e6edf0"
+dim       = "#525c61"
+accent    = "#9fdcec"
+accent_alt= "#e0e8ea"
+sel_bg    = "#9fdcec"
+sel_fg    = "#000000"
+hover_bg  = "#101416"
+hover_fg  = "#ffffff"
+border_col= "#1b2124"
+border_dim= "#0e1214"
+
+[typography]
+family  = "Inter"
+size_pt = 10
+weight  = 400
+case    = "lower"
+mono    = false
+
+[layout]
+radius_px     = 0
+border_px     = 1
+spacing_px    = 8
+ambient_art   = false
+show_thumbnails= false
+control_style = "glyph"
+list_marker   = "  "
+visualizer    = "dot-matrix"
+
+[slots]
+progress = "thin"
+volume   = "slider"
+album_art= "square"
+controls = "compact"
+now_label= "inline"

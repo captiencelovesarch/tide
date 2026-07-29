@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +46,8 @@ class SettingsDialog(QDialog):
 
         self._initial_theme = current_settings.theme
         self._initial_thumbnails = current_settings.show_thumbnails or "theme"
+        self._initial_font = current_settings.font_family_override or ""
+        self._initial_font_size = int(current_settings.font_size_override_pt or 0)
         # Work on a full, independent copy. The dialog mutates only the
         # fields it surfaces (in _on_save) and persists the whole object, so
         # any field NOT mirrored here would be written back at its default —
@@ -142,32 +145,44 @@ class SettingsDialog(QDialog):
         self.nav_icons_picker.addItem("emoji · 🏠 📚 📋 🎤 🕒 🎚 🔌 ⚙", "emoji")
 
         # Font family — overrides the active theme's typography.family.
-        # Empty string = "use whatever the theme says". Populated below
-        # from bundled tide fonts + system QFontDatabase enumeration.
+        # Empty string = "use whatever the theme says". Every system family
+        # is listed and each row renders in its own face, so picking a font
+        # is done by looking at it rather than knowing its name. Selection
+        # live-applies; cancel reverts.
         self.font_picker = QComboBox()
         self.font_picker.addItem("from theme", "")
-        # Tide-bundled fonts always available regardless of system.
+        # Tide-bundled fonts pinned up top, always available.
         for f in ("IBM Plex Mono", "JetBrains Mono", "Inter"):
             self.font_picker.addItem(f"{f} · bundled", f)
-        # System families — filtered to a manageable list (mono fonts +
-        # popular sans). Enumerating every font would be noisy; the user
-        # can type in the box if their pick isn't shown.
         try:
-            from PySide6.QtGui import QFontDatabase
+            from PySide6.QtGui import QFont, QFontDatabase
             existing = {self.font_picker.itemData(i)
                         for i in range(self.font_picker.count())}
-            system_families = QFontDatabase.families()
-            # Prefer monospace families up top.
-            mono = [f for f in system_families
-                    if QFontDatabase.isFixedPitch(f) and f not in existing]
-            for f in sorted(mono):
+            for i in range(1, self.font_picker.count()):
+                self.font_picker.setItemData(
+                    i, QFont(self.font_picker.itemData(i)), Qt.FontRole
+                )
+            for f in sorted(QFontDatabase.families()):
+                if f in existing or f.startswith("."):
+                    continue    # skip dupes + private system faces
                 self.font_picker.addItem(f, f)
-                existing.add(f)
+                self.font_picker.setItemData(
+                    self.font_picker.count() - 1, QFont(f), Qt.FontRole
+                )
         except Exception:
             pass
-        # Make editable so users can paste any family name.
+        # Make editable so users can paste any family name. Typed names
+        # apply on save; picked rows apply live.
         self.font_picker.setEditable(True)
         self.font_picker.setInsertPolicy(QComboBox.NoInsert)
+        self.font_picker.currentIndexChanged.connect(self._on_font_changed)
+
+        # Font size — 0 pt = follow the theme. ui_scale still multiplies.
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(0, 24)
+        self.font_size_spin.setSpecialValueText("theme default")
+        self.font_size_spin.setSuffix(" pt")
+        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
 
         # Loading-indicator style. The labels include a tiny example of each
         # rendering so the user knows what they're picking without trial-and-error.
@@ -250,6 +265,7 @@ class SettingsDialog(QDialog):
         appearance_form.addRow("corners:", self.corner_picker)
         appearance_form.addRow("nav icons:", self.nav_icons_picker)
         appearance_form.addRow("font:", self.font_picker)
+        appearance_form.addRow("  size:", self.font_size_spin)
         appearance_form.addRow("loading bar:", self.loading_picker)
         appearance_form.addRow("motion:", self.motion_picker)
         appearance_form.addRow("", self.ui_sounds_toggle)
@@ -592,6 +608,7 @@ class SettingsDialog(QDialog):
             # Custom value not in the preset list — show it in the editable
             # combo's text field directly.
             self.font_picker.setCurrentText(font_override)
+        self.font_size_spin.setValue(int(self._settings.font_size_override_pt or 0))
 
         self.mini_default_toggle.setChecked(bool(self._settings.mini_mode_default))
         mini_bd_idx = self.mini_backdrop_picker.findData(
@@ -732,11 +749,23 @@ class SettingsDialog(QDialog):
         # fall back to the editable text for free-form entries.
         font_value = self.font_picker.currentData() or self.font_picker.currentText().strip()
         self._settings.font_family_override = font_value or ""
+        self._settings.font_size_override_pt = int(self.font_size_spin.value())
         settings_module.save(self._settings)
         self.accept()
 
+    def _on_font_changed(self, _idx: int) -> None:
+        """Live-preview a picked family. Idempotent (set_user_font no-ops on
+        the same value), so the populate-time setCurrentIndex is harmless."""
+        theming.manager().set_user_font(self.font_picker.currentData() or "")
+
+    def _on_font_size_changed(self, value: int) -> None:
+        theming.manager().set_user_font_size(int(value))
+
     def _on_cancel(self) -> None:
-        # Revert live previews.
+        # Revert live previews. Fonts preview live too — put back whatever
+        # the session started with (no-ops when untouched).
+        theming.manager().set_user_font(self._initial_font)
+        theming.manager().set_user_font_size(self._initial_font_size)
         if self._initial_theme and self._initial_theme != self.theme_picker.currentData():
             theming.manager().apply(self._initial_theme)
         if self._initial_thumbnails != (self.thumbnails_picker.currentData() or "theme"):

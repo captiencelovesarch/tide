@@ -154,6 +154,7 @@ def run(argv: list[str] | None = None) -> int:
     # first frame uses the right family.
     theming.register_bundled_fonts()
     theming.manager().set_user_font(user_settings.font_family_override or "")
+    theming.manager().set_user_font_size(user_settings.font_size_override_pt or 0)
 
     # Apply the theme as early as possible so the wizard renders with it.
     theming.manager().refresh()

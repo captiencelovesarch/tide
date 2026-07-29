@@ -253,6 +253,11 @@ class MainWindow(QMainWindow):
     def __init__(self, api_obj: api.Api, player: PlaybackRouter | Player) -> None:
         super().__init__()
         self.setWindowTitle("tide")
+        # Translucency must be set BEFORE the first show — app.py applies the
+        # theme before constructing the window, so the flag is known here.
+        current_theme = theming.manager().current()
+        if current_theme is not None:
+            self._apply_window_translucency(current_theme)
         self.resize(1100, 720)
         self.api = api_obj
         self.player = player
@@ -2194,9 +2199,27 @@ class MainWindow(QMainWindow):
 
     # ---------- theme + shortcuts ----------
 
+    def _apply_window_translucency(self, theme) -> None:
+        """Honor a theme's `[layout] window_translucent` flag (seaglass).
+
+        The attribute only takes effect on map, so a live theme switch that
+        flips it needs one hide/show — visually covered by the restyle that
+        lands the same instant. No-ops when the flag already matches."""
+        try:
+            want = bool(theme.t("layout", "window_translucent", False))
+        except Exception:
+            want = False
+        if want == self.testAttribute(Qt.WA_TranslucentBackground):
+            return
+        self.setAttribute(Qt.WA_TranslucentBackground, want)
+        if self.isVisible():
+            self.hide()
+            self.show()
+
     def _on_theme_changed(self, theme) -> None:
         prior = self._theme
         self._theme = theme
+        self._apply_window_translucency(theme)
         self.heading.setText(self._line_heading("results"))
         self.queue_heading.setText(self._line_heading(f"queue · {self.queue.rowCount()}"))
         # If the theme's aesthetic flipped (brutalist ↔ modern), stale slot
@@ -2936,6 +2959,7 @@ class MainWindow(QMainWindow):
         # current theme so the new font lands on every widget that listens
         # to theme_changed.
         theming.manager().set_user_font(new.font_family_override or "")
+        theming.manager().set_user_font_size(new.font_size_override_pt or 0)
         # Push new loading-indicator style to any currently-running indicator.
         if hasattr(self, "_loading"):
             self._loading.set_style(new.loading_indicator_style)

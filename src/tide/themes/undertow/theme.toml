@@ -1,0 +1,44 @@
+[meta]
+name     = "undertow"
+slug     = "undertow"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "modern"
+
+[tokens]
+bg        = "#10121f"
+bg_alt    = "#181b2e"
+fg        = "#d6d9ea"
+dim       = "#565b7a"
+accent    = "#c22940"
+accent_alt= "#8089c0"
+sel_bg    = "#c22940"
+sel_fg    = "#f5e6e9"
+hover_bg  = "#1e2238"
+hover_fg  = "#e6e9f6"
+border_col= "#262b48"
+border_dim= "#181c30"
+
+[typography]
+family  = "Inter"
+size_pt = 10
+weight  = 400
+case    = "lower"
+mono    = false
+
+[layout]
+radius_px    = 2
+border_px    = 1
+spacing_px   = 9
+ambient_art  = true
+control_style= "glyph"
+list_marker  = "  "
+visualizer   = "mirror-bars"
+
+[slots]
+progress = "bar"
+volume   = "wedge"
+album_art= "square"
+controls = "large"
+now_label= "stacked"

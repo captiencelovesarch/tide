@@ -1,0 +1,44 @@
+[meta]
+name     = "golden hour"
+slug     = "golden-hour"
+author   = "tide"
+version  = 1
+dark     = false
+aesthetic= "modern"
+
+[tokens]
+bg        = "#f6e8d1"
+bg_alt    = "#efdcbd"
+fg        = "#46311f"
+dim       = "#a3866a"
+accent    = "#d96f32"
+accent_alt= "#c95d73"
+sel_bg    = "#d96f32"
+sel_fg    = "#f9efdd"
+hover_bg  = "#ecd6b6"
+hover_fg  = "#3c2917"
+border_col= "#d9bd98"
+border_dim= "#e8d5b8"
+
+[typography]
+family  = "Inter"
+size_pt = 10
+weight  = 400
+case    = "normal"
+mono    = false
+
+[layout]
+radius_px    = 8
+border_px    = 1
+spacing_px   = 10
+ambient_art  = true
+control_style= "glyph"
+list_marker  = "  "
+visualizer   = "waveform-envelope"
+
+[slots]
+progress = "bar"
+volume   = "knob"
+album_art= "polaroid"
+controls = "large"
+now_label= "inline"

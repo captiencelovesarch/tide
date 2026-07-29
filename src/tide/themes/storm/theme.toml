@@ -1,0 +1,45 @@
+[meta]
+name     = "storm"
+slug     = "storm"
+author   = "tide"
+version  = 1
+dark     = true
+aesthetic= "brutalist"
+
+[tokens]
+bg        = "#14171a"
+bg_alt    = "#1d2126"
+fg        = "#dde3e8"
+dim       = "#6b747d"
+accent    = "#f2e63c"
+accent_alt= "#8f9aa4"
+sel_bg    = "#f2e63c"
+sel_fg    = "#14171a"
+hover_bg  = "#23282e"
+hover_fg  = "#ffffff"
+border_col= "#495159"
+border_dim= "#23282e"
+
+[typography]
+family  = "IBM Plex Mono"
+size_pt = 10
+weight  = 500
+case    = "upper"
+mono    = true
+
+[layout]
+radius_px     = 0
+border_px     = 1
+spacing_px    = 8
+ambient_art   = false
+show_thumbnails= false
+control_style = "bracket"
+list_marker   = "// "
+visualizer    = "oscilloscope"
+
+[slots]
+progress = "blocks"
+volume   = "blocks"
+album_art= "square"
+controls = "bracket"
+now_label= "stacked"

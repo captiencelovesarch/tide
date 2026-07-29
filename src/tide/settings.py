@@ -93,6 +93,9 @@ class Settings:
     # Font-family override. Empty = use the active theme's typography.family.
     # When set, the theming manager pushes this family on every theme apply.
     font_family_override: str = ""
+    # Font-size override in points. 0 = use the active theme's size_pt.
+    # The ui_scale preset still multiplies whichever base wins.
+    font_size_override_pt: int = 0
     # Set to True the first time the OnboardingDialog reaches its final step
     # and the user clicks launch. False = wizard runs at next launch.
     first_launch_complete: bool = False

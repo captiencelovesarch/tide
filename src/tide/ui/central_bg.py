@@ -302,7 +302,13 @@ class CentralBg(QWidget):
 
         pp = QPainter(img)
         pp.setRenderHint(QPainter.Antialiasing, True)
-        pp.fillRect(img.rect(), self._bg)
+        # Translucent themes (#AARRGGBB bg tokens) get their tint from the
+        # styled window beneath; filling it again here would stack alpha and
+        # over-darken the glass. Opaque themes keep the solid base.
+        pp.fillRect(
+            img.rect(),
+            self._bg if self._bg.alpha() == 255 else QColor(0, 0, 0, 0),
+        )
 
         if self._style == "band":
             angle = (
@@ -477,7 +483,9 @@ class CentralBg(QWidget):
                 img = self._render_buffer(max(1, rect.width()), max(1, rect.height()))
                 p.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 p.drawImage(rect, img)
-            else:
+            elif self._bg.alpha() == 255:
                 p.fillRect(rect, self._bg)
+            # else: translucent theme — the styled window is the base; paint
+            # nothing so its alpha shows through once, not twice.
         finally:
             p.end()
