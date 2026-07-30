@@ -140,3 +140,50 @@ class FontSizeApplyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FontPlaceholderSaveTest(unittest.TestCase):
+    """Regression: `currentData() or currentText()` saved the "from theme"
+    row's LABEL as a literal font family, so every save while on the default
+    row wrote font_family_override = "from theme" and the app fell back to
+    a random Qt font after restart."""
+
+    def setUp(self) -> None:
+        _app()
+        self._real_save = settings_module.save
+        settings_module.save = lambda s: None
+
+    def tearDown(self) -> None:
+        settings_module.save = self._real_save
+        theming.manager().set_user_font("")
+
+    def test_from_theme_row_saves_empty_override(self) -> None:
+        from tide.ui.settings import SettingsDialog
+        dlg = SettingsDialog(Settings())
+        try:
+            dlg.font_picker.setCurrentIndex(0)   # "from theme"
+            dlg._on_save()
+            self.assertEqual(dlg._settings.font_family_override, "")
+        finally:
+            dlg.deleteLater()
+
+    def test_bundled_row_saves_family_not_label(self) -> None:
+        from tide.ui.settings import SettingsDialog
+        dlg = SettingsDialog(Settings())
+        try:
+            dlg.font_picker.setCurrentIndex(1)   # "IBM Plex Mono · bundled"
+            dlg._on_save()
+            self.assertEqual(dlg._settings.font_family_override, "IBM Plex Mono")
+        finally:
+            dlg.deleteLater()
+
+    def test_typed_family_still_saves(self) -> None:
+        from tide.ui.settings import SettingsDialog
+        dlg = SettingsDialog(Settings())
+        try:
+            dlg.font_picker.setCurrentText("Some Font I Typed")
+            dlg._on_save()
+            self.assertEqual(dlg._settings.font_family_override,
+                             "Some Font I Typed")
+        finally:
+            dlg.deleteLater()

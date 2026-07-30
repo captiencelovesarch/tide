@@ -779,7 +779,15 @@ class SettingsDialog(QDialog):
         self._settings.nav_icon_set = self.nav_icons_picker.currentData() or "off"
         # Prefer the picker's data (preset family) if it's still selected;
         # fall back to the editable text for free-form entries.
-        font_value = self.font_picker.currentData() or self.font_picker.currentText().strip()
+        # A picked row's data wins — INCLUDING the "from theme" row, whose
+        # data is deliberately "". The old `data or text` fallthrough saved
+        # the row's display label ("from theme") as a literal font family.
+        # Free text only counts when it differs from the selected row's
+        # label, i.e. the user actually typed a family name.
+        font_data = self.font_picker.currentData()
+        font_text = self.font_picker.currentText().strip()
+        row_label = self.font_picker.itemText(self.font_picker.currentIndex()).strip()
+        font_value = font_data if font_text == row_label else font_text
         self._settings.font_family_override = font_value or ""
         self._settings.font_size_override_pt = int(self.font_size_spin.value())
         settings_module.save(self._settings)
