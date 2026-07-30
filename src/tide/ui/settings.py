@@ -246,6 +246,12 @@ class SettingsDialog(QDialog):
             "ui sounds (nav · modals · toggles · auto-mutes during playback)"
         )
 
+        # tide-drawn titlebar (frameless window + themed chrome). Off =
+        # the compositor's native decoration.
+        self.csd_toggle = QCheckBox(
+            "tide titlebar (themed window chrome — matches the active theme)"
+        )
+
         # ---- mini player (v1.2.7 redo — dedicated frameless window,
         # opened by clicking the now-playing art or Ctrl+M). Everything
         # here is also reachable from the mini's own right-click menu.
@@ -287,6 +293,7 @@ class SettingsDialog(QDialog):
         appearance_form.addRow("", self.adaptive_pulse_toggle)
         appearance_form.addRow("corners:", self.corner_picker)
         appearance_form.addRow("nav icons:", self.nav_icons_picker)
+        appearance_form.addRow("", self.csd_toggle)
         appearance_form.addRow("font:", self.font_picker)
         appearance_form.addRow("  size:", self.font_size_spin)
         appearance_form.addRow("loading bar:", self.loading_picker)
@@ -608,6 +615,7 @@ class SettingsDialog(QDialog):
 
         self.preserve_pitch_toggle.setChecked(bool(self._settings.preserve_pitch))
         self.ui_sounds_toggle.setChecked(bool(self._settings.ui_sounds_enabled))
+        self.csd_toggle.setChecked(bool(self._settings.csd_titlebar))
         self.adaptive_bg_toggle.setChecked(bool(self._settings.adaptive_background))
         style_idx = self.adaptive_style_picker.findData(
             self._settings.adaptive_background_style or "field"
@@ -742,6 +750,7 @@ class SettingsDialog(QDialog):
         self._settings.ui_scale = self.scale_picker.currentData() or "normal"
         self._settings.preserve_pitch = self.preserve_pitch_toggle.isChecked()
         self._settings.ui_sounds_enabled = self.ui_sounds_toggle.isChecked()
+        self._settings.csd_titlebar = self.csd_toggle.isChecked()
         self._settings.prefetch_hover = self.prefetch_hover_toggle.isChecked()
         self._settings.prefetch_warm_results = int(
             self.prefetch_warm_picker.currentData() or 0

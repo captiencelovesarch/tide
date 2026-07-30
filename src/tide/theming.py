@@ -158,6 +158,28 @@ QStackedWidget#contentStack .QWidget {
 """
 
 
+# Default styling for the tide-drawn titlebar (ui/titlebar.py). PREPENDED to
+# every theme's stylesheet — before the theme's own rules — so any theme can
+# override any of it just by writing its own #TitleBar rules. Uses @tokens,
+# so it inherits each theme's palette with zero per-theme work.
+_TITLEBAR_QSS = """
+#TitleBar {
+    background: @bg_alt;
+    border-bottom: @border solid @border_dim;
+}
+#TitleBarTitle { color: @dim; background: transparent; }
+#TitleBar QPushButton {
+    background: transparent;
+    color: @dim;
+    border: 0;
+    border-radius: @radius;
+    padding: 0;
+}
+#TitleBar QPushButton:hover { background: @hover_bg; color: @fg; }
+#TitleBarClose:hover { background: @accent; color: @bg; }
+"""
+
+
 def _substitute(qss: str, theme: Theme) -> str:
     # tokens come from the [tokens] table plus a couple synthetic ones from
     # [layout] (border, radius, spacing) so QSS can reference them uniformly.
@@ -178,8 +200,9 @@ def _substitute(qss: str, theme: Theme) -> str:
         name = match.group(1)
         return lookups.get(name, match.group(0))
 
-    # The backdrop block carries no @tokens, so append after substitution.
-    return _TOKEN_RE.sub(repl, qss) + _CONTENT_BACKDROP_QSS
+    # Titlebar defaults go FIRST (theme rules can override); the backdrop
+    # block carries no @tokens, so it appends after substitution.
+    return _TOKEN_RE.sub(repl, _TITLEBAR_QSS + qss) + _CONTENT_BACKDROP_QSS
 
 
 def effective_radius_px(theme: "Theme | None") -> int:

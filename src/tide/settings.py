@@ -96,6 +96,9 @@ class Settings:
     # Font-size override in points. 0 = use the active theme's size_pt.
     # The ui_scale preset still multiplies whichever base wins.
     font_size_override_pt: int = 0
+    # v1.3 — tide draws its own themed titlebar (frameless main window).
+    # False = keep the compositor's native decoration.
+    csd_titlebar: bool = True
     # Set to True the first time the OnboardingDialog reaches its final step
     # and the user clicks launch. False = wizard runs at next launch.
     first_launch_complete: bool = False

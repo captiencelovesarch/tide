@@ -2199,6 +2199,42 @@ class MainWindow(QMainWindow):
 
     # ---------- theme + shortcuts ----------
 
+    def set_csd_titlebar(self, on: bool) -> None:
+        """Swap between the tide-drawn titlebar and the system decoration.
+
+        Called by app.py before the first show (clean path), and by the
+        settings-apply hook for live flips — those need the same native
+        re-map as the translucency flag, deferred out of any emission.
+        """
+        on = bool(on)
+        current = self.menuWidget() is not None
+        frameless = bool(self.windowFlags() & Qt.FramelessWindowHint)
+        if on == current and on == frameless:
+            return
+        from .titlebar import EdgeResizer, TitleBar
+        if on:
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
+            if self.menuWidget() is None:
+                self.setMenuWidget(TitleBar(self))
+            if getattr(self, "_edge_resizer", None) is None:
+                self._edge_resizer = EdgeResizer(self)
+        else:
+            self.setWindowFlag(Qt.FramelessWindowHint, False)
+            if self.menuWidget() is not None:
+                self.setMenuWidget(None)   # deletes the old titlebar
+            resizer = getattr(self, "_edge_resizer", None)
+            if resizer is not None:
+                resizer.detach()
+                self._edge_resizer = None
+        if self.isVisible():
+            # setWindowFlag on a shown window hides it; re-show deferred
+            # (same emission rule as the translucency remap below).
+            def _remap() -> None:
+                geo = self.saveGeometry()
+                self.restoreGeometry(geo)
+                self.show()
+            QTimer.singleShot(0, _remap)
+
     def _apply_window_translucency(self, theme) -> None:
         """Honor a theme's `[layout] window_translucent` flag (seaglass).
 
@@ -2961,6 +2997,8 @@ class MainWindow(QMainWindow):
         ambient = getattr(self, "_ambient", None)
         if ambient is not None:
             ambient.set_pulse_enabled(new.adaptive_pulse and new.adaptive_background)
+        # Titlebar mode (tide-drawn vs system decoration) — live flip remaps.
+        self.set_csd_titlebar(new.csd_titlebar)
         # Live-apply mini player prefs if the mini is currently up.
         self._apply_mini_backdrop()
         radius_px = _corner_radius(new.corner_style)

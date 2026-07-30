@@ -25,7 +25,7 @@ REQUIRED_TOKENS = (
 )
 VALID_CASES = {"lower", "upper", "normal", "leet", "zalgo"}
 VALID_CONTROL_STYLES = {"bracket", "glyph", "icon"}
-NEW_IN_13 = {"abyss", "blackwater", "golden-hour", "seaglass", "storm", "undertow"}
+NEW_IN_13 = {"abyss", "blackwater", "golden-hour", "storm", "undertow"}
 
 
 def _app() -> QApplication:

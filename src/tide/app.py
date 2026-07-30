@@ -345,6 +345,10 @@ def run(argv: list[str] | None = None) -> int:
     adaptive.set_background_enabled(user_settings.adaptive_background)
     window._adaptive = adaptive
 
+    # tide-drawn titlebar (frameless + themed chrome). Applied BEFORE the
+    # first show so the window maps with the right frame flags.
+    window.set_csd_titlebar(user_settings.csd_titlebar)
+
     # Apply user's app-backdrop + corner preferences. CentralBg paints the
     # adaptive surface and clips corners; corner radius is also pushed as a sticky
     # theming override so widgets that use @radius (inputs, scrollbars)
