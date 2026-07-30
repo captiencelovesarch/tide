@@ -4,7 +4,7 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
-## [unreleased] — the mini player deserves to exist now
+## [1.3.0] — 2026-07-30 — the mini player deserves to exist, and the window is all tide now
 
 Mini mode used to be the main window with everything hidden, shrunk to 340×360 with its title bar still on. Full redo: it is now a **dedicated frameless window** (`ui/mini.py`) with the adaptive gradient painted edge to edge, and the old shrink-in-place behavior is gone.
 
