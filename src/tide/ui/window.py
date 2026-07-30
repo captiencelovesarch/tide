@@ -250,8 +250,17 @@ class MainWindow(QMainWindow):
     # Warn this far ahead of the recorded expiry.
     EXPIRY_WARN_SECONDS = 3 * 24 * 3600
 
+    def statusBar(self):  # shadows QMainWindow.statusBar for Python callers
+        """The status bar lives INSIDE the CentralBg shell (not in the native
+        QMainWindow slot) so the adaptive gradient runs edge to edge under
+        it — same reason the titlebar does. Same object, same API."""
+        return self._status
+
     def __init__(self, api_obj: api.Api, player: PlaybackRouter | Player) -> None:
         super().__init__()
+        # Created first: everything below may call self.statusBar().
+        self._status = QStatusBar()
+        self._status.setSizeGripEnabled(True)
         self.setWindowTitle("tide")
         # Translucency must be set BEFORE the first show — app.py applies the
         # theme before constructing the window, so the flag is known here.
@@ -759,9 +768,18 @@ class MainWindow(QMainWindow):
         # theming._CONTENT_BACKDROP_QSS, so nav/content/now-playing read as
         # one clean surface while controls keep their own QSS backgrounds.
         from .central_bg import CentralBg
-        self.central_bg = CentralBg(central)
+        # Shell = [titlebar?][content][statusbar] stacked inside ONE CentralBg,
+        # so the adaptive gradient is a single canvas from chrome to grip —
+        # bars are transparentized in the shared QSS blocks.
+        shell = QWidget()
+        shell_lay = QVBoxLayout(shell)
+        shell_lay.setContentsMargins(0, 0, 0, 0)
+        shell_lay.setSpacing(0)
+        shell_lay.addWidget(central, 1)
+        shell_lay.addWidget(self._status)
+        self._shell_layout = shell_lay
+        self.central_bg = CentralBg(shell)
         self.setCentralWidget(self.central_bg)
-        self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("ready")
         # Loading indicator — drives the status bar with a progress bar while
         # a track resolves + buffers. Style is read from settings at start
@@ -2207,21 +2225,27 @@ class MainWindow(QMainWindow):
         re-map as the translucency flag, deferred out of any emission.
         """
         on = bool(on)
-        current = self.menuWidget() is not None
+        current = getattr(self, "_titlebar", None) is not None
         frameless = bool(self.windowFlags() & Qt.FramelessWindowHint)
         if on == current and on == frameless:
             return
         from .titlebar import EdgeResizer, TitleBar
         if on:
             self.setWindowFlag(Qt.FramelessWindowHint, True)
-            if self.menuWidget() is None:
-                self.setMenuWidget(TitleBar(self))
+            if getattr(self, "_titlebar", None) is None:
+                # Inside the CentralBg shell (index 0) — NOT setMenuWidget —
+                # so the adaptive gradient paints under the chrome too.
+                self._titlebar = TitleBar(self)
+                self._shell_layout.insertWidget(0, self._titlebar)
             if getattr(self, "_edge_resizer", None) is None:
                 self._edge_resizer = EdgeResizer(self)
         else:
             self.setWindowFlag(Qt.FramelessWindowHint, False)
-            if self.menuWidget() is not None:
-                self.setMenuWidget(None)   # deletes the old titlebar
+            bar = getattr(self, "_titlebar", None)
+            if bar is not None:
+                self._shell_layout.removeWidget(bar)
+                bar.deleteLater()
+                self._titlebar = None
             resizer = getattr(self, "_edge_resizer", None)
             if resizer is not None:
                 resizer.detach()

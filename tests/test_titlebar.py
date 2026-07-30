@@ -39,19 +39,19 @@ class TitleBarTest(unittest.TestCase):
 
     def test_enable_installs_titlebar_and_frameless(self) -> None:
         self.w.set_csd_titlebar(True)
-        self.assertIsInstance(self.w.menuWidget(), TitleBar)
+        self.assertIsInstance(self.w._titlebar, TitleBar)
         self.assertTrue(self.w.windowFlags() & Qt.FramelessWindowHint)
 
     def test_disable_restores_native_decoration(self) -> None:
         self.w.set_csd_titlebar(True)
         self.w.set_csd_titlebar(False)
-        self.assertIsNone(self.w.menuWidget())
+        self.assertIsNone(self.w._titlebar)
         self.assertFalse(self.w.windowFlags() & Qt.FramelessWindowHint)
         self.w.set_csd_titlebar(True)   # leave on for the other tests
 
     def test_maximize_toggle_round_trips(self) -> None:
         self.w.set_csd_titlebar(True)
-        bar = self.w.menuWidget()
+        bar = self.w._titlebar
         self.w.show()
         QTest.qWait(30)
         bar.toggle_maximized()
@@ -63,7 +63,7 @@ class TitleBarTest(unittest.TestCase):
 
     def test_glyphs_follow_theme_aesthetic(self) -> None:
         self.w.set_csd_titlebar(True)
-        bar = self.w.menuWidget()
+        bar = self.w._titlebar
         theming.manager().apply("storm")        # brutalist, case=upper
         QTest.qWait(30)
         self.assertEqual(bar.close_btn.text(), "[✕]")

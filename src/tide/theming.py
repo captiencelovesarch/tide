@@ -155,6 +155,10 @@ QStackedWidget#contentStack #lyricsKaraoke,
 QStackedWidget#contentStack .QWidget {
     background: transparent;
 }
+/* The titlebar + status bar live inside the CentralBg shell so the adaptive
+   gradient runs edge to edge — they must not repaint an opaque background
+   over it. Themes give QStatusBar a solid fill; this later rule wins. */
+QStatusBar { background: transparent; }
 """
 
 
@@ -164,7 +168,7 @@ QStackedWidget#contentStack .QWidget {
 # so it inherits each theme's palette with zero per-theme work.
 _TITLEBAR_QSS = """
 #TitleBar {
-    background: @bg_alt;
+    background: transparent;
     border-bottom: @border solid @border_dim;
 }
 #TitleBarTitle { color: @dim; background: transparent; }
