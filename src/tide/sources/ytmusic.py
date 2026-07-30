@@ -10,6 +10,7 @@ Stream resolution is delegated to ``yt-dlp`` and cached per source via
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from typing import Iterable
@@ -144,10 +145,35 @@ def _join_artists(items: Iterable[dict] | None) -> str:
     return ", ".join(n for n in names if n)
 
 
+_GUSERCONTENT_SIZE = re.compile(r"=w\d+-h\d+")
+_GUSERCONTENT_S = re.compile(r"=s\d+(?=[-$]|$)")
+_YTIMG_SMALL = re.compile(r"/(default|mqdefault|sddefault)\.jpg\b")
+
+
+def _upscale_art_url(url: str, px: int = 544) -> str:
+    """Ask the CDN for real resolution instead of the payload's thumbnail.
+
+    YT Music's API answers with tiny variants (60–120px) even though the
+    googleusercontent CDN will happily serve the same image at any size —
+    the size lives in the URL. Without this, the now-playing strip and the
+    mini player upscale a 120px jpeg and look like 144p."""
+    if "googleusercontent.com" in url or "ggpht.com" in url:
+        if _GUSERCONTENT_SIZE.search(url):
+            return _GUSERCONTENT_SIZE.sub(f"=w{px}-h{px}", url)
+        if _GUSERCONTENT_S.search(url):
+            return _GUSERCONTENT_S.sub(f"=s{px}", url)
+        return url
+    if "i.ytimg.com" in url:
+        # Video thumbs: hqdefault (480w) always exists; the larger named
+        # variants often 404, so stop there.
+        return _YTIMG_SMALL.sub("/hqdefault.jpg", url)
+    return url
+
+
 def _thumb(items: list[dict] | None) -> str:
     if not items:
         return ""
-    return items[-1].get("url", "")
+    return _upscale_art_url(items[-1].get("url", ""))
 
 
 def _parse_hms(s: str) -> int:

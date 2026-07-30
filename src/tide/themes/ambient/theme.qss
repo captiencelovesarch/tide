@@ -256,5 +256,5 @@ QFrame#now_playing {
 }
 QFrame#nav {
     background: @bg_alt;
-    border-right: @border solid @border_col;
+    border-right: 0;   /* modern themes: no nav divider */
 }

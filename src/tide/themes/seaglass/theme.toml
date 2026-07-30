@@ -13,15 +13,15 @@ dark     = true
 aesthetic= "modern"
 
 [tokens]
-bg        = "#e0142029"
-bg_alt    = "#e61a2f38"
+bg        = "#c7142029"
+bg_alt    = "#d41a2f38"
 fg        = "#ecf2ef"
 dim       = "#7a9598"
 accent    = "#f0b848"
 accent_alt= "#a0e838"
 sel_bg    = "#f0b848"
 sel_fg    = "#142029"
-hover_bg  = "#e62a4350"
+hover_bg  = "#d62a4350"
 hover_fg  = "#f4f8f6"
 border_col= "#4a6a72"
 border_dim= "#802a3f48"

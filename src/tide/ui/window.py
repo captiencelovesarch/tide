@@ -2213,13 +2213,21 @@ class MainWindow(QMainWindow):
             return
         self.setAttribute(Qt.WA_TranslucentBackground, want)
         if self.isVisible():
-            # Deferred: this runs inside theme_changed's emission, and a
-            # top-level hide/show inside a signal emission is the PySide6 +
-            # py3.14 crash pattern (same rule as the mini's toggle).
+            # A live flip needs the NATIVE window rebuilt — the original
+            # Wayland surface was created without an alpha channel, and a
+            # plain hide/show reuses it: the compositor renders "alpha" as
+            # black and the backing store never clears (the text-ghosting
+            # bug). setWindowFlags(self.windowFlags()) is the canonical
+            # destroy+recreate; it hides the window, so re-show after.
+            # Deferred out of theme_changed's emission (a top-level remap
+            # inside an emission is the PySide6 + py3.14 crash pattern).
             def _remap() -> None:
-                if self.isVisible():
-                    self.hide()
-                    self.show()
+                if not self.isVisible():
+                    return
+                geo = self.saveGeometry()
+                self.setWindowFlags(self.windowFlags())
+                self.restoreGeometry(geo)
+                self.show()
             QTimer.singleShot(0, _remap)
 
     def _on_theme_changed(self, theme) -> None:
