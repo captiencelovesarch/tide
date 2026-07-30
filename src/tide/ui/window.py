@@ -772,6 +772,10 @@ class MainWindow(QMainWindow):
         # so the adaptive gradient is a single canvas from chrome to grip —
         # bars are transparentized in the shared QSS blocks.
         shell = QWidget()
+        # Must be transparentized like #appSurface (see _CONTENT_BACKDROP_QSS)
+        # or the themes' universal `QWidget { background }` rule paints it
+        # opaque directly over CentralBg's gradient.
+        shell.setObjectName("appShell")
         shell_lay = QVBoxLayout(shell)
         shell_lay.setContentsMargins(0, 0, 0, 0)
         shell_lay.setSpacing(0)

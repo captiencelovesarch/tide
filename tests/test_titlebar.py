@@ -107,3 +107,52 @@ class CsdSettingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdaptiveCanvasTest(unittest.TestCase):
+    """The shell wrapper must never repaint opaque over CentralBg.
+
+    Regression: wrapping the content in a bare QWidget let the themes'
+    universal background rule fill it solid — adaptive looked 'black'.
+    """
+
+    def test_adaptive_gradient_actually_changes_pixels(self) -> None:
+        _app()
+        theming.manager().refresh()
+        theming.manager().apply("undertow")
+        QTest.qWait(30)
+        router = PlaybackRouter()
+        router.register(MpvBackend())
+        w = MainWindow(LocalSource(), router)
+        w.set_csd_titlebar(True)
+        w.resize(500, 360)
+        w.show()
+        QTest.qWait(100)
+        try:
+            w.central_bg.set_enabled(False)
+            QTest.qWait(120)
+            off = w.grab().toImage()
+            w.central_bg.set_enabled(True)
+            w.central_bg.set_style("field")
+            theming.manager().override_tokens(
+                {"accent": "#ff4d6a", "ambient_bg": "#521a3a"}
+            )
+            QTest.qWait(250)
+            on = w.grab().toImage()
+            total = count = 0
+            for y in (10, 60, 140, 220, 300):   # 10 = titlebar row
+                for x in range(10, 490, 24):
+                    a, b = off.pixelColor(x, y), on.pixelColor(x, y)
+                    total += (abs(a.red() - b.red())
+                              + abs(a.green() - b.green())
+                              + abs(a.blue() - b.blue()))
+                    count += 1
+            self.assertGreater(
+                total / count, 4.0,
+                "adaptive on/off renders are near-identical — something "
+                "opaque is covering the CentralBg gradient again",
+            )
+        finally:
+            theming.manager().clear_accent_override()
+            w.close()
+            QTest.qWait(30)

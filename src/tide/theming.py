@@ -135,6 +135,7 @@ _TOKEN_RE = re.compile(r"@([a-z_][a-z0-9_]*)", re.IGNORECASE)
 # theme bg behind, so a transparent structural container looks identical to
 # an opaque one.
 _CONTENT_BACKDROP_QSS = """
+QWidget#appShell,
 QWidget#appSurface,
 QWidget#appUpper,
 QFrame#nav,
