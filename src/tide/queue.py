@@ -4,6 +4,17 @@ This is the playback timeline. The list is total — past, current, and
 upcoming all sit in it. `current_index` points at what's playing (or what
 last played). `advance()` moves forward; `back()` moves backward.
 
+Shuffle / repeat: `advance()` honors the two playback modes. With shuffle
+on, the next track is drawn randomly from the rows not yet played this
+cycle (played-ness tracked by video_id, so queue edits don't corrupt it);
+the pick is pre-committed so `peek_next()` — and everything hanging off it,
+like the up-next label and the stream prefetcher — agrees with what
+`advance()` will actually do. Repeat "all" wraps (or, shuffled, starts a
+fresh cycle) instead of ending; repeat "one" is intentionally NOT handled
+here — replaying the same track is an audio decision, so the window's
+track-ended handler consults `repeat_mode` itself. A manual [next] always
+moves on.
+
 Radio: when `radio_enabled` is true, once playback enters the last 3 slots
 we ask the API to fetch a radio playlist seeded from the most recent track
 and append non-duplicate tracks. Refill is one-shot per dip below the
@@ -15,7 +26,9 @@ duration string, and whether a row is the current one.
 """
 from __future__ import annotations
 
-from enum import IntEnum
+import random
+
+from enum import Enum, IntEnum
 from typing import Callable, Iterable
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Signal
@@ -29,6 +42,28 @@ class Role(IntEnum):
     DisplayLine = Qt.UserRole + 3
 
 
+class RepeatMode(str, Enum):
+    """Values are the strings persisted in the session snapshot."""
+
+    OFF = "off"
+    ALL = "all"
+    ONE = "one"
+
+    @classmethod
+    def parse(cls, value) -> "RepeatMode":
+        if isinstance(value, cls):
+            return value
+        v = str(value or "").strip().lower()
+        for m in cls:
+            if m.value == v:
+                return m
+        return cls.OFF
+
+    def cycled(self) -> "RepeatMode":
+        order = (RepeatMode.OFF, RepeatMode.ALL, RepeatMode.ONE)
+        return order[(order.index(self) + 1) % len(order)]
+
+
 class Queue(QAbstractListModel):
     current_changed = Signal(object)        # Track or None
     refill_requested = Signal(str, list)    # seed_video_id, exclude_ids — UI runs the network
@@ -38,6 +73,8 @@ class Queue(QAbstractListModel):
     # there's nothing to advance to and playback should stop. The window owns
     # playback, so it — not the model — decides what to do with the audio.
     current_removed = Signal(object)        # Track or None
+    # Shuffle flag or repeat mode changed. UI + MPRIS re-read both.
+    modes_changed = Signal()
 
     REFILL_TAIL = 3
 
@@ -48,6 +85,14 @@ class Queue(QAbstractListModel):
         self._radio_enabled: bool = False
         self._radio_seed: str | None = None
         self._refill_in_flight: bool = False
+        self._shuffle: bool = False
+        self._repeat: RepeatMode = RepeatMode.OFF
+        # Shuffle-cycle bookkeeping, all by video_id so row edits can't
+        # desync it: what already played this cycle, the breadcrumb trail
+        # [prev] walks, and the pre-committed next pick peek_next() promises.
+        self._played_vids: set[str] = set()
+        self._shuffle_trail: list[str] = []
+        self._shuffle_next: str | None = None
 
     # ---------- QAbstractListModel ----------
 
@@ -159,11 +204,20 @@ class Queue(QAbstractListModel):
 
     def peek_next(self) -> Track | None:
         """Return the track that ``advance()`` would next select, without
-        mutating the queue. Used by the prefetch system to pre-resolve the
-        upcoming stream URL while the current track is still playing."""
+        moving the pointer. Used by the prefetch system to pre-resolve the
+        upcoming stream URL while the current track is still playing, and by
+        the up-next label. Shuffle pre-commits its random pick here so the
+        promise holds; repeat-all wraps to row 0 at the end."""
+        if not self._tracks:
+            return None
+        if self._shuffle:
+            row = self._commit_shuffle_pick()
+            return self._tracks[row] if row >= 0 else None
         nxt = self._current + 1
         if 0 <= nxt < len(self._tracks):
             return self._tracks[nxt]
+        if self._repeat == RepeatMode.ALL and self._current >= 0:
+            return self._tracks[0]
         return None
 
     @property
@@ -172,6 +226,80 @@ class Queue(QAbstractListModel):
 
     def video_ids(self) -> set[str]:
         return {t.video_id for t in self._tracks}
+
+    # ---------- shuffle / repeat ----------
+
+    @property
+    def shuffle_enabled(self) -> bool:
+        return self._shuffle
+
+    @property
+    def repeat_mode(self) -> RepeatMode:
+        return self._repeat
+
+    def set_shuffle(self, on: bool) -> None:
+        on = bool(on)
+        if on == self._shuffle:
+            return
+        self._shuffle = on
+        # A fresh toggle starts a fresh cycle: only the playing track counts
+        # as "already played", and the trail starts from it.
+        self._played_vids.clear()
+        self._shuffle_trail.clear()
+        self._shuffle_next = None
+        cur = self.current
+        if on and cur is not None:
+            self._played_vids.add(cur.video_id)
+            self._shuffle_trail.append(cur.video_id)
+        self.modes_changed.emit()
+
+    def toggle_shuffle(self) -> bool:
+        self.set_shuffle(not self._shuffle)
+        return self._shuffle
+
+    def set_repeat(self, mode) -> None:
+        mode = RepeatMode.parse(mode)
+        if mode == self._repeat:
+            return
+        self._repeat = mode
+        self.modes_changed.emit()
+
+    def cycle_repeat(self) -> RepeatMode:
+        self.set_repeat(self._repeat.cycled())
+        return self._repeat
+
+    def _row_for_vid(self, vid: str) -> int:
+        for i, t in enumerate(self._tracks):
+            if t.video_id == vid:
+                return i
+        return -1
+
+    def _commit_shuffle_pick(self) -> int:
+        """Row of the pre-committed random pick, choosing one now if needed.
+        Returns -1 when the cycle is exhausted (and can't restart)."""
+        if self._shuffle_next is not None:
+            row = self._row_for_vid(self._shuffle_next)
+            if row >= 0:
+                return row
+            self._shuffle_next = None   # pick was removed from the queue
+        candidates = [
+            i for i, t in enumerate(self._tracks)
+            if i != self._current and t.video_id not in self._played_vids
+        ]
+        if not candidates:
+            if self._repeat != RepeatMode.ALL or len(self._tracks) < 2:
+                return -1
+            # Repeat-all: everything played once → start a new cycle. The
+            # playing track stays "played" so it can't draw itself twice
+            # in a row across the cycle seam.
+            self._played_vids.clear()
+            cur = self.current
+            if cur is not None:
+                self._played_vids.add(cur.video_id)
+            candidates = [i for i in range(len(self._tracks)) if i != self._current]
+        row = random.choice(candidates)
+        self._shuffle_next = self._tracks[row].video_id
+        return row
 
     # ---------- mutators ----------
 
@@ -185,6 +313,11 @@ class Queue(QAbstractListModel):
         self.beginResetModel()
         self._tracks.clear()
         self._current = -1
+        # New timeline, new shuffle cycle. The modes themselves persist —
+        # shuffle/repeat are how the user listens, not queue contents.
+        self._played_vids.clear()
+        self._shuffle_trail.clear()
+        self._shuffle_next = None
         self.endResetModel()
         self.current_changed.emit(None)
 
@@ -296,25 +429,67 @@ class Queue(QAbstractListModel):
         if old >= 0:
             self._row_changed(old)
         self._row_changed(row)
-        self.current_changed.emit(self._tracks[row])
+        track = self._tracks[row]
+        if self._shuffle:
+            # Any track that becomes current — via advance(), a queue-row
+            # double-click, whatever — counts toward the shuffle cycle and
+            # extends the [prev] breadcrumb trail.
+            self._played_vids.add(track.video_id)
+            if not self._shuffle_trail or self._shuffle_trail[-1] != track.video_id:
+                self._shuffle_trail.append(track.video_id)
+            if self._shuffle_next == track.video_id:
+                self._shuffle_next = None
+        self.current_changed.emit(track)
         self._maybe_refill()
-        return self._tracks[row]
+        return track
 
     def advance(self) -> Track | None:
+        """Move to the next track per the active modes. Repeat "one" is
+        deliberately ignored here (see module docstring) — advance() is
+        also what a manual [next] press calls, and [next] always moves on."""
+        if self._shuffle:
+            row = self._commit_shuffle_pick()
+            if row < 0:
+                return None
+            return self.set_current(row)
         nxt = self._current + 1
         if nxt >= len(self._tracks):
+            if (self._repeat == RepeatMode.ALL
+                    and self._tracks and self._current >= 0):
+                return self.set_current(0)
             return None
         return self.set_current(nxt)
 
     def back(self) -> Track | None:
+        if self._shuffle:
+            # Walk the breadcrumb trail: drop where we are, go where we were.
+            while len(self._shuffle_trail) >= 2:
+                self._shuffle_trail.pop()
+                row = self._row_for_vid(self._shuffle_trail[-1])
+                if row >= 0:
+                    return self.set_current(row)
+            return None
         if self._current <= 0:
             return None
         return self.set_current(self._current - 1)
 
     def can_advance(self) -> bool:
-        return 0 <= self._current < len(self._tracks) - 1
+        if not self._tracks or self._current < 0:
+            return False
+        if self._shuffle:
+            if any(
+                i != self._current and t.video_id not in self._played_vids
+                for i, t in enumerate(self._tracks)
+            ):
+                return True
+            return self._repeat == RepeatMode.ALL and len(self._tracks) >= 2
+        if self._current < len(self._tracks) - 1:
+            return True
+        return self._repeat == RepeatMode.ALL and len(self._tracks) >= 1
 
     def can_go_back(self) -> bool:
+        if self._shuffle:
+            return len(self._shuffle_trail) >= 2
         return self._current > 0
 
     # ---------- radio ----------

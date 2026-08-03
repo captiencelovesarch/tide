@@ -1,6 +1,6 @@
 # Maintainer: captience <milkkjello@gmail.com>
 pkgname=tide
-pkgver=1.3.0
+pkgver=1.3.1
 pkgrel=1
 pkgdesc="A brutalist multi-source music desktop client"
 arch=('any')

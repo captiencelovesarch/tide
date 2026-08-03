@@ -4,6 +4,20 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [1.3.1] — 2026-08-03 — shuffle and repeat take their seats, and the chrome gets straightened
+
+### Added
+- **Shuffle and repeat, on the control bar, where they always belonged.** `[shuffle]` draws randomly from what hasn't played this cycle (tracked by id, so queue edits can't confuse it) and `[prev]` walks back through the actual random order you heard. `[repeat]` cycles off → all → one: *all* wraps the queue (shuffled, it deals a fresh cycle instead), *one* replays the finished track — but a manual `[next]` always moves on, because a next button that refuses to go next is a prank, not a mode. Both latch in the theme's accent when on (repeat-one wears a small ¹), live in every controls variant plus the mini player, persist with the session, sync over MPRIS (`Shuffle`/`LoopStatus`, writable — KDE's media widget can drive them), and answer to Ctrl+S / Ctrl+R. The up-next line and the stream prefetcher both honor the modes, so "next:" never lies and shuffled skips stay instant.
+
+### Changed
+- **The "large" controls variant stopped dressing like a form.** Bordered 16pt boxes with an accent flood on hover are now borderless oversized glyphs that color on hover — walkman and focused finally get the "soft controls" they were promised, and six controls fit walkman's 480px window with room to breathe.
+- **The nav-rail SVG icons got redrawn** on one consistent grid (uniform stroke, round caps, actual negative space). The house's roof meets its walls and it gained a door, the library is book spines (one leaning) instead of a barcode blob, the queue's play triangle is filled and aligned, the mic stands on a centered base, the settings gear has teeth attached to the ring instead of sun rays, and source is a proper swap-arrows pair. Sharper at 16px, calmer at any size.
+
+### Fixed
+- **The window buttons finally sit on one line.** The minimize dash rendered visibly lower than □ and ✕ — font glyphs never share an optical center (measured 1.5px of disagreement in IBM Plex). Modern themes now *paint* the three glyphs on a single geometric center; brutalist themes keep their `[_] [□] [✕]` text personality untouched.
+- **The little black box in the bottom-right corner is gone.** It was the status bar's QSizeGrip: themes paint every bare QWidget with `background: @bg`, so the grip sat as an opaque square on the adaptive gradient. The grip is retired (edge-drag resize already covers the corner in CSD, native borders cover it otherwise) and a QSS guard keeps any future grip transparent.
+- Layout mode switches now explicitly retain the audio-fx and speed buttons across the now-playing strip rebuild instead of relying on event-loop timing to rescue them from the discarded layout.
+
 ## [1.3.0] — 2026-07-30 — the mini player deserves to exist, and the window is all tide now
 
 Mini mode used to be the main window with everything hidden, shrunk to 340×360 with its title bar still on. Full redo: it is now a **dedicated frameless window** (`ui/mini.py`) with the adaptive gradient painted edge to edge, and the old shrink-in-place behavior is gone.

@@ -160,6 +160,10 @@ QStackedWidget#contentStack .QWidget {
    gradient runs edge to edge — they must not repaint an opaque background
    over it. Themes give QStatusBar a solid fill; this later rule wins. */
 QStatusBar { background: transparent; }
+/* Size grips are QWidgets, so themes' universal `QWidget { background }`
+   rule painted them as an opaque box over the gradient. The main window no
+   longer has one, but keep any future grip honest. */
+QSizeGrip { background: transparent; }
 """
 
 

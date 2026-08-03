@@ -35,6 +35,9 @@ class BracketButton(QPushButton):
         super().__init__(parent)
         self._label = label
         self._glyph = glyph
+        # Latched "mode is on" look (shuffle / repeat): accent text while
+        # set. Purely visual — callers own the actual mode state.
+        self._active_state = False
         # Optional decorative icon glyph rendered before the label (e.g. a
         # nav-rail icon set). Distinct from ``_glyph`` which REPLACES the
         # label when the theme's control_style is "glyph".
@@ -57,6 +60,23 @@ class BracketButton(QPushButton):
     def setGlyph(self, glyph: str | None) -> None:
         self._glyph = glyph
         self._update_text()
+
+    def setActiveState(self, on: bool) -> None:
+        """Latch/unlatch the accent "mode on" look. QSS reads it via the
+        ``activeState`` dynamic property; repolish makes the change land
+        immediately instead of on the next style event."""
+        on = bool(on)
+        if on == self._active_state:
+            return
+        self._active_state = on
+        self.setProperty("activeState", on)
+        st = self.style()
+        st.unpolish(self)
+        st.polish(self)
+        self.update()
+
+    def activeState(self) -> bool:
+        return self._active_state
 
     def setIcon(self, icon) -> None:  # type: ignore[override]
         """Polymorphic setter. Strings (or None) set the unicode glyph
@@ -134,6 +154,7 @@ class BracketButton(QPushButton):
         hover_bg = theme.token("sel_bg", fg) if theme else fg
         hover_fg = theme.token("sel_fg", bg) if theme else bg
         dim = theme.token("dim", "#666") if theme else "#666"
+        accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
         self.setStyleSheet(
             f"QPushButton#BracketButton {{"
             f"  background: transparent;"
@@ -141,6 +162,7 @@ class BracketButton(QPushButton):
             f"  border: none;"
             f"  padding: 4px 8px;"
             f"}}"
+            f'QPushButton#BracketButton[activeState="true"] {{ color: {accent}; }}'
             f"QPushButton#BracketButton:hover {{"
             f"  background: {hover_bg};"
             f"  color: {hover_fg};"

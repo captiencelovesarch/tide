@@ -35,6 +35,10 @@ class Snapshot:
     paused: bool = True
     radio_enabled: bool = False
     radio_seed: str | None = None
+    # Playback modes (v1.4+). Stored as plain strings/bools so old tide
+    # versions reading a new snapshot just ignore them.
+    shuffle: bool = False
+    repeat: str = "off"
     saved_at: float = 0.0
 
 
@@ -111,6 +115,8 @@ def load() -> Snapshot | None:
         paused=bool(data.get("paused", True)),
         radio_enabled=bool(data.get("radio_enabled", False)),
         radio_seed=data.get("radio_seed"),
+        shuffle=bool(data.get("shuffle", False)),
+        repeat=str(data.get("repeat") or "off"),
         saved_at=float(data.get("saved_at") or 0.0),
     )
 
@@ -132,6 +138,8 @@ def snapshot_from(queue, player_state, position_seconds: float) -> Snapshot:
         paused=player_state in (PlayState.PAUSED, PlayState.IDLE),
         radio_enabled=queue.radio_enabled,
         radio_seed=None,
+        shuffle=queue.shuffle_enabled,
+        repeat=queue.repeat_mode.value,
     )
 
 

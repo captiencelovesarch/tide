@@ -70,7 +70,11 @@ class TitleBarTest(unittest.TestCase):
         self.assertEqual(bar.title.text(), "TIDE")
         theming.manager().apply("nord")         # modern
         QTest.qWait(30)
-        self.assertEqual(bar.close_btn.text(), "✕")
+        # Modern themes PAINT the window glyphs now (font glyphs never
+        # shared an optical center — see titlebar._WinButton), so the
+        # buttons carry no text and text mode is off.
+        self.assertEqual(bar.close_btn.text(), "")
+        self.assertFalse(bar.close_btn._text_mode)
 
     def test_titlebar_qss_defaults_are_injected(self) -> None:
         theme = theming.manager().current()

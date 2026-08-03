@@ -146,7 +146,10 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
     def PlaybackStatus(self) -> str: return self._service.playback_status
 
     @Property(str)
-    def LoopStatus(self) -> str: return "None"
+    def LoopStatus(self) -> str: return self._service.loop_status
+    @LoopStatus.setter
+    def LoopStatus(self, value: str) -> None:
+        self._service.on_set_loop_status(value)
 
     @Property(float)
     def Rate(self) -> float: return self._service.rate
@@ -155,9 +158,10 @@ class _PlayerAdaptor(QDBusAbstractAdaptor):
         self._service.on_set_rate(value)
 
     @Property(bool)
-    def Shuffle(self) -> bool: return False
+    def Shuffle(self) -> bool: return self._service.shuffle
     @Shuffle.setter
-    def Shuffle(self, _value: bool) -> None: pass
+    def Shuffle(self, value: bool) -> None:
+        self._service.on_set_shuffle(value)
 
     @Property("QVariantMap")
     def Metadata(self) -> dict: return self._service.metadata
@@ -282,6 +286,7 @@ class MprisService(QObject):
         self._queue.rowsInserted.connect(self._on_queue_changed)
         self._queue.rowsRemoved.connect(self._on_queue_changed)
         self._queue.modelReset.connect(self._on_queue_changed)
+        self._queue.modes_changed.connect(self._on_modes_changed)
 
     def _refresh_all(self) -> None:
         self._on_current_changed(self._queue.current)
@@ -331,6 +336,19 @@ class MprisService(QObject):
     @property
     def can_go_previous(self) -> bool:
         return self._queue.can_go_back()
+
+    @property
+    def shuffle(self) -> bool:
+        return self._queue.shuffle_enabled
+
+    @property
+    def loop_status(self) -> str:
+        from .queue import RepeatMode
+        return {
+            RepeatMode.OFF: "None",
+            RepeatMode.ALL: "Playlist",
+            RepeatMode.ONE: "Track",
+        }[self._queue.repeat_mode]
 
     @property
     def position_us(self) -> int:
@@ -448,6 +466,15 @@ class MprisService(QObject):
             "CanGoPrevious": self.can_go_previous,
         })
 
+    def _on_modes_changed(self) -> None:
+        # Shuffle/repeat also change whether a "next"/"previous" exists.
+        self._emit_props_changed({
+            "Shuffle": self.shuffle,
+            "LoopStatus": self.loop_status,
+            "CanGoNext": self.can_go_next,
+            "CanGoPrevious": self.can_go_previous,
+        })
+
     # ---------- D-Bus method handlers (called from adaptors) ----------
 
     def on_next(self) -> None:
@@ -497,6 +524,24 @@ class MprisService(QObject):
             pass
         # Confirm the accepted value so clients don't snap their slider back.
         self._emit_props_changed({"Volume": percent / 100.0})
+
+    def on_set_shuffle(self, value: bool) -> None:
+        self._queue.set_shuffle(bool(value))
+        # modes_changed already re-emits; nothing more to confirm here.
+
+    def on_set_loop_status(self, value: str) -> None:
+        from .queue import RepeatMode
+        mode = {
+            "none": RepeatMode.OFF,
+            "playlist": RepeatMode.ALL,
+            "track": RepeatMode.ONE,
+        }.get(str(value or "").strip().lower())
+        if mode is None:
+            # Unknown value — per spec just ignore, but re-assert the real
+            # state so the client's optimistic UI snaps back.
+            self._emit_props_changed({"LoopStatus": self.loop_status})
+            return
+        self._queue.set_repeat(mode)
 
     def on_set_rate(self, value: float) -> None:
         """MPRIS clients writing the Rate property. Per spec a rate of 0.0

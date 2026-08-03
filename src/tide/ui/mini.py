@@ -289,16 +289,25 @@ class MiniPlayer(QWidget):
 
         transport = QHBoxLayout()
         transport.setSpacing(_scale.px(6))
+        # Glyph-only shuffle/repeat (like ♡): text labels here out-measure
+        # the art and widen the whole window in bracket-style themes.
+        self.shuffle_btn = BracketButton("⇋", "⇋")
         self.prev_btn = BracketButton("prev", "◂◂")
         self.play_btn = BracketButton("play", "▶")
         self.next_btn = BracketButton("next", "▸▸")
+        self.repeat_btn = BracketButton("↻", "↻")
         self.like_btn = BracketButton("♡", "♡")
-        for btn in (self.prev_btn, self.play_btn, self.next_btn, self.like_btn):
+        self.shuffle_btn.setToolTip("shuffle")
+        self.repeat_btn.setToolTip("repeat: off / all / one")
+        for btn in (self.shuffle_btn, self.prev_btn, self.play_btn,
+                    self.next_btn, self.repeat_btn, self.like_btn):
             btn.setFocusPolicy(Qt.NoFocus)
         transport.addStretch(1)
+        transport.addWidget(self.shuffle_btn)
         transport.addWidget(self.prev_btn)
         transport.addWidget(self.play_btn)
         transport.addWidget(self.next_btn)
+        transport.addWidget(self.repeat_btn)
         transport.addWidget(self.like_btn)
         transport.addStretch(1)
         fg.addLayout(transport)
@@ -350,10 +359,15 @@ class MiniPlayer(QWidget):
         self.ring.raise_()
 
         # ---------- wiring ----------
+        self.shuffle_btn.clicked.connect(window._on_shuffle_clicked)
         self.prev_btn.clicked.connect(window._on_prev_clicked)
         self.play_btn.clicked.connect(window._on_play_clicked)
         self.next_btn.clicked.connect(window._on_next_clicked)
+        self.repeat_btn.clicked.connect(window._on_repeat_clicked)
         self.like_btn.clicked.connect(window._on_like_clicked)
+        # Paint current modes now; later flips arrive via window's
+        # _refresh_mode_buttons → set_modes.
+        self.set_modes(window.queue.shuffle_enabled, window.queue.repeat_mode)
         # Not connected straight to _toggle_lyrics: clicked(checked) would
         # land its bool in the ``animate`` parameter.
         self.lyrics_btn.clicked.connect(self._on_lyrics_btn)
@@ -772,6 +786,15 @@ class MiniPlayer(QWidget):
     def set_nav_enabled(self, prev_ok: bool, next_ok: bool) -> None:
         self.prev_btn.setEnabled(bool(prev_ok))
         self.next_btn.setEnabled(bool(next_ok))
+
+    def set_modes(self, shuffle_on: bool, repeat_mode) -> None:
+        from ..queue import RepeatMode
+        mode = RepeatMode.parse(repeat_mode)
+        self.shuffle_btn.setActiveState(bool(shuffle_on))
+        self.repeat_btn.setActiveState(mode is not RepeatMode.OFF)
+        glyph = "↻¹" if mode is RepeatMode.ONE else "↻"
+        self.repeat_btn.setLabel(glyph)
+        self.repeat_btn.setGlyph(glyph)
 
     # ---------- lyrics panel ----------
 

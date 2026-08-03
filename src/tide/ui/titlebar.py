@@ -21,8 +21,8 @@ transient, and the wins here are for the window you live in.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QObject, QPoint, Qt
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -91,6 +91,86 @@ class EdgeResizer(QObject):
         return True
 
 
+class _WinButton(QPushButton):
+    """Window-control button that paints its own min/max/close glyph.
+
+    Font glyphs proved unfixable here: –, □ and ✕ each sit at a different
+    height within the line box (measured: the dash and box center a full
+    1.5px below the cross in IBM Plex), so no character swap lines all
+    three up. Painting puts every glyph on the same geometric center.
+
+    Brutalist themes instead run in text mode ("[_]" and friends) — the
+    QSS text path draws those, and this class stays out of the way.
+    """
+
+    GLYPH_PX = 9   # side of the square the glyph is drawn in (pre-scale)
+
+    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._kind = kind            # "min" | "max" | "close"
+        self._maxed = False
+        self._text_mode = False
+
+    def set_text_mode(self, on: bool) -> None:
+        self._text_mode = bool(on)
+        if not on:
+            self.setText("")
+        self.update()
+
+    def set_maximized(self, maxed: bool) -> None:
+        self._maxed = bool(maxed)
+        self.update()
+
+    def paintEvent(self, ev) -> None:
+        super().paintEvent(ev)       # QSS background (incl. hover states)
+        if self._text_mode:
+            return                   # QSS already drew the bracket text
+        theme = theming.manager().current()
+
+        def tok(name: str, fallback: str) -> str:
+            return theme.token(name, fallback) if theme else fallback
+
+        hover = self.underMouse()
+        if not self.isEnabled():
+            color = tok("dim", "#666")
+        elif hover and self._kind == "close":
+            # QSS gives close an accent hover fill; ink flips to bg.
+            color = tok("bg", "#0b0b0b")
+        elif hover:
+            color = tok("fg", "#e6e6e6")
+        else:
+            color = tok("dim", "#8a8a8a")
+
+        from . import scale as _scale
+        s = float(_scale.px(self.GLYPH_PX))
+        c = QPointF(self.rect().center()) + QPointF(0.5, 0.5)
+        half = s / 2.0
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(color)
+        pen.setWidthF(1.2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.MiterJoin)
+        p.setPen(pen)
+        if self._kind == "min":
+            p.drawLine(QPointF(c.x() - half, c.y()), QPointF(c.x() + half, c.y()))
+        elif self._kind == "max" and not self._maxed:
+            p.drawRect(QRectF(c.x() - half, c.y() - half, s, s))
+        elif self._kind == "max":
+            # Restore: front square low-left, back square peeking up-right.
+            off = s * 0.3
+            front = QRectF(c.x() - half, c.y() - half + off, s - off, s - off)
+            p.drawRect(front)
+            p.drawLine(QPointF(front.left() + off, front.top() - off),
+                       QPointF(front.right() + off, front.top() - off))
+            p.drawLine(QPointF(front.right() + off, front.top() - off),
+                       QPointF(front.right() + off, front.bottom() - off))
+        else:   # close
+            p.drawLine(QPointF(c.x() - half, c.y() - half), QPointF(c.x() + half, c.y() + half))
+            p.drawLine(QPointF(c.x() - half, c.y() + half), QPointF(c.x() + half, c.y() - half))
+        p.end()
+
+
 class TitleBar(QWidget):
     """The bar itself: themed title on the left, window controls right."""
 
@@ -108,9 +188,9 @@ class TitleBar(QWidget):
         self.title = QLabel("tide", self)
         self.title.setObjectName("TitleBarTitle")
 
-        self.min_btn = QPushButton(self)
-        self.max_btn = QPushButton(self)
-        self.close_btn = QPushButton(self)
+        self.min_btn = _WinButton("min", self)
+        self.max_btn = _WinButton("max", self)
+        self.close_btn = _WinButton("close", self)
         for name, btn in (
             ("TitleBarMin", self.min_btn),
             ("TitleBarMax", self.max_btn),
@@ -145,14 +225,15 @@ class TitleBar(QWidget):
         brutalist = bool(theme is not None
                          and getattr(theme, "aesthetic", "") == "brutalist")
         maxed = self._window.isMaximized()
+        for btn in (self.min_btn, self.max_btn, self.close_btn):
+            btn.set_text_mode(brutalist)
+        self.max_btn.set_maximized(maxed)
         if brutalist:
+            # Text mode keeps the bracket personality; the deliberate
+            # baseline-underscore look is part of the aesthetic there.
             self.min_btn.setText("[_]")
             self.max_btn.setText("[❐]" if maxed else "[□]")
             self.close_btn.setText("[✕]")
-        else:
-            self.min_btn.setText("–")
-            self.max_btn.setText("❐" if maxed else "□")
-            self.close_btn.setText("✕")
         try:
             self.title.setText(theming.styled_case("tide"))
         except Exception:

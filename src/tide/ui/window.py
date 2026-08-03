@@ -43,7 +43,7 @@ from ..player import PlayState, Player
 from ..playback import PlaybackRouter
 from ..playback.prefetch import StreamPrefetch
 from ..sources import StreamRef, registry as source_registry
-from ..queue import Queue, Role
+from ..queue import Queue, RepeatMode, Role
 from .album import AlbumView
 from .artist import ArtistView
 from .explore import ExploreView
@@ -260,7 +260,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         # Created first: everything below may call self.statusBar().
         self._status = QStatusBar()
-        self._status.setSizeGripEnabled(True)
+        # No QSizeGrip: themes paint every bare QWidget with `background:
+        # @bg`, so the grip rendered as a small opaque box floating on the
+        # adaptive gradient in the bottom-right corner. It's redundant
+        # anyway — CSD mode's EdgeResizer covers corner drags, and native
+        # decorations bring their own resize borders.
+        self._status.setSizeGripEnabled(False)
         self.setWindowTitle("tide")
         # Translucency must be set BEFORE the first show — app.py applies the
         # theme before constructing the window, so the flag is known here.
@@ -707,18 +712,25 @@ class MainWindow(QMainWindow):
         self.up_next.setTextFormat(Qt.PlainText)
 
         self._controls_bundle = make_controls(self._slot_controls)
+        self.shuffle_btn = self._controls_bundle.shuffle_btn
         self.prev_btn = self._controls_bundle.prev_btn
         self.play_btn = self._controls_bundle.play_btn
         self.next_btn = self._controls_bundle.next_btn
+        self.repeat_btn = self._controls_bundle.repeat_btn
         self.like_btn = self._controls_bundle.like_btn
+        self.shuffle_btn.clicked.connect(self._on_shuffle_clicked)
         self.prev_btn.clicked.connect(self._on_prev_clicked)
         self.play_btn.clicked.connect(self._on_play_clicked)
         self.next_btn.clicked.connect(self._on_next_clicked)
+        self.repeat_btn.clicked.connect(self._on_repeat_clicked)
         self.like_btn.clicked.connect(self._on_like_clicked)
         self.prev_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
         self.play_btn.setEnabled(False)
         self.like_btn.setEnabled(False)
+        # Shuffle/repeat stay enabled — they're modes, not track actions.
+        self.shuffle_btn.setToolTip("shuffle (ctrl+s)")
+        self.repeat_btn.setToolTip("repeat: off / all / one (ctrl+r)")
 
         self.progress = make_progress(self._slot_progress)
         self.progress.seek_requested.connect(self.player.seek)
@@ -1707,6 +1719,47 @@ class MainWindow(QMainWindow):
         if tr:
             self._play_track(tr)
 
+    # ---------- shuffle / repeat ----------
+
+    def _on_shuffle_clicked(self) -> None:
+        on = self.queue.toggle_shuffle()
+        self.statusBar().showMessage(
+            theming.styled_case("shuffle on" if on else "shuffle off"))
+
+    def _on_repeat_clicked(self) -> None:
+        mode = self.queue.cycle_repeat()
+        msg = {
+            RepeatMode.OFF: "repeat off",
+            RepeatMode.ALL: "repeat all",
+            RepeatMode.ONE: "repeat one",
+        }[mode]
+        self.statusBar().showMessage(theming.styled_case(msg))
+
+    def _refresh_mode_buttons(self) -> None:
+        """Paint the queue's shuffle/repeat state onto the transport
+        buttons (and the mini player, when it's up)."""
+        shuffle_on = self.queue.shuffle_enabled
+        mode = self.queue.repeat_mode
+        self.shuffle_btn.setActiveState(shuffle_on)
+        self.repeat_btn.setActiveState(mode is not RepeatMode.OFF)
+        # Repeat-one carries a superscript marker so the latched accent
+        # color alone doesn't have to say WHICH repeat is on.
+        if mode is RepeatMode.ONE:
+            self.repeat_btn.setLabel("repeat¹")
+            self.repeat_btn.setGlyph("↻¹")
+        else:
+            self.repeat_btn.setLabel("repeat")
+            self.repeat_btn.setGlyph("↻")
+        if self._mini is not None:
+            self._mini.set_modes(shuffle_on, mode)
+
+    def _on_queue_modes_changed(self) -> None:
+        self._refresh_mode_buttons()
+        # Modes change what "next" means and whether one exists.
+        self._refresh_nav_buttons()
+        self._refresh_up_next()
+        self._schedule_session_save()
+
     def _on_prev_clicked(self) -> None:
         # If we're more than 3s into the song, restart it. Else go back.
         if self.player.duration > 0 and self._last_position > 3:
@@ -1783,6 +1836,7 @@ class MainWindow(QMainWindow):
         self.queue.rowsInserted.connect(self._on_queue_size_changed)
         self.queue.rowsRemoved.connect(self._on_queue_size_changed)
         self.queue.modelReset.connect(lambda: self._on_queue_size_changed(None, 0, 0))
+        self.queue.modes_changed.connect(self._on_queue_modes_changed)
         # Persist session on any meaningful queue change.
         self.queue.current_changed.connect(lambda _t: self._schedule_session_save())
         self.queue.rowsInserted.connect(lambda *_a: self._schedule_session_save())
@@ -1977,14 +2031,20 @@ class MainWindow(QMainWindow):
                 pass
 
     def _arm_neighborhood_prefetch(self) -> None:
-        idx = self.queue.current_index
-        tracks = self.queue.tracks
+        candidates: list = []
+        if self.queue.shuffle_enabled:
+            # Row neighbors mean nothing shuffled — warm the pre-committed
+            # random pick (what advance() will actually play) instead.
+            candidates.append(self.queue.peek_next())
+        else:
+            idx = self.queue.current_index
+            tracks = self.queue.tracks
+            for offset in (1, 2, -1):
+                i = idx + offset
+                if 0 <= i < len(tracks):
+                    candidates.append(tracks[i])
         seen: set[str] = set()
-        for offset in (1, 2, -1):
-            i = idx + offset
-            if i < 0 or i >= len(tracks):
-                continue
-            tr = tracks[i]
+        for tr in candidates:
             if not tr or not tr.video_id or tr.video_id in seen:
                 continue
             seen.add(tr.video_id)
@@ -1994,9 +2054,14 @@ class MainWindow(QMainWindow):
                 pass
 
     def _refresh_up_next(self) -> None:
-        nxt_idx = self.queue.current_index + 1
-        if 0 < nxt_idx < self.queue.rowCount():
-            tr = self.queue.tracks[nxt_idx]
+        # peek_next() speaks for the active modes (shuffle pre-commit,
+        # repeat-all wrap), so the label promises what advance() will do.
+        # Repeat-one overrides: the next thing playing is this thing again.
+        if self.queue.repeat_mode is RepeatMode.ONE and self.queue.current is not None:
+            tr = self.queue.current
+        else:
+            tr = self.queue.peek_next() if self.queue.current_index >= 0 else None
+        if tr is not None:
             artist = theming.styled_case(tr.artists or "")
             title = theming.styled_case(tr.title or "")
             self.up_next.setText(f"{theming.styled_case('next')}:  {artist} — {title}")
@@ -2199,6 +2264,13 @@ class MainWindow(QMainWindow):
             self._sleep_cancel(silent=True)
             self.statusBar().showMessage("sleep: paused after current song")
             return
+        # Repeat-one traps natural track-ends only — a manual [next] goes
+        # through _on_next_clicked and always moves on.
+        if self.queue.repeat_mode is RepeatMode.ONE:
+            cur = self.queue.current
+            if cur is not None:
+                self._play_track(cur)
+                return
         tr = self.queue.advance()
         if tr:
             self._play_track(tr)
@@ -2366,6 +2438,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Up"), self, lambda: self.volume.setVolume(self.volume.volume() + 5))
         QShortcut(QKeySequence("Ctrl+Down"), self, lambda: self.volume.setVolume(self.volume.volume() - 5))
         QShortcut(QKeySequence("Ctrl+H"), self, self._on_like_clicked)
+        QShortcut(QKeySequence("Ctrl+S"), self, self._on_shuffle_clicked)
+        QShortcut(QKeySequence("Ctrl+R"), self, self._on_repeat_clicked)
         QShortcut(QKeySequence("Ctrl+M"), self, self.toggle_mini_mode)
         QShortcut(QKeySequence("Ctrl+I"), self, self.open_sleep_timer)
         # Playback speed shortcuts: [ slower, ] faster, \ reset to 1.0×.
@@ -2554,9 +2628,11 @@ class MainWindow(QMainWindow):
         controls_row = QHBoxLayout()
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(2)
+        controls_row.addWidget(self.shuffle_btn)
         controls_row.addWidget(self.prev_btn)
         controls_row.addWidget(self.play_btn)
         controls_row.addWidget(self.next_btn)
+        controls_row.addWidget(self.repeat_btn)
         controls_row.addWidget(self.like_btn)
         controls_row.addStretch(1)
         controls_row.addWidget(self.audio_fx_btn)
@@ -2602,9 +2678,11 @@ class MainWindow(QMainWindow):
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(4)
         controls_row.addStretch(1)
+        controls_row.addWidget(self.shuffle_btn)
         controls_row.addWidget(self.prev_btn)
         controls_row.addWidget(self.play_btn)
         controls_row.addWidget(self.next_btn)
+        controls_row.addWidget(self.repeat_btn)
         controls_row.addWidget(self.like_btn)
         controls_row.addStretch(1)
 
@@ -2634,12 +2712,19 @@ class MainWindow(QMainWindow):
 
         Widgets to keep:
             self.art, self.up_next, self.now_label, self.progress,
-            self.time_label, self.prev_btn, self.play_btn, self.next_btn,
-            self.like_btn, self.volume
+            self.time_label, self.shuffle_btn, self.prev_btn, self.play_btn,
+            self.next_btn, self.repeat_btn, self.like_btn, self.volume,
+            self.audio_fx_btn, self.speed_btn
         """
         keep = [self.art, self.up_next, self.now_label, self.progress,
-                self.time_label, self.prev_btn, self.play_btn, self.next_btn,
-                self.like_btn, self.volume]
+                self.time_label, self.shuffle_btn, self.prev_btn, self.play_btn,
+                self.next_btn, self.repeat_btn, self.like_btn, self.volume,
+                # Previously absent from this list, these two only survived a
+                # mode switch because the new layout re-claimed them from the
+                # throwaway host before its deferred deleteLater fired. Keep
+                # them explicitly — survival shouldn't hinge on event-loop
+                # timing or on every layout variant re-including them.
+                self.audio_fx_btn, self.speed_btn]
         # Pull our widgets out of the old layout so the layout deletion
         # doesn't take them with it.
         for w in keep:
@@ -2775,20 +2860,30 @@ class MainWindow(QMainWindow):
         new_bundle.play_btn.setEnabled(play_enabled)
         new_bundle.next_btn.setEnabled(next_enabled)
         new_bundle.like_btn.setEnabled(like_enabled)
+        new_bundle.shuffle_btn.clicked.connect(self._on_shuffle_clicked)
         new_bundle.prev_btn.clicked.connect(self._on_prev_clicked)
         new_bundle.play_btn.clicked.connect(self._on_play_clicked)
         new_bundle.next_btn.clicked.connect(self._on_next_clicked)
+        new_bundle.repeat_btn.clicked.connect(self._on_repeat_clicked)
         new_bundle.like_btn.clicked.connect(self._on_like_clicked)
+        new_bundle.shuffle_btn.setToolTip(self.shuffle_btn.toolTip())
+        new_bundle.repeat_btn.setToolTip(self.repeat_btn.toolTip())
         # Swap each button in its layout slot.
+        self._replace_in_layout(self.shuffle_btn, new_bundle.shuffle_btn)
         self._replace_in_layout(self.prev_btn, new_bundle.prev_btn)
         self._replace_in_layout(self.play_btn, new_bundle.play_btn)
         self._replace_in_layout(self.next_btn, new_bundle.next_btn)
+        self._replace_in_layout(self.repeat_btn, new_bundle.repeat_btn)
         self._replace_in_layout(self.like_btn, new_bundle.like_btn)
+        self.shuffle_btn = new_bundle.shuffle_btn
         self.prev_btn = new_bundle.prev_btn
         self.play_btn = new_bundle.play_btn
         self.next_btn = new_bundle.next_btn
+        self.repeat_btn = new_bundle.repeat_btn
         self.like_btn = new_bundle.like_btn
         self._controls_bundle = new_bundle
+        # Fresh buttons need the current mode state painted onto them.
+        self._refresh_mode_buttons()
 
     def _swap_now_label(self, slug: str) -> None:
         new = make_now_label(slug)
@@ -3097,6 +3192,10 @@ class MainWindow(QMainWindow):
         try:
             self.queue.clear()
             self.queue.add_many(tracks)
+            # Modes before set_current so the shuffle cycle seeds from the
+            # restored track (set_current marks it played + starts the trail).
+            self.queue.set_shuffle(snapshot.shuffle)
+            self.queue.set_repeat(snapshot.repeat)
             if snapshot.radio_enabled:
                 seed = tracks[snapshot.current_index].video_id
                 self.queue.enable_radio(seed)

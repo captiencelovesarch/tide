@@ -587,57 +587,62 @@ def make_album_art(slug: str, size: int = 96) -> AlbumArt:
 
 
 class ControlsBundle(QWidget):
-    """Container for prev / play / next / like buttons.
+    """Container for shuffle / prev / play / next / repeat / like buttons.
 
     The window wires .clicked on each. Visual style depends on the variant
-    used at construction time. The bundle exposes the four buttons as
+    used at construction time. The bundle exposes the six buttons as
     public attributes so existing wiring stays unchanged.
     """
 
     def __init__(self, *, variant: str = "bracket", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.variant = variant
-        if variant == "large":
-            self.prev_btn = LargeButton("prev", glyph="◂◂")
-            self.play_btn = LargeButton("play", glyph="▶")
-            self.next_btn = LargeButton("next", glyph="▸▸")
-            self.like_btn = LargeButton("♡", glyph="♡")
-        elif variant == "compact":
-            self.prev_btn = CompactButton("prev", glyph="◂◂")
-            self.play_btn = CompactButton("play", glyph="▶")
-            self.next_btn = CompactButton("next", glyph="▸▸")
-            self.like_btn = CompactButton("♡", glyph="♡")
-        else:
-            self.prev_btn = BracketButton("prev", glyph="◂◂")
-            self.play_btn = BracketButton("play", glyph="▶")
-            self.next_btn = BracketButton("next", glyph="▸▸")
-            self.like_btn = BracketButton("♡", glyph="♡")
+        cls = {"large": LargeButton, "compact": CompactButton}.get(variant, BracketButton)
+        self.shuffle_btn = cls("shuffle", glyph="⇋")
+        self.prev_btn = cls("prev", glyph="◂◂")
+        self.play_btn = cls("play", glyph="▶")
+        self.next_btn = cls("next", glyph="▸▸")
+        self.repeat_btn = cls("repeat", glyph="↻")
+        self.like_btn = cls("♡", glyph="♡")
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(2 if variant != "large" else 6)
+        row.addWidget(self.shuffle_btn)
         row.addWidget(self.prev_btn)
         row.addWidget(self.play_btn)
         row.addWidget(self.next_btn)
+        row.addWidget(self.repeat_btn)
         row.addWidget(self.like_btn)
 
 
 class LargeButton(BracketButton):
-    """Chunky 18pt buttons for the walkman / focused layouts."""
+    """Big soft glyphs for the walkman / focused layouts.
+
+    Used to be bordered 16pt boxes with a full accent fill on hover — a
+    wall of chunky form buttons that fought the "soft controls" brief (and
+    six of them no longer fit walkman's 480px window). Now: transparent,
+    borderless, glyph-forward, accent text on hover/active.
+    """
 
     def _apply_theme(self, theme) -> None:
         super()._apply_theme(theme)
-        bg = theme.token("bg_alt", "#141414") if theme else "#141414"
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        dim = theme.token("dim", "#666") if theme else "#666"
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
         self.setStyleSheet(
             f"QPushButton#BracketButton {{"
-            f"  background: {bg}; color: {fg};"
-            f"  border: 1px solid {fg}; border-radius: 6px;"
-            f"  padding: 10px 20px; font-size: 16pt; min-width: 56px;"
+            f"  background: transparent; color: {fg};"
+            f"  border: none; padding: 6px 10px; font-size: 15pt;"
             f"}}"
-            f"QPushButton#BracketButton:hover {{ background: {accent}; color: {bg}; }}"
+            f'QPushButton#BracketButton[activeState="true"] {{ color: {accent}; }}'
+            f"QPushButton#BracketButton:hover {{ color: {accent}; }}"
+            f"QPushButton#BracketButton:disabled {{ color: {dim}; }}"
         )
+
+    def _update_text(self) -> None:
+        # Large is glyph-forward: the size carries the weight, not a box.
+        self.setText(self._glyph or self._label)
 
 
 class CompactButton(BracketButton):
@@ -646,13 +651,16 @@ class CompactButton(BracketButton):
     def _apply_theme(self, theme) -> None:
         super()._apply_theme(theme)
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        dim = theme.token("dim", "#666") if theme else "#666"
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
         self.setStyleSheet(
             f"QPushButton#BracketButton {{"
             f"  background: transparent; color: {fg};"
             f"  border: none; padding: 4px 6px; font-size: 12pt;"
             f"}}"
+            f'QPushButton#BracketButton[activeState="true"] {{ color: {accent}; }}'
             f"QPushButton#BracketButton:hover {{ color: {accent}; }}"
+            f"QPushButton#BracketButton:disabled {{ color: {dim}; }}"
         )
 
     def _update_text(self) -> None:
