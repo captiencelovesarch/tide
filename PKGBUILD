@@ -32,7 +32,7 @@ makedepends=(
   'python-hatchling'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('47401bf258379a19545e305c2b7fe1a22026dd4bb97de4feb45909d955aaa066')
+sha256sums=('2ca67ae24df66237dede31b44fbc24a6cf55fa22c086352b5bdb2368917337f2')
 
 build() {
   cd "$pkgname-$pkgver"
