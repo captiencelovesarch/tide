@@ -4,7 +4,7 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
-## [Unreleased]
+## [1.3.2] — 2026-08-09 — the window shows up, the wizard listens, and the hill is one hill again
 
 ### Changed
 - **The setup wizard stopped pre-checking sources.** SoundCloud and Bandcamp arrived already ticked — a checked box the user never touched isn't a choice. Everything now starts off, and picking zero sources is fine (the app binds to a fallback until you enable one in Settings).
