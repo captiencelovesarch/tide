@@ -670,7 +670,8 @@ class MiniPlayer(QWidget):
     def _on_state(self, state) -> None:
         if state == PlayState.PLAYING:
             self.play_btn.setLabel("pause")
-            self.play_btn.setGlyph("⏸")
+            # ▮▮ not ⏸ — same-font baseline alignment; see window.py.
+            self.play_btn.setGlyph("▮▮")
         elif state == PlayState.LOADING:
             self.play_btn.setLabel("…")
             self.play_btn.setGlyph("…")

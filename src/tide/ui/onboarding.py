@@ -720,6 +720,11 @@ class _SourcesStep(_Step):
                 self._cards["local"].setSetupDone(True, f"✓ {short}")
             else:
                 self._uncheck_cancelled("local")
+        # Setup outcomes flip can_advance() (e.g. _yt_authed) but reach here
+        # via a deferred call — no toggle emission in flight — so [next]
+        # stays stale until we re-emit. Without this, a successful sign-in
+        # left the button disabled until the user toggled the card off/on.
+        self.state_changed.emit()
 
     def _uncheck_cancelled(self, key: str) -> None:
         # The setup dialog (SignInDialog / QFileDialog) was reached from

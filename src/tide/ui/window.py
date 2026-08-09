@@ -952,6 +952,16 @@ class MainWindow(QMainWindow):
         breakage."""
         if slug in self._auth_expired_toasted:
             return
+        if not source_registry().is_enabled(slug):
+            # A disabled source's dead session isn't actionable — no toast.
+            # Still sync the Sources tab, and DON'T mark it toasted: if the
+            # user re-enables the source, the next failure should shout.
+            try:
+                self.source_view.refresh_statuses()
+                self.source_view._refresh_dot_for(slug)
+            except Exception:
+                pass
+            return
         self._auth_expired_toasted.add(slug)
         source = source_registry().get(slug)
         name = getattr(source, "name", slug) or slug
@@ -2185,7 +2195,12 @@ class MainWindow(QMainWindow):
         self._maybe_apply_pending_seek(s)
         if s == PlayState.PLAYING:
             self.play_btn.setLabel("pause")
-            self.play_btn.setGlyph("⏸")
+            # ▮▮ not ⏸: U+23F8 lives only in symbol/emoji fallback fonts
+            # (Noto Symbols 2 etc.) whose metrics ride above the baseline,
+            # so the pause glyph floated over its neighbors. U+25AE is in
+            # Geometric Shapes — the same block as ▶ — so whatever font
+            # serves the play triangle serves this, at the same baseline.
+            self.play_btn.setGlyph("▮▮")
             # Audio actually started — stop the loading indicator.
             self._loading.finish("playing")
             # One summary line per play (not per pause/resume — t0 clears).
@@ -2305,6 +2320,10 @@ class MainWindow(QMainWindow):
         frameless = bool(self.windowFlags() & Qt.FramelessWindowHint)
         if on == current and on == frameless:
             return
+        # Sample BEFORE the flag flip: setWindowFlag hides a mapped window
+        # synchronously, so reading isVisible() afterwards always says False
+        # and the re-show below would never fire.
+        was_visible = self.isVisible()
         from .titlebar import EdgeResizer, TitleBar
         if on:
             self.setWindowFlag(Qt.FramelessWindowHint, True)
@@ -2326,7 +2345,7 @@ class MainWindow(QMainWindow):
             if resizer is not None:
                 resizer.detach()
                 self._edge_resizer = None
-        if self.isVisible():
+        if was_visible:
             # setWindowFlag on a shown window hides it; re-show deferred
             # (same emission rule as the translucency remap below).
             def _remap() -> None:

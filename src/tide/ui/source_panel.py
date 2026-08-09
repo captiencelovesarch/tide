@@ -585,8 +585,12 @@ class SourcePanel(QWidget):
         sub = reg.get("subsonic")
         if sub is not None and self._subsonic_configured():
             jobs.append(("subsonic", sub))
+        # Only probe Spotify when it's actually enabled: the probe's /me
+        # fetch refreshes the stored token, and a revoked grant then raised
+        # the "spotify: token expired" toast at every launch — even for
+        # users who had the source switched off.
         sp = reg.get("spotify")
-        if sp is not None and hasattr(sp, "probe"):
+        if sp is not None and hasattr(sp, "probe") and reg.is_enabled("spotify"):
             try:
                 if sp.is_authenticated():
                     jobs.append(("spotify", sp))

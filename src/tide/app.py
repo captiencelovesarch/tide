@@ -295,6 +295,12 @@ def run(argv: list[str] | None = None) -> int:
     if saved_session is not None and saved_session.tracks:
         window.restore_session(saved_session)
 
+    # tide-drawn titlebar (frameless + themed chrome). MUST precede the
+    # first show(): setWindowFlag on a mapped window unmaps it, which used
+    # to leave the window invisible at launch (tray icon only) whenever
+    # the CSD titlebar was enabled.
+    window.set_csd_titlebar(user_settings.csd_titlebar)
+
     # "start in mini player": skip showing the main window entirely — the
     # mini opens further down, once settings/adaptive/ambient are attached
     # (set_mini_mode consults all three).
@@ -344,10 +350,6 @@ def run(argv: list[str] | None = None) -> int:
     # background. This is independent of the accent shift.
     adaptive.set_background_enabled(user_settings.adaptive_background)
     window._adaptive = adaptive
-
-    # tide-drawn titlebar (frameless + themed chrome). Applied BEFORE the
-    # first show so the window maps with the right frame flags.
-    window.set_csd_titlebar(user_settings.csd_titlebar)
 
     # Apply user's app-backdrop + corner preferences. CentralBg paints the
     # adaptive surface and clips corners; corner radius is also pushed as a sticky

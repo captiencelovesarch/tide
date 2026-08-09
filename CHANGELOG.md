@@ -4,6 +4,14 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [Unreleased]
+
+### Fixed
+- **tide shows up when you launch it.** With the tide titlebar enabled, the window mapped and then vanished into the tray — `setWindowFlag` unmaps a shown window, and the re-show guard read `isVisible()` *after* the flip, which is always false. The frame flags now apply before the first show (so launch maps once, correctly), and live toggles from Settings sample visibility before flipping so the re-show actually fires.
+- **A disabled Spotify keeps its expired tokens to itself.** The sources panel probed Spotify's profile on every launch whenever tokens existed on disk — enabled or not — and a revoked grant raised the "spotify: token expired" toast before the window even settled. The probe now skips disabled sources, and the expiry toast is gated the same way (the Sources tab still shows the honest status; re-enabling restores the right to shout).
+- **The setup wizard's [next] notices you signed in.** Completing YouTube Music sign-in (or Spotify / Subsonic / local-folder setup) inside the sources step updated the state but never told the button, so [next] stayed dead until you toggled the source off and back on. Setup outcomes now re-emit the state change.
+- **The pause glyph sits on the baseline with everybody else.** `⏸` (U+23F8) only exists in symbol/emoji fallback fonts whose metrics ride high, so the pause button floated above its neighbors. It's now `▮▮` from Geometric Shapes — the same block as `▶` — so whatever font draws the play triangle draws the pause bars, at the same baseline.
+
 ## [1.3.1] — 2026-08-03 — shuffle and repeat take their seats, and the chrome gets straightened
 
 ### Added
