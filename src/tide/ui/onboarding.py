@@ -59,8 +59,11 @@ class OnboardingResult:
     completed: bool = False
     aesthetic: str = "brutalist"
     theme_slug: str = "brutalist-mono"
+    # Nothing pre-selected: a checked box the user never touched isn't a
+    # choice, and the wizard advances fine with zero sources (app.py binds
+    # the UI to a fallback source until they enable one).
     sources_enabled: dict[str, bool] = field(default_factory=lambda: {
-        "ytmusic": False, "soundcloud": True, "bandcamp": True,
+        "ytmusic": False, "soundcloud": False, "bandcamp": False,
         "mixcloud": False, "local": False, "spotify": False, "subsonic": False,
     })
     active_source: str = "soundcloud"
@@ -75,6 +78,7 @@ class OnboardingResult:
     subsonic_pass: str = ""
     subsonic_auth_style: str = "salt"
     adaptive_accent: bool = True
+    adaptive_background: bool = True
     motion: str = "lite"
     ui_scale: str = "normal"
 
@@ -565,7 +569,7 @@ class _SourcesStep(_Step):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._enabled: dict[str, bool] = {
-            "ytmusic": False, "soundcloud": True, "bandcamp": True,
+            "ytmusic": False, "soundcloud": False, "bandcamp": False,
             "mixcloud": False, "local": False, "spotify": False, "subsonic": False,
         }
         self._yt_authed = False
@@ -581,7 +585,7 @@ class _SourcesStep(_Step):
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("toggle any source — sources that need setup will ask. you don't have to pick all of them.")
+        sub = QLabel("toggle any source — sources that need setup will ask. pick as many or as few as you like.")
         sub.setProperty("class", "dim")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
@@ -608,7 +612,7 @@ class _SourcesStep(_Step):
             "apple": _SourceCard("apple", "Apple Music",
                 "Apple ID · v1.2.2", needs_setup=False, coming_soon=True),
         }
-        # Default-on for the no-setup-required sources.
+        # Nothing arrives pre-checked (see OnboardingResult.sources_enabled).
         for k, on in self._enabled.items():
             self._cards[k].setChecked(on)
         for card in self._cards.values():
@@ -783,6 +787,7 @@ class _FeelStep(_Step):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._adaptive = True
+        self._living_bg = True
         self._motion = "lite"
         self._scale = "normal"
 
@@ -802,6 +807,15 @@ class _FeelStep(_Step):
         self._adaptive_check = QCheckBox("shift the accent to the album cover (adaptive)")
         self._adaptive_check.setChecked(True)
         self._adaptive_check.toggled.connect(self._on_adaptive)
+
+        # Living background — the album-lit gradient that breathes with the
+        # music (adaptive_background + adaptive_pulse; style stays "field",
+        # refinable later in Settings → appearance).
+        self._living_bg_check = QCheckBox(
+            "living background — album-colored glow that breathes with the music"
+        )
+        self._living_bg_check.setChecked(True)
+        self._living_bg_check.toggled.connect(self._on_living_bg)
 
         # Motion picker — radio row.
         motion_label = QLabel("animations:")
@@ -840,6 +854,7 @@ class _FeelStep(_Step):
         col.addWidget(sub)
         col.addSpacing(8)
         col.addWidget(self._adaptive_check)
+        col.addWidget(self._living_bg_check)
         col.addSpacing(8)
         col.addWidget(motion_label)
         col.addLayout(motion_row)
@@ -852,6 +867,10 @@ class _FeelStep(_Step):
         self._adaptive = on
         self.state_changed.emit()
 
+    def _on_living_bg(self, on: bool) -> None:
+        self._living_bg = on
+        self.state_changed.emit()
+
     def _on_motion(self, value: str) -> None:
         self._motion = value
         self.state_changed.emit()
@@ -862,6 +881,7 @@ class _FeelStep(_Step):
 
     def apply_to(self, result: OnboardingResult) -> None:
         result.adaptive_accent = self._adaptive
+        result.adaptive_background = self._living_bg
         result.motion = self._motion
         result.ui_scale = self._scale
 

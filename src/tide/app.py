@@ -74,6 +74,10 @@ def run_onboarding_if_needed(user_settings):
     # Apply everything the user picked.
     user_settings.theme = r.theme_slug
     user_settings.adaptive_accent = bool(r.adaptive_accent)
+    # One wizard toggle drives the whole living-background experience;
+    # style stays the "field" default — refinable in Settings → appearance.
+    user_settings.adaptive_background = bool(r.adaptive_background)
+    user_settings.adaptive_pulse = bool(r.adaptive_background)
     user_settings.motion = r.motion
     user_settings.ui_scale = r.ui_scale
     user_settings.sources_enabled = dict(r.sources_enabled)

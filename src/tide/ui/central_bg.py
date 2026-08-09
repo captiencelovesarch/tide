@@ -396,13 +396,28 @@ class CentralBg(QWidget):
                   (1.00, clear)])
 
             if pulse > 0.01:
+                crest_tone = tone_c.lighter(126) if dark else tone_c.darker(116)
+                crest_y = apex_y + arch_h * 0.18
+                crest_r = max_side * (0.14 + 0.20 * pulse)
+                # Spine — a column of light filling the arch between the
+                # mound and the crest. Without it the crest floated: as bass
+                # drives the apex up, the arch body's mid-falloff dims faster
+                # than the crest, leaving a dark trough that split the hill
+                # into two disconnected lights (crest in tone_c, base in
+                # tone_a/b — the hue jump made the split read even harder).
+                # The spine sits halfway up in the blended hue so brightness
+                # and color both ramp continuously from base to crest.
+                spine_tone = _lerp(tone_b, crest_tone, 0.55)
+                glow(center_x, base_y - arch_h * 0.55,
+                     half_w * (0.62 + 0.10 * pulse), arch_h * 0.72,
+                     [(0.00, _alpha(spine_tone, int(72 * pulse))),
+                      (0.55, _alpha(tone_a, int(30 * pulse))),
+                      (1.00, clear)])
                 # Crest bloom — light gathering at the apex on bass. Reads as
                 # a halo, never a rim: it is another edgeless glow. Tucked a
                 # little below the apex and kept in the crest color family so
                 # it fuses with the arch body instead of floating above it.
-                crest_tone = tone_c.lighter(126) if dark else tone_c.darker(116)
-                crest_r = max_side * (0.14 + 0.20 * pulse)
-                glow(center_x, apex_y + arch_h * 0.18, crest_r, crest_r * 0.90,
+                glow(center_x, crest_y, crest_r, crest_r * 0.90,
                      [(0.00, _alpha(crest_tone, int(96 * pulse))),
                       (0.50, _alpha(tone_c, int(42 * pulse))),
                       (1.00, clear)])

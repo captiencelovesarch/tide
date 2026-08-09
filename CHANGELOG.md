@@ -6,7 +6,12 @@ The canonical source of truth for the diff lives in the [GitHub Releases](https:
 
 ## [Unreleased]
 
+### Changed
+- **The setup wizard stopped pre-checking sources.** SoundCloud and Bandcamp arrived already ticked — a checked box the user never touched isn't a choice. Everything now starts off, and picking zero sources is fine (the app binds to a fallback until you enable one in Settings).
+- **The living background is offered during setup.** The feel step only pitched the adaptive accent; the album-lit gradient that breathes with the music — arguably the app's whole look — was undiscoverable until you dug through Settings → appearance. One new toggle (on by default) enables the backdrop and the bass pulse together; the style stays "living fields" and is refinable later.
+
 ### Fixed
+- **The bass arch is one hill again.** As bass pushed the arch taller, the crest bloom (drawn in the album's secondary color) climbed away from the mound while the arch body between them thinned out — brightness and hue both dipped, and the hill split into two disconnected lights. A spine glow now fills the arch in a blended hue, so the light runs continuously from the orange base to the crest.
 - **tide shows up when you launch it.** With the tide titlebar enabled, the window mapped and then vanished into the tray — `setWindowFlag` unmaps a shown window, and the re-show guard read `isVisible()` *after* the flip, which is always false. The frame flags now apply before the first show (so launch maps once, correctly), and live toggles from Settings sample visibility before flipping so the re-show actually fires.
 - **A disabled Spotify keeps its expired tokens to itself.** The sources panel probed Spotify's profile on every launch whenever tokens existed on disk — enabled or not — and a revoked grant raised the "spotify: token expired" toast before the window even settled. The probe now skips disabled sources, and the expiry toast is gated the same way (the Sources tab still shows the honest status; re-enabling restores the right to shout).
 - **The setup wizard's [next] notices you signed in.** Completing YouTube Music sign-in (or Spotify / Subsonic / local-folder setup) inside the sources step updated the state but never told the button, so [next] stayed dead until you toggled the source off and back on. Setup outcomes now re-emit the state change.
