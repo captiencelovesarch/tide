@@ -6,9 +6,9 @@ tide is small and moves fast. Only the latest released minor version receives se
 
 | version | supported |
 |---------|-----------|
-| 1.2.x   | ✅        |
-| 1.1.x   | ❌        |
-| < 1.1   | ❌        |
+| 1.3.x   | ✅        |
+| 1.2.x   | ❌        |
+| < 1.2   | ❌        |
 
 ## Reporting a vulnerability
 
@@ -17,15 +17,15 @@ tide is small and moves fast. Only the latest released minor version receives se
 Things worth reporting:
 
 - arbitrary code execution from a malicious stream / metadata field / theme file
-- credential leakage (YouTube Music cookie, ListenBrainz token, Discord ID)
+- credential leakage (YouTube Music cookie jar, Spotify OAuth tokens, Subsonic/Navidrome passwords, ListenBrainz token, Discord ID)
 - anything that lets a remote party read or modify your local audio cache, history, or session
 - supply-chain issues in tide's bundled fonts / icons / themes
 
 Things that are **not** vulnerabilities:
 
 - a crash from a malformed manual edit to `~/.config/tide/settings.toml`
-- inability to play a track that requires DRM tide doesn't support (Spotify Premium, Apple Music — those are coming, but the lack itself isn't a CVE)
-- "tide opens a webview to sign in to YouTube Music" — that's by design and the webview is sandboxed by Qt
+- inability to play a track that requires DRM tide doesn't support (Apple Music — the lack itself isn't a CVE)
+- "tide reads my browser's cookie database" — that's the YouTube Music sign-in working as designed: the wizard imports cookies from your own browser session, with your keyring's consent, because Google blocks credential entry in embedded webviews (tide ships no webview at all)
 
 ## Disclosure timeline
 
