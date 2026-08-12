@@ -506,7 +506,7 @@ class _SourceCard(QFrame):
         self._check.toggled.connect(self._on_toggled)
         self._check.setEnabled(not coming_soon)
 
-        sub = QLabel(tags + (" · coming soon" if coming_soon else ""))
+        sub = QLabel(tags)
         sub.setProperty("class", "dim")
 
         text_col = QVBoxLayout()
@@ -610,7 +610,7 @@ class _SourcesStep(_Step):
                 "self-hosted music server · needs server url + login",
                 needs_setup=True),
             "apple": _SourceCard("apple", "Apple Music",
-                "Apple ID · v1.2.2", needs_setup=False, coming_soon=True),
+                "Apple ID · shelved", needs_setup=False, coming_soon=True),
         }
         # Nothing arrives pre-checked (see OnboardingResult.sources_enabled).
         for k, on in self._enabled.items():

@@ -366,7 +366,7 @@ class SourcePanel(QWidget):
         # Future-source placeholder. Spotify used to be a placeholder
         # here too — in v1.2.1 it became a real (registered, but shelved)
         # source so the row above renders it directly via _SourceRow.
-        rows_col.addWidget(_PlaceholderRow("apple music", "v1.2.2 — musickit js"))
+        rows_col.addWidget(_PlaceholderRow("apple music", "shelved"))
 
         rows_wrap = QWidget()
         rows_wrap.setLayout(rows_col)
