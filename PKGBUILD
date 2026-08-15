@@ -1,6 +1,6 @@
 # Maintainer: captience <milkkjello@gmail.com>
 pkgname=tide
-pkgver=1.3.2
+pkgver=1.3.3
 pkgrel=1
 pkgdesc="A brutalist multi-source music desktop client"
 arch=('any')
@@ -32,7 +32,7 @@ makedepends=(
   'python-hatchling'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('a3812570164b7628b395466f4fac6c0d098415bd9178d861f55793720a3c85ba')
+sha256sums=('6e52cfed7de49f05261bc1a75d93ebd17d002de518bc7f05ff7d03b7d558d402')
 
 build() {
   cd "$pkgname-$pkgver"
