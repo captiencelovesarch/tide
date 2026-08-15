@@ -4,6 +4,22 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [1.3.3] — 2026-08-14 — the player stops lying, fx takes its seat, and the sleep timer shows its face
+
+### Fixed
+- **"player error" on some songs is gone.** YouTube now gates individual songs behind PO tokens. For those, the signed-in yt-dlp pass loses all its formats and the anonymous default client (android_vr) still hands back a URL — one that answers HTTP 403 to every request mpv makes. A resolved URL is now **probed before anyone trusts it** and the resolver walks a client fallback chain (cookies → anonymous → web_music → android) until something actually answers; gated songs play again (via YT Music's own web client formats).
+- **A dead URL can't haunt the cache.** The failing URL used to be purged only from the in-memory prefetch layer while the disk cache — consulted *first* — replayed it for the rest of its 4-hour TTL, so retrying a broken song just failed again. Player errors now purge both layers, and disk-cache hits are probed too, so a URL that died inside its TTL is silently re-resolved instead of handed to mpv.
+- **One gated song can't poison the whole session.** Any auth-pass failure tripped the 30-minute "auth broken" memo — including per-song format errors and YouTube's bot-check (whose message literally starts with "Sign in…") — after which *every* resolve went anonymous and mostly failed until a restart. The memo now trips only on genuinely jar-shaped errors (rotated cookies, 401).
+- **Parallel resolves stop racing the cookie jar.** yt-dlp rewrites the shared cookie file every time an authenticated resolve closes; with prefetch running up to three workers at once, a truncating write could race a read and hand yt-dlp a half-written jar. Authenticated passes are now serialized behind a lock; anonymous passes stay parallel.
+- **Failures reach the journal.** Resolve failures and player errors now print `tide: resolve-failed …` / `tide: player-error …` lines beside the existing play summary — "some songs error" is diagnosable after the fact instead of being invisible.
+
+### Added
+- **The sleep timer has a face.** It shipped in v1.1 — pause in N minutes, after the current song, or after the queue — but lived behind `Ctrl+I` with no visible surface anywhere. There's now a `[zzz]` button in the now-playing strip (classic and compact layouts) that opens the same dialog, and its label doubles as the armed indicator: `zzz 12m` counting down, `zzz song`, `zzz queue`.
+- **`[fx]` joined the nav rail.** The full audio-FX panel has been a first-class view since v1.2.2 — reachable only by hotkey. It now has its own tab after `[source]`, with a mixer-sliders SVG icon plus `ƒ` / 🎛 glyphs for the classic and emoji icon sets.
+
+### Changed
+- **`Ctrl+6`–`Ctrl+9` mirror the rail again.** `Ctrl+6` was a ghost duplicate of home left over from the explore→home merge, so the digit row visibly skipped a number. The digits now match the tab order exactly: visualizer 6, source 7, fx 8, settings 9. Every stale hint (fx popover, settings blurb, library empty-state, README) got renumbered with it.
+
 ## [1.3.2] — 2026-08-09 — the window shows up, the wizard listens, and the hill is one hill again
 
 ### Changed
