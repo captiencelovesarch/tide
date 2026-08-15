@@ -145,7 +145,7 @@ class AudioFxPopover(QFrame):
         self._treble_slider.valueChanged.connect(self._on_treble)
 
         # full-panel hint at bottom
-        self._hint = QLabel("ctrl+9 → full panel")
+        self._hint = QLabel("ctrl+8 → full panel")
         self._hint.setAlignment(Qt.AlignCenter)
         self._hint.setStyleSheet("color: palette(mid);")
 

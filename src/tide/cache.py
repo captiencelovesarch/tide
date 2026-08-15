@@ -135,6 +135,19 @@ def clear_source(source: str) -> None:
         pass
 
 
+def remove_stream_url(source: str, video_id: str) -> None:
+    """Drop one cached URL, in memory and on disk. Called when playback
+    proves the URL dead (mpv got a 403) — without this, every retry replays
+    the same poison URL from disk for the rest of its TTL."""
+    mem = _ensure_loaded(source)
+    if mem.pop(video_id, None) is None:
+        return
+    try:
+        _save_disk(source, mem)
+    except Exception:
+        pass
+
+
 def get_stream_url(source: str, video_id: str) -> str | None:
     """Return a cached URL for ``video_id`` under ``source`` if still valid."""
     mem = _ensure_loaded(source)

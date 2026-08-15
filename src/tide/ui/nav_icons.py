@@ -23,6 +23,7 @@ NAV_ICON_SETS: dict[str, dict[str, str]] = {
         "history":    "⌛",   # hourglass
         "visualizer": "♬",   # beamed notes
         "source":     "⇄",   # left/right arrow — reads as "switch"
+        "audio_fx":   "ƒ",   # florin f — the classic "fx" abbreviation
         "settings":   "⚙",   # gear
     },
     # Emoji set — universal recognizability. Renders via the system color
@@ -36,6 +37,7 @@ NAV_ICON_SETS: dict[str, dict[str, str]] = {
         "history":    "🕒",
         "visualizer": "🎚",
         "source":     "🔌",
+        "audio_fx":   "🎛",
         "settings":   "⚙",
     },
 }

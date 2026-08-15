@@ -40,7 +40,7 @@ plays music, obviously. queue with radio autoplay when it runs low. synced lyric
 
 there is a proper mini player now (v1.3): click the album art and you get a small frameless card where the window border is the progress bar, the backdrop breathes with the bass, a synced lyric ticks under the artist, and the controls fade out when you leave it alone. click the art again to come back. it can pin itself above other windows, KWin willing.
 
-the fx rack (`Ctrl+9`) has a 10-band EQ, reverb presets including one called slowed, bass and treble shelves, loudness normalization, stereo width and a compressor. playback speed goes 0.5× to 2× and shifts pitch by default because that is the point, there is a preserve-pitch toggle for audiobook people. ten visualizer renderers run off a pipewire capture, `Ctrl+7`, F11 for fullscreen.
+the fx rack (`Ctrl+8`) has a 10-band EQ, reverb presets including one called slowed, bass and treble shelves, loudness normalization, stereo width and a compressor. playback speed goes 0.5× to 2× and shifts pitch by default because that is the point, there is a preserve-pitch toggle for audiobook people. ten visualizer renderers run off a pipewire capture, `Ctrl+6`, F11 for fullscreen.
 
 adaptive accent and the living backdrop are opt-in: the theme accent drifts toward the current cover's dominant color and the whole window (titlebar included) glows with it, optionally swelling on bass.
 
@@ -68,7 +68,7 @@ signing in: google blocks OAuth for the youtube music endpoints, so cookies are 
 
 | key | action |
 |---|---|
-| `Ctrl+1` … `Ctrl+9` | views: home, library, queue, lyrics, history, explore, visualizer, sources, fx |
+| `Ctrl+1` … `Ctrl+9` | views: home, library, queue, lyrics, history, visualizer, sources, fx, settings |
 | `Space` | play / pause |
 | `Ctrl+→` / `Ctrl+←` | next / previous |
 | `Ctrl+↑` / `Ctrl+↓` | volume |

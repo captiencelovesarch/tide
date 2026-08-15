@@ -434,7 +434,7 @@ class SettingsDialog(QDialog):
         audio_fx_heading.setProperty("class", "dim")
         fx_blurb = QLabel(
             "10-band eq + reverb + loudness norm + the rest of the rack.\n"
-            "open the full panel with ctrl+9, or use the [fx] popover on the now-playing strip."
+            "open the full panel with ctrl+8 (or the [fx] nav tab), or use the [fx] popover on the now-playing strip."
         )
         fx_blurb.setProperty("class", "dim")
         fx_blurb.setWordWrap(True)

@@ -180,7 +180,7 @@ class LibraryView(QWidget):
             self.index_heading.setText(_line_heading(f"{src_name} has no library"))
             placeholder = QListWidgetItem(
                 theming.styled_case(
-                    "  switch active source in [source] (Ctrl+8) to one that "
+                    "  switch active source in [source] (Ctrl+7) to one that "
                     "has a library — youtube music or local files."
                 )
             )

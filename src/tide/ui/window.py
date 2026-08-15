@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, history as history_module, layout as layout_module, qthreads, session as session_module, theming
+from .. import api, cache, history as history_module, layout as layout_module, qthreads, session as session_module, theming
 from ..player import PlayState, Player
 from ..playback import PlaybackRouter
 from ..playback.prefetch import StreamPrefetch
@@ -378,6 +378,9 @@ class MainWindow(QMainWindow):
         self.nav_history_btn = BracketButton("history")
         self.nav_visualizer_btn = BracketButton("visualizer")
         self.nav_source_btn = BracketButton("source")
+        # The audio FX panel existed since v1.2.2 but only behind a hotkey —
+        # a full view the rail never admitted to. Now a first-class tab.
+        self.nav_fx_btn = BracketButton("fx")
         self.nav_settings_btn = BracketButton("settings")
         # Slot map used by _apply_nav_icons to walk both ways (button → slot
         # for picking the icon, slot → button for hot-swap).
@@ -389,6 +392,7 @@ class MainWindow(QMainWindow):
             "history": self.nav_history_btn,
             "visualizer": self.nav_visualizer_btn,
             "source": self.nav_source_btn,
+            "audio_fx": self.nav_fx_btn,
             "settings": self.nav_settings_btn,
         }
         self.nav_home_btn.clicked.connect(lambda: self._switch_view("home"))
@@ -398,6 +402,7 @@ class MainWindow(QMainWindow):
         self.nav_history_btn.clicked.connect(lambda: self._switch_view("history"))
         self.nav_visualizer_btn.clicked.connect(lambda: self._switch_view("visualizer"))
         self.nav_source_btn.clicked.connect(lambda: self._switch_view("source"))
+        self.nav_fx_btn.clicked.connect(lambda: self._switch_view("audio_fx"))
         self.nav_settings_btn.clicked.connect(self.open_settings)
 
         nav_col = QVBoxLayout()
@@ -410,6 +415,7 @@ class MainWindow(QMainWindow):
         nav_col.addWidget(self.nav_history_btn)
         nav_col.addWidget(self.nav_visualizer_btn)
         nav_col.addWidget(self.nav_source_btn)
+        nav_col.addWidget(self.nav_fx_btn)
         nav_col.addStretch(1)
         nav_col.addWidget(self.nav_settings_btn)
         nav = QFrame()
@@ -747,11 +753,19 @@ class MainWindow(QMainWindow):
 
         # Audio FX rack quick-access button — opens the small popover with
         # preset / reverb / bass / treble. Right-click toggles the master
-        # rack on/off. The full panel (Ctrl+9) shares the same state
+        # rack on/off. The full panel (Ctrl+8 / [fx] nav tab) shares the same state
         # object via app.py.
         from .audio_fx_popover import AudioFxButton
         self.audio_fx_btn = AudioFxButton()
         self.audio_fx_btn.state_changed.connect(self._on_audio_fx_state_changed)
+
+        # Sleep timer entry point. The feature shipped in v1.1 but lived
+        # behind Ctrl+I with no visible surface at all — README-only
+        # features don't exist. Label doubles as the armed indicator
+        # ("zzz 12m" / "zzz song" / "zzz queue"), updated by the tick.
+        self.sleep_btn = BracketButton("zzz")
+        self.sleep_btn.setToolTip("sleep timer (ctrl+i)")
+        self.sleep_btn.clicked.connect(self.open_sleep_timer)
 
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setProperty("class", "dim")
@@ -1667,6 +1681,10 @@ class MainWindow(QMainWindow):
 
     def _on_resolve_failed(self, video_id: str, msg: str) -> None:
         self._loading.cancel()
+        # Sibling of the "tide: play" summary line — failures were invisible
+        # in the journal, which made "some songs error" undiagnosable after
+        # the fact. Always on for the same reason the play line is.
+        print(f"tide: resolve-failed {video_id} msg={msg}", file=sys.stderr)
         self.statusBar().showMessage(f"couldn't resolve: {msg}")
         self.now_label.setStatus("error")
         from .toast import show_toast
@@ -2299,11 +2317,15 @@ class MainWindow(QMainWindow):
     def _on_player_error(self, msg: str) -> None:
         self._loading.cancel()
         # The failing URL may have come from the prefetch cache (stale CDN
-        # signature, expired session). Drop it so retry/next-attempt does a
-        # fresh resolve instead of replaying the same dead URL until TTL.
+        # signature, expired session). Drop it from BOTH cache layers —
+        # resolve_stream_url consults the disk cache first, so clearing only
+        # the prefetch layer still replays the same dead URL until its TTL.
         cur = self._current
         if cur is not None and getattr(cur, "video_id", ""):
             self._prefetch.invalidate(cur.video_id)
+            cache.remove_stream_url(cur.source or "ytmusic", cur.video_id)
+        print(f"tide: player-error {cur.video_id if cur else '?'} msg={msg}",
+              file=sys.stderr)
         self.statusBar().showMessage(f"player error: {msg}")
 
     # ---------- theme + shortcuts ----------
@@ -2445,10 +2467,14 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+3"), self, lambda: self._switch_view("queue"))
         QShortcut(QKeySequence("Ctrl+4"), self, lambda: self._switch_view("lyrics"))
         QShortcut(QKeySequence("Ctrl+5"), self, lambda: self._switch_view("history"))
-        QShortcut(QKeySequence("Ctrl+6"), self, lambda: self._switch_view("home"))
-        QShortcut(QKeySequence("Ctrl+7"), self, lambda: self._switch_view("visualizer"))
-        QShortcut(QKeySequence("Ctrl+8"), self, lambda: self._switch_view("source"))
-        QShortcut(QKeySequence("Ctrl+9"), self, lambda: self._switch_view("audio_fx"))
+        # Ctrl+6 was "explore" until that view merged into home, after which
+        # it sat as a ghost duplicate of Ctrl+1 — so 6..9 visibly skipped a
+        # number relative to the rail. The digits now mirror the rail's tab
+        # order exactly, [settings] included.
+        QShortcut(QKeySequence("Ctrl+6"), self, lambda: self._switch_view("visualizer"))
+        QShortcut(QKeySequence("Ctrl+7"), self, lambda: self._switch_view("source"))
+        QShortcut(QKeySequence("Ctrl+8"), self, lambda: self._switch_view("audio_fx"))
+        QShortcut(QKeySequence("Ctrl+9"), self, self.open_settings)
         QShortcut(QKeySequence("F11"), self, self._toggle_visualizer_fullscreen)
         QShortcut(QKeySequence("Ctrl+,"), self, self.open_settings)
         QShortcut(QKeySequence("Space"), self, self.player.toggle)
@@ -2607,6 +2633,7 @@ class MainWindow(QMainWindow):
         if mode == SleepMode.MINUTES:
             self._sleep_deadline = _t.time() + minutes * 60
             self._sleep_timer.start()
+            self.sleep_btn.setLabel(f"zzz {minutes}m")
             self.statusBar().showMessage(f"sleep: pausing in {minutes} min")
             if hasattr(self, "_settings") and self._settings is not None:
                 self._settings.sleep_preset_minutes = minutes
@@ -2616,8 +2643,10 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         elif mode == SleepMode.AFTER_SONG:
+            self.sleep_btn.setLabel("zzz song")
             self.statusBar().showMessage("sleep: will pause after current song")
         elif mode == SleepMode.AFTER_QUEUE:
+            self.sleep_btn.setLabel("zzz queue")
             self.statusBar().showMessage("sleep: will pause after current queue")
 
     def _sleep_cancel(self, silent: bool = False) -> None:
@@ -2625,6 +2654,7 @@ class MainWindow(QMainWindow):
         self._sleep_mode = None
         self._sleep_deadline = None
         self._sleep_timer.stop()
+        self.sleep_btn.setLabel("zzz")
         if was_active and not silent:
             self.statusBar().showMessage("sleep timer cancelled")
 
@@ -2639,6 +2669,8 @@ class MainWindow(QMainWindow):
             self._sleep_cancel(silent=True)
             return
         mins, secs = divmod(int(remaining), 60)
+        # Ceil so the label never reads "zzz 0m" while a minute still runs.
+        self.sleep_btn.setLabel(f"zzz {mins + (1 if secs else 0)}m")
         self.statusBar().showMessage(f"sleep: {mins}:{secs:02d}")
 
     # ---------- strip layout builders ----------
@@ -2656,6 +2688,7 @@ class MainWindow(QMainWindow):
         controls_row.addStretch(1)
         controls_row.addWidget(self.audio_fx_btn)
         controls_row.addWidget(self.speed_btn)
+        controls_row.addWidget(self.sleep_btn)
         controls_row.addWidget(self.volume)
 
         progress_row = QHBoxLayout()
@@ -2710,6 +2743,7 @@ class MainWindow(QMainWindow):
         volume_row.addStretch(1)
         volume_row.addWidget(self.audio_fx_btn)
         volume_row.addWidget(self.speed_btn)
+        volume_row.addWidget(self.sleep_btn)
         volume_row.addWidget(self.volume)
         volume_row.addStretch(1)
 
@@ -2733,7 +2767,7 @@ class MainWindow(QMainWindow):
             self.art, self.up_next, self.now_label, self.progress,
             self.time_label, self.shuffle_btn, self.prev_btn, self.play_btn,
             self.next_btn, self.repeat_btn, self.like_btn, self.volume,
-            self.audio_fx_btn, self.speed_btn
+            self.audio_fx_btn, self.speed_btn, self.sleep_btn
         """
         keep = [self.art, self.up_next, self.now_label, self.progress,
                 self.time_label, self.shuffle_btn, self.prev_btn, self.play_btn,
@@ -2743,7 +2777,7 @@ class MainWindow(QMainWindow):
                 # throwaway host before its deferred deleteLater fired. Keep
                 # them explicitly — survival shouldn't hinge on event-loop
                 # timing or on every layout variant re-including them.
-                self.audio_fx_btn, self.speed_btn]
+                self.audio_fx_btn, self.speed_btn, self.sleep_btn]
         # Pull our widgets out of the old layout so the layout deletion
         # doesn't take them with it.
         for w in keep:

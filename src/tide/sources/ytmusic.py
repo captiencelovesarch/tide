@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+import urllib.request
 from typing import Iterable
 
 import yt_dlp
@@ -752,15 +753,80 @@ class YTMusicSource(MusicSource):
 
 # ---------- yt-dlp stream URL resolution ----------
 
-# When the authenticated (cookiefile) yt-dlp pass fails, every subsequent
-# resolve pays for the same doomed attempt before falling back to anonymous
-# — roughly doubling the click-to-audio wait until the user re-imports
-# cookies. Remember the failure per cookiefile mtime and skip the auth pass
-# for a while; a cookie re-import rewrites the jar (new mtime) and re-arms
-# it automatically. Worker threads race on this global unlocked — worst
-# case is one extra doomed pass, which is today's behavior anyway.
+# When the authenticated (cookiefile) yt-dlp pass fails *because the jar is
+# dead*, every subsequent resolve pays for the same doomed attempt before
+# falling back — roughly doubling the click-to-audio wait until the user
+# re-imports cookies. Remember the failure per cookiefile mtime and skip the
+# auth pass for a while; a cookie re-import rewrites the jar (new mtime) and
+# re-arms it automatically. Worker threads race on this global unlocked —
+# worst case is one extra doomed pass, which is today's behavior anyway.
 _auth_pass_broken: tuple[float, float] | None = None  # (cookiefile mtime, failed_at)
 _AUTH_RETRY_SECS = 30 * 60
+
+# Only jar-shaped failures may trip the memo. YouTube gates *individual
+# songs* behind PO tokens now, and for those the auth pass dies with
+# "Requested format is not available" — a per-song condition. Tripping the
+# memo on it turned one gated song into thirty minutes of anonymous
+# resolves for EVERY song, and the anonymous default client's URLs are the
+# ones that 403 in mpv (see below), so a single gated track poisoned the
+# whole session.
+#
+# Deliberately narrow. YouTube's bot-check reads "Sign in to confirm
+# you're not a bot. Use --cookies-from-browser or --cookies for the
+# authentication." — IP reputation, not the jar — so neither "sign in"
+# nor "cookie" is safe to match (the remedy text names cookies!). It hit
+# a live session once and converted a transient hiccup into 30 minutes of
+# anonymous-only resolves, which mostly fail outright now — the player
+# looked completely broken until a restart cleared the memo.
+# "no longer valid" is yt-dlp's actual rotated-cookies message ("The
+# provided YouTube account cookies are no longer valid…").
+_JAR_ERROR_MARKERS = ("no longer valid", "401", "unauthorized")
+
+# One auth pass at a time. YoutubeDL reads the cookie jar at construction
+# and REWRITES it on close (save_cookies — this is how rotated cookies
+# persist), so two parallel auth resolves race a truncating write against
+# a read: the loser sees a half-written jar and the auth pass dies until
+# something rewrites the file. Prefetch fires up to three workers 500ms
+# apart while each pass takes 1–4s, so the overlap is routine, not rare.
+# Anonymous passes never touch the jar and stay parallel.
+_AUTH_JAR_LOCK = threading.Lock()
+
+
+def _looks_like_dead_jar(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _JAR_ERROR_MARKERS)
+
+
+# Clients retried, in order, when the default resolve raises or hands back a
+# dead URL. YouTube's per-song PO-token gating breaks the default path two
+# ways at once: the cookie/web pass loses all its formats ("Requested format
+# is not available") and the anonymous default (android_vr) still *returns*
+# a URL — which then answers HTTP 403 to every request mpv makes.
+# web_music is what the YT Music web player itself uses and keeps serving a
+# playable (muxed) format for gated songs; android is the backstop. Both
+# verified live against gated tracks. Run anonymously on purpose: they're
+# the escape hatch, so a dead cookie jar must not be able to break them.
+_FALLBACK_CLIENTS = ("web_music", "android")
+
+# The probe mimics the request it is standing in for: mpv opens the stream
+# with a plain unranged GET.
+_PROBE_UA = "mpv 0.40.0"
+
+
+def _stream_url_alive(stream_url: str, timeout: float = 5.0) -> bool:
+    """One cheap GET against the resolved URL — headers only, then close.
+
+    yt-dlp "succeeding" no longer means the URL works: PO-token-gated
+    formats extract fine and then 403 on first contact. Catching that here
+    costs one ~100ms round trip and is the difference between trying the
+    next client and caching a poison URL for four hours.
+    """
+    req = urllib.request.Request(stream_url, headers={"User-Agent": _PROBE_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True
+    except Exception:
+        return False
 
 
 def _should_try_auth_pass(cookiefile: str) -> bool:
@@ -776,15 +842,33 @@ def _should_try_auth_pass(cookiefile: str) -> bool:
     return (time.monotonic() - failed_at) >= _AUTH_RETRY_SECS
 
 
+def _extract_stream_url(url: str, opts: dict) -> str | None:
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    stream_url = info.get("url")
+    if not stream_url and "requested_formats" in info:
+        stream_url = info["requested_formats"][0].get("url")
+    return stream_url
+
+
 def resolve_stream_url(video_id: str) -> str:
     """Return a playable audio URL for the given YT Music video id.
 
-    Uses tide.cache for the per-source TTL cache.
+    Uses tide.cache for the per-source TTL cache. A URL is only returned
+    (and only cached) after answering an HTTP probe, because extraction
+    success stopped implying playability — see ``_stream_url_alive``.
     """
     cached_url = cache.get_stream_url(SOURCE_SLUG, video_id)
     if cached_url:
-        perf.mark(f"resolve {video_id}: disk-cache hit")
-        return cached_url
+        # A hit is only a hit if the URL still answers. CDN URLs die inside
+        # our TTL for reasons we can't see from here (network/IP change,
+        # server-side invalidation), and handing mpv a dead one costs a
+        # "player error" the user has to notice and retry. ~100ms to check.
+        if _stream_url_alive(cached_url):
+            perf.mark(f"resolve {video_id}: disk-cache hit")
+            return cached_url
+        cache.remove_stream_url(SOURCE_SLUG, video_id)
+        perf.mark(f"resolve {video_id}: disk-cache entry dead — re-resolving")
 
     global _auth_pass_broken
 
@@ -806,38 +890,49 @@ def resolve_stream_url(video_id: str) -> str:
     from .. import auth
     cookiefile = auth.yt_dlp_cookiefile()
 
-    info = None
+    attempts: list[tuple[str, dict]] = []
     if cookiefile and _should_try_auth_pass(cookiefile):
-        t0 = time.monotonic()
-        try:
-            with yt_dlp.YoutubeDL({**opts, "cookiefile": cookiefile}) as ydl:
-                info = ydl.extract_info(url, download=False)
-            _auth_pass_broken = None
-            perf.mark(f"resolve {video_id}: auth pass ok "
-                      f"({(time.monotonic() - t0) * 1000:.0f}ms)")
-        except Exception:
-            info = None
-            try:
-                _auth_pass_broken = (os.path.getmtime(cookiefile),
-                                     time.monotonic())
-            except OSError:
-                pass
-            perf.mark(f"resolve {video_id}: auth pass FAILED "
-                      f"({(time.monotonic() - t0) * 1000:.0f}ms)")
+        attempts.append(("auth", {**opts, "cookiefile": cookiefile}))
     elif cookiefile:
         perf.mark(f"resolve {video_id}: auth pass skipped (recent failure)")
-    if info is None:
+    attempts.append(("anon", opts))
+    for client in _FALLBACK_CLIENTS:
+        attempts.append((client, {
+            **opts,
+            "extractor_args": {"youtube": {"player_client": [client]}},
+        }))
+
+    for label, pass_opts in attempts:
         t0 = time.monotonic()
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        perf.mark(f"resolve {video_id}: anon pass "
+        try:
+            if label == "auth":
+                with _AUTH_JAR_LOCK:
+                    stream_url = _extract_stream_url(url, pass_opts)
+            else:
+                stream_url = _extract_stream_url(url, pass_opts)
+        except Exception as exc:
+            if label == "auth" and _looks_like_dead_jar(exc):
+                try:
+                    _auth_pass_broken = (os.path.getmtime(cookiefile),
+                                         time.monotonic())
+                except OSError:
+                    pass
+            perf.mark(f"resolve {video_id}: {label} pass FAILED "
+                      f"({(time.monotonic() - t0) * 1000:.0f}ms)")
+            continue
+        if label == "auth":
+            _auth_pass_broken = None
+        if not stream_url:
+            perf.mark(f"resolve {video_id}: {label} pass returned no url")
+            continue
+        if not _stream_url_alive(stream_url):
+            perf.mark(f"resolve {video_id}: {label} pass URL dead on probe "
+                      f"({(time.monotonic() - t0) * 1000:.0f}ms)")
+            continue
+        perf.mark(f"resolve {video_id}: {label} pass ok "
                   f"({(time.monotonic() - t0) * 1000:.0f}ms)")
+        cache.put_stream_url(SOURCE_SLUG, video_id, stream_url,
+                             ttl_seconds=YTMusicSource.STREAM_TTL_SECONDS)
+        return stream_url
 
-    stream_url = info.get("url")
-    if not stream_url and "requested_formats" in info:
-        stream_url = info["requested_formats"][0].get("url")
-    if not stream_url:
-        raise RuntimeError(f"no playable audio stream for {video_id}")
-
-    cache.put_stream_url(SOURCE_SLUG, video_id, stream_url, ttl_seconds=YTMusicSource.STREAM_TTL_SECONDS)
-    return stream_url
+    raise RuntimeError(f"no playable audio stream for {video_id}")
