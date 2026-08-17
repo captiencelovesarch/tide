@@ -4,6 +4,21 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [1.4.0] — 2026-08-17 — the pulse lands on the beat, the sky learns new weather, and settings finds its drawers
+
+### Fixed
+- **The bass pulse lands on the beat.** The backdrop's swell trailed the music by up to ~0.3s, and it was two delays stacked. The capture loop treated `parec`'s normal short pipe reads as "stream paused" — discarding the bytes and napping 50ms, which dropped roughly a third of the audio and processed the rest 50–70ms stale (the visualizer bars and waveform feed from the same loop, so they were quietly choppy too). And the paint side re-smoothed an envelope that already has instant attack, adding ~130ms of onset lag plus up to a frame of timer wait. Partial reads now accumulate into whole FFT chunks with nothing dropped, the display attack near-snaps (release keeps its slow settle), and a sharp onset paints immediately instead of waiting out the animation timer. Net: ~250–300ms of lag down to ~30–50ms.
+- **Modern themes stop outlining the album art in white.** The art tile always framed itself with the theme's `fg` — part of the tile look on brutalist themes, a glowing white box on modern ones where fg is near-white. Modern themes now frame with their `border_col`, same as their other cards; brutalist keeps the hard fg box bit-for-bit.
+
+### Added
+- **Three new backdrop styles.** The living background grows from three to six: **sunset horizon** — a luminous band where sky meets water, a low sun that swells wide on bass, its reflection stretching down; **lightning** — a brooding cloud deck where every bass hit throws a jagged, branching bolt (fresh shape per strike, white-hot core in the album accent, impact glow, whole-scene flash), with ambient strikes every several seconds so the storm broods even without the pulse; **deep water** — light welling up from below the bottom edge, slow motes rising through it. All three land in the main backdrop picker, the mini player's right-click menu, and Settings → mini player.
+- **Text case is a setting now.** Every theme bakes in its own `typography.case` (brutalist lowercase, storm UPPERCASE, synthwave l33t) with no way to disagree. Settings → appearance → "text case" overrides it app-wide — lowercase / UPPERCASE / As Written / l33t / zalgo — everywhere text routes through the casing pipeline, Discord presence included. Live-previews in the dialog; cancel puts it back.
+- **The Discord presence takes direction.** It was one hardcoded shape; now Settings → integrations has: keep a "⏸ paused" presence up instead of vanishing on pause, hide the elapsed/total progress bar, pick the verb (listening / playing / watching), and rewrite both lines with `{title}` `{artists}` `{album}` `{source}` templates. A broken template falls back to the default instead of breaking the presence, and the live-lyric line still takes over while a lyric is under the playhead.
+- **The setup wizard offers integrations.** Discord rich presence and ListenBrainz scrobbling join first launch as a fully skippable step — both need a credential fetched from a browser, so each gets its link button and a plain-language blurb, and a checked box with an empty field holds [next] rather than pretending it'll work.
+
+### Changed
+- **The settings dialog went tabbed.** One 30-row scroll with ASCII headings became five tabs — appearance / mini player / playback / integrations / advanced — each independently scrollable. The mini player got its own page (with a hint about the right-click menu), preserve-pitch moved to playback where it belongs, and Discord + ListenBrainz share the integrations tab.
+
 ## [1.3.3] — 2026-08-14 — the player stops lying, fx takes its seat, and the sleep timer shows its face
 
 ### Fixed
