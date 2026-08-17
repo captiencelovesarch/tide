@@ -98,6 +98,12 @@ class DiscordPresence(QObject):
         self._enabled: bool = False
         self._connected: bool = False
         self._last_activity: _Activity | None = None
+        # Presence customization (see Settings.discord_* / set_options).
+        self._details_template: str = ""
+        self._state_template: str = ""
+        self._show_paused: bool = False
+        self._show_progress: bool = True
+        self._activity_type: str = "listening"
         # Last known playback position (seconds). Tracked from
         # ``position_changed`` so ``_on_state_changed(PLAYING)`` can anchor
         # ``started_at`` to actual audio progress on first-play or resume.
@@ -136,6 +142,35 @@ class DiscordPresence(QObject):
             self._disconnect()
         if wants_on:
             self._try_connect()
+
+    def set_options(
+        self,
+        *,
+        details_template: str = "",
+        state_template: str = "",
+        show_paused: bool = False,
+        show_progress: bool = True,
+        activity_type: str = "listening",
+    ) -> None:
+        """Presence customization knobs (Settings → discord). Applying them
+        re-pushes the current activity so the profile updates without
+        waiting for the next track/state event."""
+        new = (
+            (details_template or "").strip(),
+            (state_template or "").strip(),
+            bool(show_paused),
+            bool(show_progress),
+            activity_type if activity_type in ("listening", "playing", "watching")
+            else "listening",
+        )
+        old = (self._details_template, self._state_template, self._show_paused,
+               self._show_progress, self._activity_type)
+        if new == old:
+            return
+        (self._details_template, self._state_template, self._show_paused,
+         self._show_progress, self._activity_type) = new
+        if self._connected and self._last_activity is not None:
+            self._push_current()
 
     def start_wire(self) -> None:
         """Subscribe to track + state changes so presence stays current."""
@@ -364,23 +399,64 @@ class DiscordPresence(QObject):
         self._last_push_monotonic = time.monotonic()
         a = self._last_activity
 
-        # No track, or paused: hide the presence entirely — most users don't
-        # want "paused tide" sitting on their profile while they walked away.
-        if a is None or a.paused:
+        # No track: nothing to show. Paused: hide the presence entirely by
+        # default — most users don't want "paused tide" sitting on their
+        # profile while they walked away — unless they opted into the
+        # "show paused" presence.
+        if a is None or (a.paused and not self._show_paused):
             self._clear()
             return
+
+        # Per-source label for large_text / small_text and the {source}
+        # template placeholder. Some Discord apps have per-source asset keys
+        # uploaded (ytmusic, soundcloud, etc.); if so we use them, otherwise
+        # fall back to "tide". Bare slug as asset key — Discord ignores
+        # unknown keys silently. Stored in canonical casing; styled_case
+        # rewrites them to the active typography.case (so brutalist sees
+        # "youtube music", upper-case "YOUTUBE MUSIC", synthwave the l33t
+        # variant, etc.).
+        source_label_raw = {
+            "ytmusic": "YouTube Music",
+            "soundcloud": "SoundCloud",
+            "bandcamp": "Bandcamp",
+            "mixcloud": "Mixcloud",
+            "local": "Local Files",
+            "spotify": "Spotify",
+            "apple": "Apple Music",
+        }.get(a.source, "tide")
 
         # Honor the active theme's typography.case so brutalist users get
         # lowercase presence, synthwave gets l33t, etc.
         from . import theming
-        details = theming.styled_case((a.title or "tide").strip())
-        # A live lyric takes over the state line while one is under the
-        # playhead; artist · album is the resting display (intros, LRC gap
-        # lines, tracks without timed lyrics). The ♪ prefix makes it read
-        # as a lyric rather than a weird second title, and keeps one-word
-        # lines above Discord's 2-char field minimum.
-        if a.lyric:
+        source_label = theming.styled_case(source_label_raw)
+
+        def fill(template: str) -> str:
+            """User template → text. A template that errors (unknown
+            {placeholder}, stray brace) or collapses to nothing yields ""
+            so the caller falls back to the default line."""
+            try:
+                return template.format(
+                    title=a.title, artists=a.artists, album=a.album,
+                    source=source_label_raw,
+                ).strip()
+            except Exception:
+                return ""
+
+        details = (
+            fill(self._details_template) if self._details_template else ""
+        ) or (a.title or "tide").strip()
+        details = theming.styled_case(details)
+
+        # State-line precedence: a live lyric takes over while one is under
+        # the playhead (the ♪ prefix makes it read as a lyric rather than a
+        # weird second title, and keeps one-word lines above Discord's 2-char
+        # field minimum); then the user's template; then artist · album.
+        if a.paused:
+            state_text = theming.styled_case("⏸ paused")
+        elif a.lyric:
             state_text = theming.styled_case(f"♪ {a.lyric}")
+        elif self._state_template and fill(self._state_template):
+            state_text = theming.styled_case(fill(self._state_template))
         else:
             state_parts: list[str] = []
             if a.artists:
@@ -394,9 +470,11 @@ class DiscordPresence(QObject):
         # progress bar. When it's None (track is still resolving/loading), we
         # show the title+artist+album without timestamps — Discord renders
         # just the song info, no clock — and the bar appears the instant
-        # audio starts via _on_state_changed.
+        # audio starts via _on_state_changed. The user can switch the bar
+        # off wholesale; a paused presence never shows one (the timestamps
+        # would keep counting wall-clock while the audio stands still).
         duration_secs = max(0, a.duration_seconds)
-        if a.started_at is None:
+        if a.started_at is None or a.paused or not self._show_progress:
             start_s = 0
             end_s = 0
         else:
@@ -411,29 +489,15 @@ class DiscordPresence(QObject):
             else:
                 end_s = 0
 
-        # Per-source label for large_text / small_text. Some Discord apps
-        # have per-source asset keys uploaded (ytmusic, soundcloud, etc.);
-        # if so we use them, otherwise fall back to "tide". Bare slug as
-        # asset key — Discord ignores unknown keys silently.
-        # Stored in their canonical proper casing; styled_case below
-        # rewrites them to match the active theme's typography.case so a
-        # brutalist user sees "youtube music", upper-case sees "YOUTUBE
-        # MUSIC", synthwave sees the l33t variant, etc.
-        source_label_raw = {
-            "ytmusic": "YouTube Music",
-            "soundcloud": "SoundCloud",
-            "bandcamp": "Bandcamp",
-            "mixcloud": "Mixcloud",
-            "local": "Local Files",
-            "spotify": "Spotify",
-            "apple": "Apple Music",
-        }.get(a.source, "tide")
-        source_label = theming.styled_case(source_label_raw)
+        activity_type = {
+            "playing": getattr(ActivityType, "PLAYING", ActivityType.LISTENING),
+            "watching": getattr(ActivityType, "WATCHING", ActivityType.LISTENING),
+        }.get(self._activity_type, ActivityType.LISTENING)
 
         kwargs: dict = {
-            "activity_type": ActivityType.LISTENING,
+            "activity_type": activity_type,
             "details": details[:128],
-            "state": state_text[:128],
+            "state": (state_text or "—")[:128],
             "large_text": source_label,
             "small_text": theming.styled_case("tide"),
         }

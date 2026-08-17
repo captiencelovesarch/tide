@@ -13,7 +13,8 @@ Steps:
   4. Sources — toggle the 5 ready sources; YT cookie import + Local folder
      pick run inline as sub-flows
   5. Feel — adaptive accent toggle + motion intensity + ui scale
-  6. All set — summary + launch button
+  6. Integrations — discord rich presence + listenbrainz, both optional
+  7. All set — summary + launch button
 
 The wizard is also reachable from Settings → "rerun onboarding" so the user
 can fly through it again at any time without nuking their config.
@@ -24,8 +25,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -81,6 +83,13 @@ class OnboardingResult:
     adaptive_background: bool = True
     motion: str = "lite"
     ui_scale: str = "normal"
+    # Optional integrations step. Enabled only when the matching credential
+    # was actually provided — a checked box with an empty field is not a
+    # working integration.
+    discord_enabled: bool = False
+    discord_app_id: str = ""
+    listenbrainz_enabled: bool = False
+    listenbrainz_token: str = ""
 
 
 # ---------- progress dots ----------
@@ -886,6 +895,126 @@ class _FeelStep(_Step):
         result.ui_scale = self._scale
 
 
+class _IntegrationsStep(_Step):
+    """Optional integrations — both need a credential the user has to go
+    fetch in a browser, so both default off and the step is skippable.
+    Discord gets no bundled app ID on purpose (see discord_rpc.py: presences
+    show the app OWNER's name + assets, so a shared ID is a trust problem);
+    the flow here mirrors Settings → discord."""
+
+    DISCORD_HELP_URL = "https://discord.com/developers/applications"
+    LB_HELP_URL = "https://listenbrainz.org/profile/"
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+        prompt = QLabel("plug tide into your profile?")
+        f = QFont(prompt.font())
+        f.setBold(True)
+        f.setPointSize(f.pointSize() + 4)
+        prompt.setFont(f)
+        prompt.setAlignment(Qt.AlignCenter)
+
+        sub = QLabel("both are optional and live in Settings later — "
+                     "skip straight past if you just want music.")
+        sub.setProperty("class", "dim")
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setWordWrap(True)
+
+        # -- discord --
+        self._discord_check = QCheckBox("discord rich presence")
+        fb = QFont(self._discord_check.font())
+        fb.setBold(True)
+        self._discord_check.setFont(fb)
+        self._discord_check.toggled.connect(self._on_changed)
+
+        self._discord_id = QLineEdit()
+        self._discord_id.setPlaceholderText("paste discord application id")
+        self._discord_id.setEnabled(False)
+        self._discord_id.textChanged.connect(self._on_changed)
+        self._discord_check.toggled.connect(self._discord_id.setEnabled)
+
+        discord_help = BracketButton("get an app id")
+        discord_help.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(self.DISCORD_HELP_URL))
+        )
+        discord_row = QHBoxLayout()
+        discord_row.addWidget(self._discord_id, stretch=1)
+        discord_row.addWidget(discord_help)
+
+        discord_blurb = QLabel(
+            "shows what you're listening to on your discord profile. takes "
+            "~30 seconds: create an application at the developer portal and "
+            "paste its application id — discord shows whatever name/image "
+            "you give that app."
+        )
+        discord_blurb.setWordWrap(True)
+        discord_blurb.setProperty("class", "dim")
+
+        # -- listenbrainz --
+        self._lb_check = QCheckBox("listenbrainz scrobbling")
+        self._lb_check.setFont(fb)
+        self._lb_check.toggled.connect(self._on_changed)
+
+        self._lb_token = QLineEdit()
+        self._lb_token.setPlaceholderText("paste your listenbrainz user token")
+        self._lb_token.setEchoMode(QLineEdit.Password)
+        self._lb_token.setEnabled(False)
+        self._lb_token.textChanged.connect(self._on_changed)
+        self._lb_check.toggled.connect(self._lb_token.setEnabled)
+
+        lb_help = BracketButton("get a token")
+        lb_help.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(self.LB_HELP_URL))
+        )
+        lb_row = QHBoxLayout()
+        lb_row.addWidget(self._lb_token, stretch=1)
+        lb_row.addWidget(lb_help)
+
+        lb_blurb = QLabel(
+            "keeps an open-source record of your listening history at "
+            "listenbrainz.org. free account → settings → copy the token."
+        )
+        lb_blurb.setWordWrap(True)
+        lb_blurb.setProperty("class", "dim")
+
+        col = QVBoxLayout(self)
+        col.setSpacing(10)
+        col.addWidget(prompt)
+        col.addWidget(sub)
+        col.addSpacing(10)
+        col.addWidget(self._discord_check)
+        col.addLayout(discord_row)
+        col.addWidget(discord_blurb)
+        col.addSpacing(12)
+        col.addWidget(self._lb_check)
+        col.addLayout(lb_row)
+        col.addWidget(lb_blurb)
+        col.addStretch(1)
+
+    def _on_changed(self, *_a) -> None:
+        self.state_changed.emit()
+
+    def can_advance(self) -> bool:
+        # A checked integration with an empty credential can't work — hold
+        # [next] until the field is filled or the box is unchecked again.
+        if self._discord_check.isChecked() and not self._discord_id.text().strip():
+            return False
+        if self._lb_check.isChecked() and not self._lb_token.text().strip():
+            return False
+        return True
+
+    def apply_to(self, result: OnboardingResult) -> None:
+        result.discord_app_id = self._discord_id.text().strip()
+        result.discord_enabled = (
+            self._discord_check.isChecked() and bool(result.discord_app_id)
+        )
+        result.listenbrainz_token = self._lb_token.text().strip()
+        result.listenbrainz_enabled = (
+            self._lb_check.isChecked() and bool(result.listenbrainz_token)
+        )
+
+
 class _AllSetStep(_Step):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -925,6 +1054,12 @@ class _AllSetStep(_Step):
             f"motion — {result.motion} · ui scale — {result.ui_scale}"
             + (" · adaptive accent on" if result.adaptive_accent else ""),
         ]
+        integrations = [name for name, on in (
+            ("discord", result.discord_enabled),
+            ("listenbrainz", result.listenbrainz_enabled),
+        ) if on]
+        if integrations:
+            bits.append("integrations — " + " · ".join(integrations))
         self._summary_label.setText("\n".join(bits))
 
 
@@ -949,6 +1084,7 @@ class OnboardingDialog(QDialog):
             _ThemeStep(self),
             _SourcesStep(self),
             _FeelStep(self),
+            _IntegrationsStep(self),
             _AllSetStep(self),
         ]
         # Wire state_changed to refresh the Next button enablement.

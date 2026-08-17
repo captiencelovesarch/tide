@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +49,7 @@ class SettingsDialog(QDialog):
         self._initial_thumbnails = current_settings.show_thumbnails or "theme"
         self._initial_font = current_settings.font_family_override or ""
         self._initial_font_size = int(current_settings.font_size_override_pt or 0)
+        self._initial_case = current_settings.text_case_override or ""
         # Work on a full, independent copy. The dialog mutates only the
         # fields it surfaces (in _on_save) and persists the whole object, so
         # any field NOT mirrored here would be written back at its default —
@@ -64,9 +66,6 @@ class SettingsDialog(QDialog):
 
     def _build_ui(self) -> None:
         # ---- appearance ----
-        appearance_heading = QLabel("── appearance ─────────────")
-        appearance_heading.setProperty("class", "dim")
-
         self.theme_picker = QComboBox()
         self.theme_picker.currentIndexChanged.connect(self._on_theme_changed)
 
@@ -118,6 +117,9 @@ class SettingsDialog(QDialog):
         self.adaptive_style_picker.addItem("living fields · layered ambience", "field")
         self.adaptive_style_picker.addItem("diagonal band · classic sweep", "band")
         self.adaptive_style_picker.addItem("bass arch · hill swells on bass", "vbeam")
+        self.adaptive_style_picker.addItem("sunset horizon · sun low over water", "horizon")
+        self.adaptive_style_picker.addItem("lightning · strikes on the beat", "lightning")
+        self.adaptive_style_picker.addItem("deep water · glow wells up from below", "depths")
 
         # Bass pulse — swells / brightens that gradient on heavy bass while
         # playing. Needs the monitor capture, so it's gated on the gradient
@@ -207,6 +209,18 @@ class SettingsDialog(QDialog):
         self.font_size_spin.setSuffix(" pt")
         self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
 
+        # Text case — beats the theme's typography.case everywhere text
+        # routes through styled_case (nav, buttons, presence, toasts, …).
+        # Live-applies like the font pickers; cancel reverts.
+        self.case_picker = QComboBox()
+        self.case_picker.addItem("from theme", "")
+        self.case_picker.addItem("lowercase", "lower")
+        self.case_picker.addItem("UPPERCASE", "upper")
+        self.case_picker.addItem("As Written", "normal")
+        self.case_picker.addItem("l33t · L1K3 TH1Z", "leet")
+        self.case_picker.addItem("zalgo · c̛u̅rsed", "zalgo")
+        self.case_picker.currentIndexChanged.connect(self._on_case_changed)
+
         # Loading-indicator style. The labels include a tiny example of each
         # rendering so the user knows what they're picking without trial-and-error.
         self.loading_picker = QComboBox()
@@ -261,6 +275,9 @@ class SettingsDialog(QDialog):
         self.mini_backdrop_picker.addItem("living fields · layered ambience", "field")
         self.mini_backdrop_picker.addItem("diagonal band · classic sweep", "band")
         self.mini_backdrop_picker.addItem("bass arch · hill swells on bass", "vbeam")
+        self.mini_backdrop_picker.addItem("sunset horizon · sun low over water", "horizon")
+        self.mini_backdrop_picker.addItem("lightning · strikes on the beat", "lightning")
+        self.mini_backdrop_picker.addItem("deep water · glow wells up from below", "depths")
         self.mini_backdrop_picker.addItem("off · flat card", "off")
         self.mini_progress_picker = QComboBox()
         self.mini_progress_picker.addItem("border ring · the window edge fills", "ring")
@@ -296,30 +313,33 @@ class SettingsDialog(QDialog):
         appearance_form.addRow("", self.csd_toggle)
         appearance_form.addRow("font:", self.font_picker)
         appearance_form.addRow("  size:", self.font_size_spin)
+        appearance_form.addRow("text case:", self.case_picker)
         appearance_form.addRow("loading bar:", self.loading_picker)
         appearance_form.addRow("motion:", self.motion_picker)
         appearance_form.addRow("", self.ui_sounds_toggle)
         appearance_form.addRow("ui scale:", self.scale_picker)
-        appearance_form.addRow("speed:", self.preserve_pitch_toggle)
         appearance_form.addRow("visualizer audio:", self.audio_device_picker)
 
-        mini_heading = QLabel("── mini player ────────────")
-        mini_heading.setProperty("class", "dim")
-        appearance_form.addRow(mini_heading)
-        appearance_form.addRow("", self.mini_default_toggle)
-        appearance_form.addRow("  backdrop:", self.mini_backdrop_picker)
-        appearance_form.addRow("  progress:", self.mini_progress_picker)
-        appearance_form.addRow("", self.mini_pin_toggle)
-        appearance_form.addRow("", self.mini_ticker_toggle)
-        appearance_form.addRow("", self.mini_zen_toggle)
-        appearance_form.addRow("", self.mini_pulse_toggle)
-        appearance_form.addRow("", self.mini_pulse_resize_toggle)
-        appearance_form.addRow("", self.mini_vis_toggle)
+        mini_form = QFormLayout()
+        mini_form.addRow("", self.mini_default_toggle)
+        mini_form.addRow("backdrop:", self.mini_backdrop_picker)
+        mini_form.addRow("progress:", self.mini_progress_picker)
+        mini_form.addRow("", self.mini_pin_toggle)
+        mini_form.addRow("", self.mini_ticker_toggle)
+        mini_form.addRow("", self.mini_zen_toggle)
+        mini_form.addRow("", self.mini_pulse_toggle)
+        mini_form.addRow("", self.mini_pulse_resize_toggle)
+        mini_form.addRow("", self.mini_vis_toggle)
+
+        mini_blurb = QLabel(
+            "the dedicated frameless window — open it by clicking the "
+            "now-playing art or ctrl+m. everything here is also on the "
+            "mini's own right-click menu."
+        )
+        mini_blurb.setWordWrap(True)
+        mini_blurb.setProperty("class", "dim")
 
         # ---- playback ----
-        playback_heading = QLabel("── playback ───────────────")
-        playback_heading.setProperty("class", "dim")
-
         self.prefetch_hover_toggle = QCheckBox(
             "pre-resolve stream on hover"
         )
@@ -340,6 +360,7 @@ class SettingsDialog(QDialog):
         playback_form = QFormLayout()
         playback_form.addRow("", self.prefetch_hover_toggle)
         playback_form.addRow("warm results:", self.prefetch_warm_picker)
+        playback_form.addRow("speed:", self.preserve_pitch_toggle)
 
         playback_col = QVBoxLayout()
         playback_col.setSpacing(6)
@@ -382,9 +403,43 @@ class SettingsDialog(QDialog):
         discord_lyrics_explainer.setWordWrap(True)
         discord_lyrics_explainer.setProperty("class", "dim")
 
+        # Presence customization — how the activity reads on the profile.
+        self.discord_paused_toggle = QCheckBox(
+            "keep a '⏸ paused' presence instead of clearing it"
+        )
+        self.discord_paused_toggle.setEnabled(False)
+        self.discord_progress_toggle = QCheckBox(
+            "show the elapsed / total progress bar"
+        )
+        self.discord_progress_toggle.setEnabled(False)
+        self.discord_activity_picker = QComboBox()
+        self.discord_activity_picker.addItem("listening to …", "listening")
+        self.discord_activity_picker.addItem("playing …", "playing")
+        self.discord_activity_picker.addItem("watching …", "watching")
+        self.discord_activity_picker.setEnabled(False)
+        self.discord_details_edit = QLineEdit()
+        self.discord_details_edit.setPlaceholderText("default · {title}")
+        self.discord_details_edit.setEnabled(False)
+        self.discord_state_edit = QLineEdit()
+        self.discord_state_edit.setPlaceholderText("default · {artists} · {album}")
+        self.discord_state_edit.setEnabled(False)
+
+        discord_tpl_explainer = QLabel(
+            "the two lines take {title} {artists} {album} {source} "
+            "placeholders — leave empty for the defaults. the live lyric "
+            "(above) still takes over the second line while one is playing."
+        )
+        discord_tpl_explainer.setWordWrap(True)
+        discord_tpl_explainer.setProperty("class", "dim")
+
         discord_id_row = QHBoxLayout()
         discord_id_row.addWidget(self.discord_app_id, stretch=1)
         discord_id_row.addWidget(self.discord_help)
+
+        discord_custom_form = QFormLayout()
+        discord_custom_form.addRow("activity verb:", self.discord_activity_picker)
+        discord_custom_form.addRow("line 1:", self.discord_details_edit)
+        discord_custom_form.addRow("line 2:", self.discord_state_edit)
 
         discord_col = QVBoxLayout()
         discord_col.setSpacing(6)
@@ -393,6 +448,10 @@ class SettingsDialog(QDialog):
         discord_col.addWidget(discord_explainer)
         discord_col.addWidget(self.discord_lyrics_toggle)
         discord_col.addWidget(discord_lyrics_explainer)
+        discord_col.addWidget(self.discord_paused_toggle)
+        discord_col.addWidget(self.discord_progress_toggle)
+        discord_col.addLayout(discord_custom_form)
+        discord_col.addWidget(discord_tpl_explainer)
 
         # ---- listenbrainz ----
         lb_heading = QLabel("── listenbrainz scrobbling ──")
@@ -514,43 +573,41 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(self.cancel_btn)
         btn_row.addWidget(self.save_btn)
 
-        # ---- assemble (scrollable so growing the dialog never breaks) ----
-        content = QWidget()
-        content_col = QVBoxLayout(content)
-        content_col.setContentsMargins(0, 0, 0, 0)
-        content_col.setSpacing(12)
-        content_col.addWidget(appearance_heading)
-        content_col.addLayout(appearance_form)
-        content_col.addSpacing(6)
-        content_col.addWidget(playback_heading)
-        content_col.addLayout(playback_col)
-        content_col.addSpacing(6)
-        content_col.addWidget(discord_heading)
-        content_col.addLayout(discord_col)
-        content_col.addSpacing(6)
-        content_col.addWidget(lb_heading)
-        content_col.addLayout(lb_col)
-        content_col.addSpacing(6)
-        content_col.addWidget(audio_fx_heading)
-        content_col.addLayout(audio_fx_col)
-        content_col.addSpacing(6)
-        content_col.addWidget(advanced_heading)
-        content_col.addLayout(adv_col)
-        content_col.addSpacing(6)
-        content_col.addWidget(about_heading)
-        content_col.addLayout(about_col)
-        content_col.addStretch(1)
+        # ---- assemble: tabbed pages, each independently scrollable, so no
+        # section is ever buried a full page-scroll away ----
+        def _page(*items) -> QScrollArea:
+            content = QWidget()
+            col = QVBoxLayout(content)
+            col.setContentsMargins(6, 10, 6, 10)
+            col.setSpacing(12)
+            for item in items:
+                if isinstance(item, QWidget):
+                    col.addWidget(item)
+                else:
+                    col.addLayout(item)
+            col.addStretch(1)
+            scroll = QScrollArea()
+            scroll.setWidget(content)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            return scroll
 
-        scroll = QScrollArea()
-        scroll.setWidget(content)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.addTab(_page(appearance_form), "appearance")
+        tabs.addTab(_page(mini_blurb, mini_form), "mini player")
+        tabs.addTab(_page(playback_col, audio_fx_heading, audio_fx_col),
+                    "playback")
+        tabs.addTab(_page(discord_heading, discord_col, lb_heading, lb_col),
+                    "integrations")
+        tabs.addTab(_page(advanced_heading, adv_col, about_heading, about_col),
+                    "advanced")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(22, 18, 22, 14)
         root.setSpacing(10)
-        root.addWidget(scroll, stretch=1)
+        root.addWidget(tabs, stretch=1)
         root.addLayout(btn_row)
 
     def _populate(self) -> None:
@@ -669,11 +726,24 @@ class SettingsDialog(QDialog):
         if warm_idx >= 0:
             self.prefetch_warm_picker.setCurrentIndex(warm_idx)
 
-        self.discord_toggle.setChecked(self._settings.discord_enabled)
+        case_idx = self.case_picker.findData(self._settings.text_case_override or "")
+        if case_idx >= 0:
+            self.case_picker.setCurrentIndex(case_idx)
+
+        on = self._settings.discord_enabled
+        self.discord_toggle.setChecked(on)
         self.discord_app_id.setText(self._settings.discord_app_id)
-        self.discord_app_id.setEnabled(self._settings.discord_enabled)
         self.discord_lyrics_toggle.setChecked(self._settings.discord_lyrics_enabled)
-        self.discord_lyrics_toggle.setEnabled(self._settings.discord_enabled)
+        self.discord_paused_toggle.setChecked(bool(self._settings.discord_show_paused))
+        self.discord_progress_toggle.setChecked(
+            bool(self._settings.discord_show_progress))
+        act_idx = self.discord_activity_picker.findData(
+            self._settings.discord_activity_type or "listening")
+        if act_idx >= 0:
+            self.discord_activity_picker.setCurrentIndex(act_idx)
+        self.discord_details_edit.setText(self._settings.discord_details_template)
+        self.discord_state_edit.setText(self._settings.discord_state_template)
+        self._on_discord_toggle(on)
 
         self.lb_toggle.setChecked(self._settings.listenbrainz_enabled)
         self.lb_token.setText(self._settings.listenbrainz_token)
@@ -730,12 +800,32 @@ class SettingsDialog(QDialog):
     def _on_discord_toggle(self, on: bool) -> None:
         self.discord_app_id.setEnabled(on)
         self.discord_lyrics_toggle.setEnabled(on)
+        self.discord_paused_toggle.setEnabled(on)
+        self.discord_progress_toggle.setEnabled(on)
+        self.discord_activity_picker.setEnabled(on)
+        self.discord_details_edit.setEnabled(on)
+        self.discord_state_edit.setEnabled(on)
+
+    def _on_case_changed(self, _idx: int) -> None:
+        """Live-preview the text-case override. set_case_override no-ops on
+        the same value, so populate-time setCurrentIndex is harmless."""
+        theming.set_case_override(self.case_picker.currentData() or "")
 
     def _on_save(self) -> None:
         self._settings.theme = self.theme_picker.currentData() or self._initial_theme
         self._settings.discord_enabled = self.discord_toggle.isChecked()
         self._settings.discord_app_id = self.discord_app_id.text().strip()
         self._settings.discord_lyrics_enabled = self.discord_lyrics_toggle.isChecked()
+        self._settings.discord_show_paused = self.discord_paused_toggle.isChecked()
+        self._settings.discord_show_progress = self.discord_progress_toggle.isChecked()
+        self._settings.discord_activity_type = (
+            self.discord_activity_picker.currentData() or "listening"
+        )
+        self._settings.discord_details_template = (
+            self.discord_details_edit.text().strip()
+        )
+        self._settings.discord_state_template = self.discord_state_edit.text().strip()
+        self._settings.text_case_override = self.case_picker.currentData() or ""
         self._settings.show_thumbnails = self.thumbnails_picker.currentData() or "theme"
         self._settings.audio_device = self.audio_device_picker.currentData() or ""
         self._settings.listenbrainz_enabled = self.lb_toggle.isChecked()
@@ -802,10 +892,11 @@ class SettingsDialog(QDialog):
         theming.manager().set_user_font_size(int(value))
 
     def _on_cancel(self) -> None:
-        # Revert live previews. Fonts preview live too — put back whatever
-        # the session started with (no-ops when untouched).
+        # Revert live previews. Fonts + case preview live too — put back
+        # whatever the session started with (no-ops when untouched).
         theming.manager().set_user_font(self._initial_font)
         theming.manager().set_user_font_size(self._initial_font_size)
+        theming.set_case_override(self._initial_case)
         if self._initial_theme and self._initial_theme != self.theme_picker.currentData():
             theming.manager().apply(self._initial_theme)
         if self._initial_thumbnails != (self.thumbnails_picker.currentData() or "theme"):

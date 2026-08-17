@@ -55,6 +55,9 @@ _BACKDROP_CHOICES = [
     ("living fields", "field"),
     ("diagonal band", "band"),
     ("bass arch", "vbeam"),
+    ("sunset horizon", "horizon"),
+    ("lightning", "lightning"),
+    ("deep water", "depths"),
     ("off · flat", "off"),
 ]
 _PROGRESS_CHOICES = [

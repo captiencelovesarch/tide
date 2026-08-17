@@ -489,6 +489,14 @@ class AlbumArt(QLabel):
         self._theme = theme
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
         bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
+        # The frame color is aesthetic-dependent. Brutalist themes want the
+        # hard fg box — it's part of the tile look. On modern themes fg is
+        # near-white, which read as a glowing outline around every cover;
+        # they frame with their border token instead, like their other cards.
+        if theme is not None and getattr(theme, "aesthetic", "modern") == "modern":
+            frame_col = theme.token("border_col", theme.token("border_dim", fg))
+        else:
+            frame_col = fg
         # Use the *effective* radius (corner-style override or theme base) so
         # the tile matches every QSS-styled widget. QSS border-radius only
         # rounds the QLabel's border/background — it never clips the pixmap —
@@ -502,7 +510,7 @@ class AlbumArt(QLabel):
         if new_size != self._size:
             self._size = new_size
             self.setFixedSize(self._size, self._size)
-        border = f"1px solid {fg}" if self._framed else "none"
+        border = f"1px solid {frame_col}" if self._framed else "none"
         self.setStyleSheet(
             f"QLabel {{ background: {bg}; border: {border}; "
             f"border-radius: {radius}px; color: {fg}; }}"

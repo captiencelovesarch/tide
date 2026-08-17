@@ -349,6 +349,14 @@ class AudioVisualizerFeed(QObject):
             if proc is None or proc.stdout is None:
                 return
             stdout = proc.stdout
+            # With bufsize=0 the pipe is a raw FileIO: read() returns whatever
+            # is currently buffered, and parec at --latency-msec 10 delivers
+            # ~1.8KB every 10ms — well under a chunk. Short reads are the
+            # normal case, so accumulate them here; discarding them (as this
+            # loop once did) drops audio and adds 50-70ms of latency per
+            # discarded stretch, which read as the background pulsing behind
+            # the beat.
+            pending = bytearray()
             died = False
             while not self._stop.is_set():
                 try:
@@ -356,10 +364,10 @@ class AudioVisualizerFeed(QObject):
                 except Exception:
                     died = True
                     break
-                if not data or len(data) < chunk_bytes:
-                    # Distinguish "stream paused" from "parec exited". A dead
-                    # child returns EOF forever; without the poll() this loop
-                    # spun on it for the rest of the session while the
+                if not data:
+                    # EOF. Distinguish "stream paused" from "parec exited". A
+                    # dead child returns EOF forever; without the poll() this
+                    # loop spun on it for the rest of the session while the
                     # process sat unreaped in the table.
                     if proc.poll() is not None:
                         died = True
@@ -368,19 +376,30 @@ class AudioVisualizerFeed(QObject):
                         break
                     continue
                 respawns = 0   # healthy data — reset the give-up counter
-                samples = np.frombuffer(data, dtype=np.float32)
-                try:
-                    self._prev_bands = _compute_bands(samples, self._prev_bands)
-                except Exception:
+                pending += data
+                if len(pending) < chunk_bytes:
                     continue
-                self.bands_updated.emit(self._prev_bands.copy())
-                self.waveform_updated.emit(samples.copy())
-                try:
-                    self._pulse_env = _compute_pulse(samples, self._pulse_env)
-                except Exception:
-                    self._pulse_env = None
-                else:
-                    self.pulse_updated.emit(float(self._pulse_env.env))
+                # If the thread stalled (GUI hiccup, suspend), skip stale
+                # audio rather than replaying it late.
+                if len(pending) > chunk_bytes * 4:
+                    del pending[:len(pending) - chunk_bytes * 2]
+                while len(pending) >= chunk_bytes and not self._stop.is_set():
+                    samples = np.frombuffer(
+                        bytes(pending[:chunk_bytes]), dtype=np.float32
+                    )
+                    del pending[:chunk_bytes]
+                    try:
+                        self._prev_bands = _compute_bands(samples, self._prev_bands)
+                    except Exception:
+                        continue
+                    self.bands_updated.emit(self._prev_bands.copy())
+                    self.waveform_updated.emit(samples.copy())
+                    try:
+                        self._pulse_env = _compute_pulse(samples, self._pulse_env)
+                    except Exception:
+                        self._pulse_env = None
+                    else:
+                        self.pulse_updated.emit(float(self._pulse_env.env))
             if not died or self._stop.is_set():
                 return
             # parec exited underneath us (sink unplugged, pipewire restart).

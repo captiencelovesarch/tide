@@ -24,12 +24,25 @@ class Settings:
     # (replaces artist · album while a line is active). Off by default —
     # lyrics get broadcast to everyone who can see the profile.
     discord_lyrics_enabled: bool = False
+    # v1.4 — presence customization. Templates are format-style strings with
+    # {title} {artists} {album} {source} placeholders; empty = the classic
+    # defaults ("{title}" / "{artists} · {album}"). A live lyric still takes
+    # over the state line while discord_lyrics_enabled is on.
+    discord_details_template: str = ""
+    discord_state_template: str = ""
+    # Keep a "⏸ paused" presence up instead of clearing it entirely.
+    discord_show_paused: bool = False
+    # Include the elapsed/total progress-bar timestamps.
+    discord_show_progress: bool = True
+    # Presence verb: "listening" | "playing" | "watching".
+    discord_activity_type: str = "listening"
     volume: int = 80
     sleep_preset_minutes: int = 30
     mini_mode_default: bool = False
     # v1.2.7 mini player redo — the dedicated frameless window (ui/mini.py).
     # Backdrop: "follow" = use adaptive_background_style; or a concrete
-    # "field" | "band" | "vbeam", or "off" for a flat card.
+    # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths", or
+    # "off" for a flat card.
     mini_backdrop_style: str = "follow"
     # "ring" = window border fills as the progress bar; "thin" = classic bar.
     mini_progress_style: str = "ring"
@@ -77,7 +90,8 @@ class Settings:
     # When True, the main app surface paints an album-palette backdrop (see
     # ui/central_bg.py).
     adaptive_background: bool = False
-    # Adaptive backdrop style: "field" | "band" | "vbeam".
+    # Adaptive backdrop style: "field" | "band" | "vbeam" | "horizon" |
+    # "lightning" | "depths".
     adaptive_background_style: str = "field"
     # When True (and adaptive_background is on), that gradient also swells /
     # brightens on heavy bass, app-wide while playing. Needs the monitor
@@ -96,6 +110,10 @@ class Settings:
     # Font-size override in points. 0 = use the active theme's size_pt.
     # The ui_scale preset still multiplies whichever base wins.
     font_size_override_pt: int = 0
+    # Text-case override. Empty = use the active theme's typography.case;
+    # otherwise "lower" | "upper" | "normal" | "leet" | "zalgo". Routed
+    # through theming.styled_case, so it re-cases everything the theme would.
+    text_case_override: str = ""
     # v1.3 — tide draws its own themed titlebar (frameless main window).
     # False = keep the compositor's native decoration.
     csd_titlebar: bool = True

@@ -522,6 +522,33 @@ def manager() -> ThemeManager:
 
 # ---------- text-case transforms ----------
 
+# Sticky user override for typography.case. Empty = follow the active theme.
+# Kept module-level beside styled_case (its only consumer) rather than on the
+# manager: casing is a text transform, not a token.
+_CASE_OVERRIDE: str = ""
+
+CASE_MODES = ("lower", "upper", "normal", "leet", "zalgo")
+
+
+def set_case_override(case: str) -> None:
+    """Set or clear ("" ) the user's text-case override. Re-applies the
+    current theme so widgets listening to theme_changed re-case their text
+    the same way a theme switch would."""
+    global _CASE_OVERRIDE
+    new = case if case in CASE_MODES else ""
+    if new == _CASE_OVERRIDE:
+        return
+    _CASE_OVERRIDE = new
+    mgr = manager()
+    current = mgr.current()
+    if current is not None:
+        mgr.apply(current.slug)
+
+
+def case_override() -> str:
+    return _CASE_OVERRIDE
+
+
 _LEET_MAP = str.maketrans({
     "a": "4", "A": "4",
     "e": "3", "E": "3",
@@ -553,7 +580,8 @@ def _to_zalgo(s: str, intensity: int = 2) -> str:
 
 
 def styled_case(text: str, theme: "Theme | None" = None) -> str:
-    """Apply the active theme's typography.case to ``text``.
+    """Apply the active theme's typography.case to ``text``. A user
+    override set via :func:`set_case_override` beats the theme.
 
     Modes:
       - "lower"  → all lowercase
@@ -564,10 +592,12 @@ def styled_case(text: str, theme: "Theme | None" = None) -> str:
     """
     if not text:
         return text
-    t = theme if theme is not None else manager().current()
-    case = "lower"
-    if t is not None:
-        case = str(t.t("typography", "case", "lower"))
+    case = _CASE_OVERRIDE
+    if not case:
+        t = theme if theme is not None else manager().current()
+        case = "lower"
+        if t is not None:
+            case = str(t.t("typography", "case", "lower"))
     if case == "upper":
         return text.upper()
     if case == "normal":

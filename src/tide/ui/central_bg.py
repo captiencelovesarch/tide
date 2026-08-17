@@ -23,6 +23,8 @@ import colorsys
 import math
 import time
 
+import random
+
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QBrush,
@@ -31,6 +33,7 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPainterPath,
+    QPen,
     QRadialGradient,
 )
 from PySide6.QtWidgets import QHBoxLayout, QWidget
@@ -60,6 +63,13 @@ _PERIOD_FIELD_A_S = 29.0
 _PERIOD_FIELD_B_S = 37.0
 _PERIOD_FIELD_C_S = 53.0
 _BASE_ANGLE = math.radians(56)  # diagonal, top-left → bottom-right
+# Display smoothing for the bass pulse, applied per animation tick. The
+# audio-side envelope already has instant attack and a ~0.35s release, so the
+# paint side must not smooth the onset again — a symmetric 0.5 here used to
+# add ~130ms of visible lag on every kick. Attack near-snaps; release keeps a
+# little easing on top of the envelope's own decay for the slow-settle look.
+_PULSE_ATTACK = 0.85
+_PULSE_RELEASE = 0.5
 # Offscreen buffer cap (long side, px). The gradient is smooth so a small
 # buffer upscaled bilinearly is visually identical to a full-res fill, but
 # caps the fill cost regardless of window size / desktop scaling.
@@ -126,7 +136,8 @@ class CentralBg(QWidget):
 
         self._enabled: bool = False
         self._radius: int = 0
-        self._style: str = "field"          # "field" | "band" | "vbeam"
+        # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths"
+        self._style: str = "field"
         self._motion: str = "lite"          # "off" freezes the drift
         self._bg = QColor("#0b0b0b")
         self._tone_a = QColor("#141414")
@@ -134,7 +145,14 @@ class CentralBg(QWidget):
         self._tone_c = QColor("#141414")
         self._pulse: float = 0.0            # target from the audio feed
         self._pulse_shown: float = 0.0      # smoothed value actually painted
+        self._last_tick: float = 0.0        # when _tick last painted
         self._t0 = time.monotonic()
+        # Lightning-style strike state. Seed regenerates per strike so each
+        # bolt has its own shape; t0 drives the flash/fade envelope.
+        self._bolt_seed: int = 1
+        self._bolt_t0: float = -10.0
+        self._strike_prev: float = 0.0
+        self._next_auto_strike: float = 3.0
         self._buf: QImage | None = None
 
         self._anim = QTimer(self)
@@ -161,7 +179,11 @@ class CentralBg(QWidget):
         self.update()
 
     def set_style(self, style: str) -> None:
-        new_style = style if style in {"field", "band", "vbeam"} else "field"
+        new_style = (
+            style
+            if style in {"field", "band", "vbeam", "horizon", "lightning", "depths"}
+            else "field"
+        )
         if new_style == self._style:
             return
         self._style = new_style
@@ -176,11 +198,19 @@ class CentralBg(QWidget):
         self.update()
 
     def set_pulse(self, level: float) -> None:
-        """Feed the current bass-energy envelope (0..1). Stored only — the
-        animation timer paints it, so this can be called at audio rate
-        without exceeding the repaint cap."""
+        """Feed the current bass-energy envelope (0..1). Normally stored only
+        — the animation timer paints it, so this can be called at audio rate
+        without exceeding the repaint cap. A sharp *onset* paints right away
+        (still rate-limited to the timer interval) so the swell lands on the
+        beat instead of up to a frame later."""
         self._pulse = max(0.0, min(1.0, float(level)))
         self._sync_timer()
+        if (
+            self._pulse - self._pulse_shown > 0.08
+            and self._anim.isActive()
+            and (time.monotonic() - self._last_tick) * 1000.0 >= _ANIM_INTERVAL_MS
+        ):
+            self._tick()
 
     # ---------- lifecycle ----------
 
@@ -207,12 +237,15 @@ class CentralBg(QWidget):
             self._anim.stop()
             return
         changed = self._motion != "off"
-        if abs(self._pulse - self._pulse_shown) > 0.003:
-            self._pulse_shown += (self._pulse - self._pulse_shown) * 0.5
+        delta = self._pulse - self._pulse_shown
+        if abs(delta) > 0.003:
+            rate = _PULSE_ATTACK if delta > 0 else _PULSE_RELEASE
+            self._pulse_shown += delta * rate
             changed = True
         else:
             self._pulse_shown = self._pulse
         if changed:
+            self._last_tick = time.monotonic()
             self.update()
         else:
             # Nothing moving (motion off + steady/zero pulse) — idle the timer.
@@ -310,6 +343,24 @@ class CentralBg(QWidget):
             self._bg if self._bg.alpha() == 255 else QColor(0, 0, 0, 0),
         )
 
+        def glow(cx: float, cy: float, rx: float, ry: float,
+                 stops: list[tuple[float, QColor]], rot: float = 0.0) -> None:
+            # Elliptical radial glow: a unit radial gradient painted under a
+            # scale (and optional rotate) transform, filled only over its own
+            # extent. Every brightness contour is a gradient ramp fading to
+            # clear, so nothing built from these can produce an outline —
+            # the invariant all the backdrop styles rely on.
+            pp.save()
+            pp.translate(cx, cy)
+            if rot:
+                pp.rotate(rot)
+            pp.scale(max(1e-3, rx), max(1e-3, ry))
+            g = QRadialGradient(0.0, 0.0, 1.0)
+            for pos, color in stops:
+                g.setColorAt(pos, color)
+            pp.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0), QBrush(g))
+            pp.restore()
+
         if self._style == "band":
             angle = (
                 _BASE_ANGLE
@@ -360,19 +411,6 @@ class CentralBg(QWidget):
             half_w = bw * (0.32 + 0.24 * pulse)
             apex_y = base_y - arch_h
 
-            def glow(cx: float, cy: float, rx: float, ry: float,
-                     stops: list[tuple[float, QColor]]) -> None:
-                # Elliptical radial glow: a unit radial gradient painted under
-                # a scale transform, filled only over its own extent.
-                pp.save()
-                pp.translate(cx, cy)
-                pp.scale(max(1e-3, rx), max(1e-3, ry))
-                g = QRadialGradient(0.0, 0.0, 1.0)
-                for pos, color in stops:
-                    g.setColorAt(pos, color)
-                pp.fillRect(QRectF(-1.0, -1.0, 2.0, 2.0), QBrush(g))
-                pp.restore()
-
             # Wide under-wash anchoring the shape to the bottom edge; grows
             # with the arch so the idle scene stays quiet.
             glow(center_x, base_y,
@@ -420,6 +458,178 @@ class CentralBg(QWidget):
                 glow(center_x, crest_y, crest_r, crest_r * 0.90,
                      [(0.00, _alpha(crest_tone, int(96 * pulse))),
                       (0.50, _alpha(tone_c, int(42 * pulse))),
+                      (1.00, clear)])
+            pp.end()
+            return img
+
+        if self._style == "horizon":
+            # Sunset over water — a luminous band where sky meets sea, a low
+            # sun resting on the line. Bass swells the sun and floods the
+            # band; the reflection stretches down into the water with it.
+            horizon_y = bh * (0.60 + motion * 0.025 * wave(_PERIOD_FLOW_S, 0.9))
+            sun_x = bw * (0.50 + motion * 0.16 * wave(_PERIOD_FIELD_B_S, 1.3))
+
+            sky = QLinearGradient(0.0, 0.0, 0.0, horizon_y)
+            sky.setColorAt(0.00, clear)
+            sky.setColorAt(0.55, _alpha(tone_a, 26 + int(20 * pulse)))
+            sky.setColorAt(1.00, _alpha(tone_b, 64 + int(46 * pulse)))
+            pp.fillRect(QRectF(0.0, 0.0, bw, horizon_y), QBrush(sky))
+
+            water = QLinearGradient(0.0, horizon_y, 0.0, bh)
+            water.setColorAt(0.00, _alpha(tone_b, 56 + int(40 * pulse)))
+            water.setColorAt(0.45, _alpha(tone_c, 24 + int(18 * pulse)))
+            water.setColorAt(1.00, clear)
+            pp.fillRect(QRectF(0.0, horizon_y, bw, bh - horizon_y),
+                        QBrush(water))
+
+            glow(sun_x, horizon_y,
+                 bw * (0.42 + 0.22 * pulse), bh * (0.16 + 0.26 * pulse),
+                 [(0.00, _alpha(tone_c, 96 + int(84 * pulse))),
+                  (0.50, _alpha(tone_b, 40 + int(46 * pulse))),
+                  (1.00, clear)])
+            # Reflection — narrower, dimmer, pulled down into the water.
+            glow(sun_x, horizon_y + bh * 0.05,
+                 bw * (0.18 + 0.10 * pulse), bh * (0.30 + 0.22 * pulse),
+                 [(0.00, _alpha(tone_c, 40 + int(44 * pulse))),
+                  (1.00, clear)])
+            pp.end()
+            return img
+
+        if self._style == "lightning":
+            # Storm cell. A brooding cloud deck idles at the top; strikes arc
+            # down on bass hits, and ambiently every several seconds while
+            # motion is on. This is deliberately the one style that draws
+            # lines — lightning IS a line — but every stroke is layered soft
+            # pens fading with the strike envelope, so nothing ever reads as
+            # a crisp UI border.
+            prev = self._strike_prev
+            self._strike_prev = pulse
+            age = t - self._bolt_t0
+            if ((pulse - prev > 0.10 and pulse > 0.30 and age > 0.28)
+                    or (motion > 0.0 and t >= self._next_auto_strike)):
+                self._bolt_seed = (self._bolt_seed * 69069 + int(t * 997.0) + 1) & 0xFFFFFF
+                self._bolt_t0 = t
+                age = 0.0
+                self._next_auto_strike = t + 7.0 + 9.0 * random.Random(
+                    self._bolt_seed).random()
+
+            flash = math.exp(-age / 0.10)            # scene illumination
+            vis = math.exp(-age / 0.16) * (0.75 + 0.25 * math.cos(age * 90.0))
+            if age > 0.55:
+                flash = 0.0
+                vis = 0.0
+
+            # Cloud deck — heavier and brighter while bass drives the storm;
+            # a strike lights it from inside.
+            deck_a = 46 + int(30 * pulse) + int(56 * flash)
+            deck = QLinearGradient(0.0, 0.0, 0.0, bh * 0.55)
+            deck.setColorAt(0.00, _alpha(tone_a, deck_a))
+            deck.setColorAt(0.55, _alpha(tone_a, int(deck_a * 0.35)))
+            deck.setColorAt(1.00, clear)
+            pp.fillRect(img.rect(), QBrush(deck))
+            for base_x, period, phase in ((0.28, _PERIOD_FIELD_A_S, 0.6),
+                                          (0.72, _PERIOD_FIELD_C_S, 2.9)):
+                glow(bw * (base_x + motion * 0.08 * wave(period, phase)),
+                     bh * -0.06,
+                     bw * 0.42, bh * (0.22 + 0.10 * pulse),
+                     [(0.00, _alpha(tone_b, 44 + int(30 * pulse) + int(40 * flash))),
+                      (1.00, clear)])
+
+            if vis > 0.02:
+                rng = random.Random(self._bolt_seed)
+                dark_bolt = self._bg.lightnessF() <= 0.5
+                core_tone = (_lerp(tone_c, QColor(255, 255, 255), 0.85)
+                             if dark_bolt else
+                             _lerp(tone_c, QColor(0, 0, 0), 0.55))
+
+                # Scene flash — the whole backdrop blinks with the strike.
+                pp.fillRect(img.rect(), _alpha(tone_c, int(30 * flash)))
+
+                def jag(x0: float, y0: float, x1: float, y1: float,
+                        steps: int, jitter: float) -> list[tuple[float, float]]:
+                    pts = [(x0, y0)]
+                    for i in range(1, steps):
+                        f = i / steps
+                        amp = jitter * math.sin(math.pi * f)
+                        pts.append((x0 + (x1 - x0) * f + rng.uniform(-amp, amp),
+                                    y0 + (y1 - y0) * f
+                                    + rng.uniform(-amp * 0.35, amp * 0.35)))
+                    pts.append((x1, y1))
+                    return pts
+
+                def stroke(pts: list[tuple[float, float]],
+                           passes: list[tuple[float, QColor, int]]) -> None:
+                    path = QPainterPath()
+                    path.moveTo(*pts[0])
+                    for x, y in pts[1:]:
+                        path.lineTo(x, y)
+                    pp.setBrush(Qt.NoBrush)
+                    for width, color, alpha in passes:
+                        pen = QPen(_alpha(color, alpha), max(1.0, width),
+                                   Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                        pp.setPen(pen)
+                        pp.drawPath(path)
+                    pp.setPen(Qt.NoPen)
+
+                x_top = bw * (0.25 + 0.50 * rng.random())
+                x_hit = x_top + bw * rng.uniform(-0.18, 0.18)
+                y_hit = bh * (0.62 + 0.30 * rng.random())
+                main = jag(x_top, -2.0, x_hit, y_hit, 9, bw * 0.07)
+                stroke(main, [
+                    (max_side * 0.030, tone_c, int(60 * vis)),
+                    (max_side * 0.012, tone_c, int(120 * vis)),
+                    (max_side * 0.005, core_tone, int(235 * vis)),
+                ])
+                # 1–2 branches forking from the upper half of the main bolt.
+                for _ in range(1 + rng.randint(0, 1)):
+                    bx, by = main[rng.randint(2, 4)]
+                    fx = bx + bw * rng.uniform(-0.22, 0.22)
+                    fy = by + (y_hit - by) * rng.uniform(0.35, 0.65)
+                    stroke(jag(bx, by, fx, fy, 5, bw * 0.05), [
+                        (max_side * 0.016, tone_c, int(46 * vis)),
+                        (max_side * 0.004, core_tone, int(150 * vis)),
+                    ])
+                # Impact glow where the strike lands.
+                glow(x_hit, y_hit,
+                     max_side * (0.10 + 0.10 * flash),
+                     max_side * (0.07 + 0.07 * flash),
+                     [(0.00, _alpha(core_tone, int(110 * vis))),
+                      (0.55, _alpha(tone_c, int(50 * vis))),
+                      (1.00, clear)])
+            pp.end()
+            return img
+
+        if self._style == "depths":
+            # Deep water — light welling up from below the bottom edge, faint
+            # motes rising through it. Bass drives the well upward; motes
+            # brighten with it. Motion off freezes the motes mid-rise (same
+            # freeze-the-drift contract as every other style).
+            glow(bw * (0.50 + motion * 0.05 * wave(_PERIOD_FLOW_S, 0.4)),
+                 bh * 1.10,
+                 bw * (0.75 + 0.20 * pulse), bh * (0.45 + 0.40 * pulse),
+                 [(0.00, _alpha(tone_b, 120 + int(70 * pulse))),
+                  (0.50, _alpha(tone_a, 46 + int(40 * pulse))),
+                  (1.00, clear)])
+
+            motes = (
+                (0.20, 0.16, tone_c, 47.0, 0.15),
+                (0.55, 0.20, tone_b, 61.0, 0.55),
+                (0.82, 0.13, tone_c, 53.0, 0.85),
+            )
+            for base_x, r, tone, period, phase0 in motes:
+                # Progress wraps 0→1 forever; the sine fade births each mote
+                # dim near the floor and dissolves it near the surface, so
+                # the wrap-around never pops.
+                prog = (phase0 + motion * t / period) % 1.0
+                y = bh * (1.15 - 1.30 * prog)
+                x = bw * (base_x + motion * 0.04 * wave(_PERIOD_FIELD_B_S,
+                                                        phase0 * 6.0))
+                fade = math.sin(math.pi * prog)
+                a = int((44 + 60 * pulse) * fade)
+                mote_r = max_side * r * (1.0 + 0.22 * pulse)
+                glow(x, y, mote_r, mote_r,
+                     [(0.00, _alpha(tone, a)),
+                      (0.60, _alpha(tone, int(a * 0.45))),
                       (1.00, clear)])
             pp.end()
             return img

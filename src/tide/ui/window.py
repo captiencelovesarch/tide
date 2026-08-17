@@ -3138,6 +3138,13 @@ class MainWindow(QMainWindow):
         # Push discord changes to the live presence client if it's running.
         discord = getattr(self, "_discord", None)
         if discord is not None:
+            discord.set_options(
+                details_template=new.discord_details_template,
+                state_template=new.discord_state_template,
+                show_paused=new.discord_show_paused,
+                show_progress=new.discord_show_progress,
+                activity_type=new.discord_activity_type,
+            )
             discord.configure(new.discord_app_id, new.discord_enabled)
         # Presence lyric feed follows both toggles; disabling emits None,
         # which clears any lyric already sitting on the profile.
@@ -3188,6 +3195,9 @@ class MainWindow(QMainWindow):
         # to theme_changed.
         theming.manager().set_user_font(new.font_family_override or "")
         theming.manager().set_user_font_size(new.font_size_override_pt or 0)
+        # Text-case override — re-applies the theme, which re-cases every
+        # widget that re-reads styled_case on theme_changed.
+        theming.set_case_override(new.text_case_override or "")
         # Push new loading-indicator style to any currently-running indicator.
         if hasattr(self, "_loading"):
             self._loading.set_style(new.loading_indicator_style)

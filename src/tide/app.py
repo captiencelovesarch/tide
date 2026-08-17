@@ -89,6 +89,15 @@ def run_onboarding_if_needed(user_settings):
         user_settings.subsonic_user = r.subsonic_user
         user_settings.subsonic_pass = r.subsonic_pass
         user_settings.subsonic_auth_style = r.subsonic_auth_style or "salt"
+    # Optional integrations step. Only ever *adds* — the step can't produce
+    # enabled=True without a credential, and an untouched step leaves the
+    # defaults (off) in place.
+    if r.discord_enabled and r.discord_app_id:
+        user_settings.discord_enabled = True
+        user_settings.discord_app_id = r.discord_app_id
+    if r.listenbrainz_enabled and r.listenbrainz_token:
+        user_settings.listenbrainz_enabled = True
+        user_settings.listenbrainz_token = r.listenbrainz_token
     user_settings.first_launch_complete = True
     try:
         settings_module.save(user_settings)
@@ -159,6 +168,9 @@ def run(argv: list[str] | None = None) -> int:
     theming.register_bundled_fonts()
     theming.manager().set_user_font(user_settings.font_family_override or "")
     theming.manager().set_user_font_size(user_settings.font_size_override_pt or 0)
+    # Text-case override rides the same "before first apply" train so the
+    # first frame is already cased the way the user asked.
+    theming.set_case_override(user_settings.text_case_override or "")
 
     # Apply the theme as early as possible so the wizard renders with it.
     theming.manager().refresh()
@@ -327,6 +339,13 @@ def run(argv: list[str] | None = None) -> int:
     # Discord rich presence — opt-in, configured via settings dialog.
     discord = DiscordPresence(player, window.queue)
     discord.start_wire()
+    discord.set_options(
+        details_template=user_settings.discord_details_template,
+        state_template=user_settings.discord_state_template,
+        show_paused=user_settings.discord_show_paused,
+        show_progress=user_settings.discord_show_progress,
+        activity_type=user_settings.discord_activity_type,
+    )
     discord.configure(user_settings.discord_app_id, user_settings.discord_enabled)
 
     # Live-lyric feed for the presence state line. Headless (not the lyrics
