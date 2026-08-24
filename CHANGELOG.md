@@ -4,6 +4,16 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [1.4.1] — 2026-08-24 — the token minds itself, the desktop hears every update, and the light holds the edges
+
+### Fixed
+- **The YouTube Music token refreshes itself.** Expiry handling used to stop at a toast — tide noticed the dead session on its own, then waited for you to come click [refresh token], even though the fix (silently re-importing cookies from your still-signed-in browser) needs no interaction at all. Now a 401 starts that re-import by itself, and the expiry watcher renews *ahead* of the recorded cookie deadline (3 days out, checked half-hourly and shortly after launch) so most sessions never die in the first place. Success is deliberately quiet — a status-bar line, no toast. A 15-minute cooldown keeps a dead browser session from causing a refresh loop, and the toast survives only for the cases silence can't fix: no browser holds a live session, or the fresh cookies die right back.
+- **MPRIS updates reach spec-strict listeners.** `PropertiesChanged` sent its empty invalidated-properties list as a bare Python `[]`, which marshals as `av` and turns the whole signal's signature into `sa{sv}av`. Clients match against the spec's `sa{sv}as` and silently drop everything after their initial snapshot — title, artist, art, and play state froze for them. The list is now a typed empty string array.
+- **Seek notifications speak int64.** The hand-built `Seeked` signal marshaled small positions as int32 (`i`), and clients drop the mistyped signal. It now relays through the adaptor's declared `qlonglong` signal, so the wire type is the spec's `x`.
+
+### Added
+- **Rim light backdrop.** Seventh backdrop style: the edges hold the light and the center stays dark — four inward-fading edge gradients frame the window (overlapping at the corners, which brightens them for free), with corner blooms as the light sources. Deliberately static: nothing travels; only the bass pulse pushes the glow deeper into the room as well as brighter. In the main backdrop picker, the mini player's right-click menu, and Settings → mini player.
+
 ## [1.4.0] — 2026-08-17 — the pulse lands on the beat, the sky learns new weather, and settings finds its drawers
 
 ### Fixed
