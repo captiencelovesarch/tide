@@ -41,8 +41,8 @@ class Settings:
     mini_mode_default: bool = False
     # v1.2.7 mini player redo — the dedicated frameless window (ui/mini.py).
     # Backdrop: "follow" = use adaptive_background_style; or a concrete
-    # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths", or
-    # "off" for a flat card.
+    # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths" |
+    # "rimlight", or "off" for a flat card.
     mini_backdrop_style: str = "follow"
     # "ring" = window border fills as the progress bar; "thin" = classic bar.
     mini_progress_style: str = "ring"
@@ -91,7 +91,7 @@ class Settings:
     # ui/central_bg.py).
     adaptive_background: bool = False
     # Adaptive backdrop style: "field" | "band" | "vbeam" | "horizon" |
-    # "lightning" | "depths".
+    # "lightning" | "depths" | "rimlight".
     adaptive_background_style: str = "field"
     # When True (and adaptive_background is on), that gradient also swells /
     # brightens on heavy bass, app-wide while playing. Needs the monitor

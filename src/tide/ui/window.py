@@ -247,8 +247,13 @@ class MainWindow(QMainWindow):
     AUTH_HEARTBEAT_MS = 10 * 60 * 1000
     # How often to compare the recorded cookie expiry against the clock.
     EXPIRY_WATCH_MS = 30 * 60 * 1000
-    # Warn this far ahead of the recorded expiry.
+    # Renew (or, failing that, warn) this far ahead of the recorded expiry.
     EXPIRY_WARN_SECONDS = 3 * 24 * 3600
+    # Minimum gap between silent auto-refresh attempts. A fresh import that
+    # 401s again within one heartbeat means the browser's own session is dead
+    # — re-importing the same corpse forever would just loop SQLite+keyring
+    # reads, so after one failed cycle the toast takes over.
+    AUTO_REFRESH_COOLDOWN_S = 15 * 60
 
     def statusBar(self):  # shadows QMainWindow.statusBar for Python callers
         """The status bar lives INSIDE the CentralBg shell (not in the native
@@ -639,6 +644,10 @@ class MainWindow(QMainWindow):
         # delivery onto this (GUI) thread, so the slot may build widgets.
         self._auth_expired_toasted: set[str] = set()
         source_registry().auth_expired.connect(self._on_source_auth_expired)
+        # Silent auto-refresh bookkeeping (see _try_auto_refresh).
+        self._auto_refresh_inflight = False
+        self._auto_refresh_at: float | None = None    # monotonic, last attempt
+        self._auto_refresh_trigger = "expired"
 
         # Auth heartbeat. Cookie death used to surface only when the user
         # happened to touch the API — i.e. mid-session, as songs quietly
@@ -923,7 +932,11 @@ class MainWindow(QMainWindow):
             QThreadPool.globalInstance().start(_Probe(probe))
 
     def _check_session_expiry(self) -> None:
-        """Warn ahead of the recorded YT Music cookie expiry.
+        """Renew ahead of the recorded YT Music cookie expiry.
+
+        The deadline approaching is the calmest possible moment to run the
+        silent re-import — nothing has failed yet — so try that first and
+        only warn when silence can't help (no live browser session).
 
         Unknown expiry (None) means we simply have no data — an older import,
         or session-scoped cookies — and must NOT be read as 'expiring'."""
@@ -941,6 +954,11 @@ class MainWindow(QMainWindow):
             return
         if "ytmusic" in self._auth_expired_toasted:
             return      # already shouting about a dead session; don't pile on
+        if self._try_auto_refresh("ytmusic", trigger="expiring"):
+            return
+        self._warn_session_expiring(remaining)
+
+    def _warn_session_expiring(self, remaining: float) -> None:
         self._expiry_warned = True
         from .toast import show_toast
         if remaining <= 0:
@@ -960,10 +978,11 @@ class MainWindow(QMainWindow):
     def _on_source_auth_expired(self, slug: str) -> None:
         """A source's saved session stopped authenticating (expired cookies).
 
-        Raise ONE sticky toast with a [sign in] action instead of letting
-        search / library / home silently degrade into empty views — that
-        silence was the old behavior and it made expiry look like random
-        breakage."""
+        For YT Music, run the same silent cookie re-import the toast's
+        [refresh token] button runs — but without waiting for the click. The
+        browser is nearly always still signed in, so most expiries heal with
+        zero interaction; the toast survives only as the fallback for the
+        cases silence can't fix."""
         if slug in self._auth_expired_toasted:
             return
         if not source_registry().is_enabled(slug):
@@ -975,6 +994,17 @@ class MainWindow(QMainWindow):
                 self.source_view._refresh_dot_for(slug)
             except Exception:
                 pass
+            return
+        if slug == "ytmusic" and self._try_auto_refresh(slug, trigger="expired"):
+            return
+        self._toast_auth_expired(slug)
+
+    def _toast_auth_expired(self, slug: str) -> None:
+        """ONE sticky toast with a [refresh token] action instead of letting
+        search / library / home silently degrade into empty views — that
+        silence was the old behavior and it made expiry look like random
+        breakage."""
+        if slug in self._auth_expired_toasted:
             return
         self._auth_expired_toasted.add(slug)
         source = source_registry().get(slug)
@@ -996,6 +1026,102 @@ class MainWindow(QMainWindow):
             self.source_view._refresh_dot_for(slug)
         except Exception:
             pass
+
+    def _try_auto_refresh(self, slug: str, trigger: str) -> bool:
+        """Start a silent cookie re-import with no user action involved.
+
+        Returns True iff an attempt is running — the caller must then stay
+        quiet and let the completion callbacks decide whether anything is
+        worth telling the user. False means the caller should fall back to
+        its toast: the last attempt was recent enough that its cookies are
+        evidently not sticking, so silence has had its chance.
+
+        ``trigger`` records why we started ("expired" = a request 401'd,
+        "expiring" = the recorded deadline is near) so the fallback can show
+        the matching toast. A 401 arriving mid-attempt upgrades the trigger:
+        the session is now dead regardless of why we began.
+        """
+        if self._auto_refresh_inflight:
+            if trigger == "expired":
+                self._auto_refresh_trigger = trigger
+            return True
+        if (
+            self._auto_refresh_at is not None
+            and time.monotonic() - self._auto_refresh_at < self.AUTO_REFRESH_COOLDOWN_S
+        ):
+            return False
+        from .wizard import refresh_token_async
+        self._auto_refresh_inflight = True
+        self._auto_refresh_at = time.monotonic()
+        self._auto_refresh_trigger = trigger
+        self._refresh_slug = slug
+        self.statusBar().showMessage("refreshing youtube music token…")
+        refresh_token_async(self._on_auto_refresh_done, self._on_auto_refresh_failed)
+        return True
+
+    def _on_auto_refresh_done(self, profile_label: str) -> None:
+        """Bound method (never a lambda) — see refresh_token_async."""
+        self._auto_refresh_inflight = False
+        slug = getattr(self, "_refresh_slug", "ytmusic")
+        if not profile_label:
+            # No browser holds a live session — the user genuinely has to go
+            # sign in. Now the toast has earned its interruption.
+            self.statusBar().clearMessage()
+            self._auto_refresh_fallback(slug)
+            return
+        source = source_registry().get(slug)
+        try:
+            rebuilt = bool(source.reload_client())
+        except Exception:
+            rebuilt = False
+        self._auth_expired_toasted.discard(slug)
+        self._expiry_warned = False      # fresh cookies → watch the new deadline
+        if not rebuilt:
+            from .toast import show_toast
+            show_toast(self.toast_host(), "token refreshed — restart tide to use it")
+            return
+        # Success is deliberately quiet: the whole point is that the user
+        # never has to look at this. Status bar only, no toast.
+        self.statusBar().showMessage(f"youtube music token refreshed from {profile_label}")
+        try:
+            self.source_view.refresh_statuses()
+            self.source_view._refresh_dot_for(slug)
+        except Exception:
+            pass
+        self._refresh_after_reauth(slug)
+        # A renewal that didn't actually move the deadline (the browser's own
+        # jar is near-expiry too) would otherwise re-attempt every expiry
+        # tick forever. Warn once instead — only the user can extend it, by
+        # touching YT Music in the browser.
+        if self._auto_refresh_trigger == "expiring":
+            from .. import auth as auth_module
+            try:
+                remaining = auth_module.seconds_until_expiry()
+            except Exception:
+                remaining = None
+            if remaining is not None and remaining <= self.EXPIRY_WARN_SECONDS:
+                self._warn_session_expiring(remaining)
+
+    def _on_auto_refresh_failed(self, message: str) -> None:
+        """Bound method (never a lambda) — see refresh_token_async."""
+        self._auto_refresh_inflight = False
+        slug = getattr(self, "_refresh_slug", "ytmusic")
+        self.statusBar().showMessage(f"token refresh failed: {message}")
+        self._auto_refresh_fallback(slug)
+
+    def _auto_refresh_fallback(self, slug: str) -> None:
+        """Silent renewal couldn't help — surface the toast the click path
+        used to lead with, matched to why the attempt started."""
+        if self._auto_refresh_trigger == "expired":
+            self._toast_auth_expired(slug)
+            return
+        from .. import auth as auth_module
+        try:
+            remaining = auth_module.seconds_until_expiry()
+        except Exception:
+            return
+        if remaining is not None:
+            self._warn_session_expiring(remaining)
 
     def _begin_source_reauth(self, slug: str) -> None:
         """Toast-action handler for [refresh token].

@@ -120,6 +120,7 @@ class SettingsDialog(QDialog):
         self.adaptive_style_picker.addItem("sunset horizon · sun low over water", "horizon")
         self.adaptive_style_picker.addItem("lightning · strikes on the beat", "lightning")
         self.adaptive_style_picker.addItem("deep water · glow wells up from below", "depths")
+        self.adaptive_style_picker.addItem("rim light · edges glow, center stays dark", "rimlight")
 
         # Bass pulse — swells / brightens that gradient on heavy bass while
         # playing. Needs the monitor capture, so it's gated on the gradient
@@ -278,6 +279,7 @@ class SettingsDialog(QDialog):
         self.mini_backdrop_picker.addItem("sunset horizon · sun low over water", "horizon")
         self.mini_backdrop_picker.addItem("lightning · strikes on the beat", "lightning")
         self.mini_backdrop_picker.addItem("deep water · glow wells up from below", "depths")
+        self.mini_backdrop_picker.addItem("rim light · edges glow, center stays dark", "rimlight")
         self.mini_backdrop_picker.addItem("off · flat card", "off")
         self.mini_progress_picker = QComboBox()
         self.mini_progress_picker.addItem("border ring · the window edge fills", "ring")

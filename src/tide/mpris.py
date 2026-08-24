@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     ClassInfo,
+    QMetaType,
     QObject,
     QTimer,
     Property,
@@ -29,6 +30,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtDBus import (
     QDBusAbstractAdaptor,
+    QDBusArgument,
     QDBusConnection,
     QDBusMessage,
     QDBusObjectPath,
@@ -394,6 +396,10 @@ class MprisService(QObject):
             "xesam:url": f"https://music.youtube.com/watch?v={tr.video_id}",
         }
         if self._duration_us > 0:
+            # Spec type is ``x`` (int64) but PySide6 infers int width, so
+            # tracks under ~36 min marshal as int32. Qt clients convert;
+            # strict GLib readers may miss the length. Not forcible without
+            # QVariant, which PySide6 doesn't expose.
             meta["mpris:length"] = self._duration_us
         if tr.thumbnail:
             meta["mpris:artUrl"] = tr.thumbnail
@@ -597,12 +603,24 @@ class MprisService(QObject):
             return
         msg = QDBusMessage.createSignal(MPRIS_PATH, PROPERTIES_IFACE, "PropertiesChanged")
         # Args: interface name (string), changed_properties (a{sv}), invalidated_properties (as)
-        msg.setArguments([MPRIS_PLAYER_IFACE, changes, []])
+        # invalidated MUST be a typed empty string array. A bare Python []
+        # marshals as an empty QVariantList — signature ``av`` — which turns
+        # the whole signal into ``sa{sv}av``. Both QtDBus and GDBus clients
+        # (KDE Plasma's media controller, playerctl, GNOME) match
+        # PropertiesChanged against the spec signature ``sa{sv}as`` and
+        # silently drop anything else, so every update after the client's
+        # initial GetAll snapshot would be lost.
+        invalidated = QDBusArgument()
+        invalidated.beginArray(QMetaType(QMetaType.Type.QString.value))
+        invalidated.endArray()
+        msg.setArguments([MPRIS_PLAYER_IFACE, changes, invalidated])
         self._bus.send(msg)
 
     def _emit_seeked(self, position_us: int) -> None:
         if not self._connected:
             return
-        msg = QDBusMessage.createSignal(MPRIS_PATH, MPRIS_PLAYER_IFACE, "Seeked")
-        msg.setArguments([position_us])
-        self._bus.send(msg)
+        # Relay through the adaptor's declared Signal("qlonglong") so the
+        # wire type is ``x`` (int64) per spec. A hand-built QDBusMessage
+        # marshals a small Python int as ``i`` and clients drop the signal
+        # ("Dropping signal Seeked of type (i)…" in GLib terms).
+        self._player_adaptor.Seeked.emit(int(position_us))

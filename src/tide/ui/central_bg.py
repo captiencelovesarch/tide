@@ -137,6 +137,7 @@ class CentralBg(QWidget):
         self._enabled: bool = False
         self._radius: int = 0
         # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths"
+        # | "rimlight"
         self._style: str = "field"
         self._motion: str = "lite"          # "off" freezes the drift
         self._bg = QColor("#0b0b0b")
@@ -181,7 +182,8 @@ class CentralBg(QWidget):
     def set_style(self, style: str) -> None:
         new_style = (
             style
-            if style in {"field", "band", "vbeam", "horizon", "lightning", "depths"}
+            if style in {"field", "band", "vbeam", "horizon", "lightning", "depths",
+               "rimlight"}
             else "field"
         )
         if new_style == self._style:
@@ -596,6 +598,40 @@ class CentralBg(QWidget):
                      [(0.00, _alpha(core_tone, int(110 * vis))),
                       (0.55, _alpha(tone_c, int(50 * vis))),
                       (1.00, clear)])
+            pp.end()
+            return img
+
+        if self._style == "rimlight":
+            # Rim light — the edges hold the light, the center stays dark.
+            # Four inward-fading edge gradients build the frame (they overlap
+            # at the corners, which brightens them for free); corner blooms
+            # give it light sources. Deliberately static: nothing travels,
+            # only the bass pulse pushes the glow deeper into the room as
+            # well as brighter.
+            depth_v = bh * (0.14 + 0.20 * pulse)
+            depth_h = bw * (0.10 + 0.14 * pulse)
+            edge_a = 64 + int(120 * pulse)
+
+            def edge(x0: float, y0: float, x1: float, y1: float,
+                     rx: float, ry: float, rw: float, rh: float) -> None:
+                g = QLinearGradient(x0, y0, x1, y1)
+                g.setColorAt(0.00, _alpha(tone_b, edge_a))
+                g.setColorAt(0.40, _alpha(tone_a, int(edge_a * 0.38)))
+                g.setColorAt(1.00, clear)
+                pp.fillRect(QRectF(rx, ry, rw, rh), QBrush(g))
+
+            edge(0, 0, 0, depth_v,        0, 0, bw, depth_v)             # top
+            edge(0, bh, 0, bh - depth_v,  0, bh - depth_v, bw, depth_v)  # bottom
+            edge(0, 0, depth_h, 0,        0, 0, depth_h, bh)            # left
+            edge(bw, 0, bw - depth_h, 0,  bw - depth_h, 0, depth_h, bh)  # right
+
+            # Corner blooms — the frame's "light sources".
+            corner_r = max_side * (0.14 + 0.08 * pulse)
+            for cx, cy in ((0, 0), (bw, 0), (bw, bh), (0, bh)):
+                glow(cx, cy, corner_r, corner_r,
+                     [(0.00, _alpha(tone_c, 36 + int(70 * pulse))),
+                      (1.00, clear)])
+
             pp.end()
             return img
 

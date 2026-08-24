@@ -58,6 +58,7 @@ _BACKDROP_CHOICES = [
     ("sunset horizon", "horizon"),
     ("lightning", "lightning"),
     ("deep water", "depths"),
+    ("rim light", "rimlight"),
     ("off · flat", "off"),
 ]
 _PROGRESS_CHOICES = [
