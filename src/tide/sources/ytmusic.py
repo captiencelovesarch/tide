@@ -26,19 +26,38 @@ from .base import (
     AlbumEntry,
     ArtistDetail,
     ArtistEntry,
+    Comment,
+    CreditSection,
     MusicSource,
     NotSupportedError,
     PlaylistDetail,
     PlaylistEntry,
     Shelf,
     ShelfItem,
+    SongInsights,
     StreamRef,
     Track,
+    parse_count,
     safe_int,
 )
 
 
 SOURCE_SLUG = "ytmusic"
+
+# JSON-cache namespaces + TTLs for the v1.5 community layer. Insights go
+# stale fast enough to matter (view counts move); related/credits are
+# editorial and effectively static per video.
+_NS_INSIGHTS = "ytmusic.insights"
+_INSIGHTS_TTL = 24 * 3600
+_NS_RELATED = "ytmusic.related"
+_RELATED_TTL = 7 * 86400
+_NS_CREDITS = "ytmusic.credits"
+_CREDITS_TTL = 7 * 86400
+# Home-engine feeds: charts refresh daily-ish, moods are near-static.
+_NS_BROWSE = "ytmusic.browse"
+_EXPLORE_TTL = 6 * 3600
+_CHARTS_TTL = 6 * 3600
+_MOODS_TTL = 24 * 3600
 
 # Anonymous client used ONLY for timed lyrics — the mobile context that
 # serves timestamps rejects signed-in browser cookies with HTTP 400 (see
@@ -102,6 +121,20 @@ def _ago(seconds: float) -> str:
     if seconds >= 60:
         return f"{int(seconds // 60)}m"
     return "<1m"
+
+
+def _rel_time(epoch: object) -> str:
+    """Comment-age form: '2y', '8mo', '3d'. Empty when the timestamp is
+    missing/garbage — the row just shows no age."""
+    ts = safe_int(epoch)
+    if ts <= 0:
+        return ""
+    delta = max(0.0, time.time() - ts)
+    if delta >= 365 * 86400:
+        return f"{int(delta // (365 * 86400))}y"
+    if delta >= 30 * 86400:
+        return f"{int(delta // (30 * 86400))}mo"
+    return _ago(delta)
 
 
 class _AuthSentinel:
@@ -225,9 +258,18 @@ class YTMusicSource(MusicSource):
     capabilities = frozenset({
         "library", "albums", "artists", "videos",
         "home", "radio", "lyrics", "rating",
+        "insights", "comments", "credits", "related", "history_sync",
+        "explore", "charts", "moods",
+        "library_full", "playlist_edit", "subscribe", "remote_history",
+        "playlist_search", "suggest", "taste",
     })
 
     STREAM_TTL_SECONDS = 4 * 3600          # YT CDN URLs last ~6h
+
+    # get_song responses memoized per session: one track start wants the
+    # same payload twice (insights for the strip + the history ping), and
+    # re-opening the song page shouldn't re-fetch either.
+    _SONG_MEMO_CAP = 32
 
     def __init__(self, yt: YTMusic) -> None:
         self.yt = _AuthSentinel(yt, self._on_auth_error)
@@ -235,6 +277,10 @@ class YTMusicSource(MusicSource):
         self._auth_expired = False
         # Unix time of the last probe that came back genuinely signed in.
         self._last_auth_ok: float | None = None
+        self._song_memo: dict[str, dict] = {}
+        self._song_memo_lock = threading.Lock()
+        # Filled by probe_auth from get_account_info; "" until verified.
+        self.account_name = ""
 
     # ---------- auth surface ----------
 
@@ -277,6 +323,10 @@ class YTMusicSource(MusicSource):
             self._on_auth_error()
             raise RuntimeError("youtube music returned a signed-out session")
         self._last_auth_ok = time.time()
+        # The home greeting wants a first name; the probe already paid for
+        # the round-trip, so bank it.
+        if isinstance(info, dict):
+            self.account_name = str(info.get("accountName") or "")
 
     def is_authenticated(self) -> bool:
         return self.yt is not None and not self._signed_out and not self._auth_expired
@@ -334,7 +384,7 @@ class YTMusicSource(MusicSource):
 
     def status_text(self) -> str:
         if self._auth_expired and not self._signed_out:
-            return "token expired — use [refresh token] to fix"
+            return "token expired. use [refresh token] to fix"
         if not self.is_authenticated():
             return "sign in via [import]"
         # Lead with when the session was last *verified*, not with the cookie
@@ -559,6 +609,7 @@ class YTMusicSource(MusicSource):
                 thumbnail=_thumb(r.get("thumbnails")),
                 subscribers=str(r.get("subscribers") or ""),
             ))
+        subscribed = raw.get("subscribed")
         return ArtistDetail(
             channel_id=channel_id,
             name=raw.get("name", "") or "",
@@ -570,6 +621,7 @@ class YTMusicSource(MusicSource):
             albums=_entries("albums"),
             singles=_entries("singles"),
             related=related,
+            subscribed=bool(subscribed) if subscribed is not None else None,
         )
 
     def get_album(self, browse_id: str) -> AlbumDetail | None:
@@ -604,6 +656,7 @@ class YTMusicSource(MusicSource):
             thumbnail=album_thumb,
             description=raw.get("description", "") or "",
             tracks=tracks,
+            playlist_id=str(raw.get("audioPlaylistId") or ""),
         )
 
     # ---------- like / radio / lyrics ----------
@@ -750,6 +803,622 @@ class YTMusicSource(MusicSource):
             out.append(tr)
         return out
 
+    # ---------- v1.5 community / depth ----------
+
+    def dislike_song(self, video_id: str) -> None:
+        if not video_id:
+            return
+        self.yt.rate_song(video_id, "DISLIKE")
+
+    def _get_song_memo(self, video_id: str) -> dict | None:
+        """``get_song`` with a small per-session memo. None on any failure —
+        callers treat a missing payload as 'no insights', never as an error
+        state worth surfacing."""
+        with self._song_memo_lock:
+            hit = self._song_memo.get(video_id)
+        if hit is not None:
+            return hit
+        try:
+            song = self.yt.get_song(video_id)
+        except Exception:
+            return None
+        if not isinstance(song, dict):
+            return None
+        with self._song_memo_lock:
+            self._song_memo[video_id] = song
+            while len(self._song_memo) > self._SONG_MEMO_CAP:
+                self._song_memo.pop(next(iter(self._song_memo)))
+        return song
+
+    @staticmethod
+    def _harvest_song_payload(video_id: str, song: dict) -> dict:
+        """Merge what ``get_song`` knows (views, channel, year) into the
+        insights cache. Likes aren't in this payload — those come from the
+        yt-dlp harvest — which is why this merges instead of overwriting."""
+        partial: dict = {"_song": True}
+        vd = song.get("videoDetails") or {}
+        views = parse_count(vd.get("viewCount"))
+        if views:
+            partial["views"] = views
+        if vd.get("author"):
+            partial["channel"] = str(vd["author"])
+        mf = (song.get("microformat") or {}).get("microformatDataRenderer") or {}
+        date = str(mf.get("publishDate") or mf.get("uploadDate") or "")
+        if len(date) >= 4 and date[:4].isdigit():
+            partial["year"] = date[:4]
+        return cache.update_json(_NS_INSIGHTS, video_id, partial, _INSIGHTS_TTL)
+
+    @staticmethod
+    def _insights_from_dict(video_id: str, d: dict) -> SongInsights:
+        return SongInsights(
+            video_id=video_id,
+            views=safe_int(d.get("views")),
+            likes=safe_int(d.get("likes")),
+            comment_count=safe_int(d.get("comment_count")),
+            year=str(d.get("year") or ""),
+            channel=str(d.get("channel") or ""),
+        )
+
+    def get_song_insights(self, video_id: str) -> SongInsights | None:
+        if not video_id:
+            return None
+        cached = cache.get_json(_NS_INSIGHTS, video_id)
+        # The cache may hold a partial written by the yt-dlp harvest (likes
+        # but no views). "_song" marks that get_song already contributed;
+        # without it, one round-trip fills the rest.
+        if isinstance(cached, dict) and cached.get("_song"):
+            return self._insights_from_dict(video_id, cached)
+        song = self._get_song_memo(video_id)
+        if song is not None:
+            merged = self._harvest_song_payload(video_id, song)
+            return self._insights_from_dict(video_id, merged)
+        if isinstance(cached, dict):
+            return self._insights_from_dict(video_id, cached)
+        return None
+
+    def report_play(self, track: Track) -> bool:
+        """The 'I listened to this' ping — the same videostats call the YT
+        Music web player sends. This is what makes the account's history,
+        Listen Again, and recommendations learn from plays in tide. Only
+        invoked when the user opted in (see settings.report_plays).
+        """
+        if not track.video_id or not self.is_authenticated():
+            return False
+        song = self._get_song_memo(track.video_id)
+        if song is None:
+            return False
+        self._harvest_song_payload(track.video_id, song)
+        try:
+            resp = self.yt.add_history_item(song)
+        except KeyError:
+            # Signed-out/limited get_song payloads lack playbackTracking.
+            return False
+        status = getattr(resp, "status_code", None)
+        return status in (200, 204)
+
+    def get_related_for(self, track: Track) -> list[Shelf]:
+        """Related-content shelves ("you might also like", "other
+        performances", "about the artist"). Two round-trips on a cache miss:
+        the watch playlist carries the related browseId, then the browse
+        itself. Raw payload is cached; parsing re-runs per call (cheap, and
+        it keeps the cache format decoupled from the dataclasses)."""
+        vid = track.video_id
+        if not vid:
+            return []
+        raw = cache.get_json(_NS_RELATED, vid)
+        if raw is None:
+            try:
+                wp = self.yt.get_watch_playlist(videoId=vid, limit=1)
+                browse_id = wp.get("related") if isinstance(wp, dict) else None
+                if not browse_id:
+                    return []
+                raw = self.yt.get_song_related(browse_id) or []
+            except Exception:
+                return []
+            cache.put_json(_NS_RELATED, vid, raw, _RELATED_TTL)
+        out: list[Shelf] = []
+        for shelf in raw:
+            if not isinstance(shelf, dict):
+                continue
+            contents = shelf.get("contents")
+            # The "About the artist" section arrives with a description
+            # string where every other shelf has a list — the artist page
+            # owns that text; skip it here.
+            if not isinstance(contents, list):
+                continue
+            items: list[ShelfItem] = []
+            for c in contents:
+                if not isinstance(c, dict):
+                    continue
+                item = self._shelf_item_from_raw(c)
+                if item:
+                    items.append(item)
+            if items:
+                out.append(Shelf(title=shelf.get("title", "") or "", items=items))
+        return out
+
+    def get_credits_for(self, track: Track) -> list[CreditSection]:
+        """Song credits. The MPTC credits browseId only rides along on album
+        track listings, so tracks that arrived via search/home need their
+        album fetched first to find themselves in it. Cached per video —
+        including the empty result, so credit-less tracks don't re-fetch an
+        album on every song-page open."""
+        vid = track.video_id
+        if not vid:
+            return []
+        cached = cache.get_json(_NS_CREDITS, vid)
+        if cached is not None:
+            return [CreditSection(title=s.get("title", ""), names=list(s.get("names") or []))
+                    for s in cached if isinstance(s, dict)]
+        credits_id = str(track.extras.get("creditsBrowseId") or "")
+        if not credits_id:
+            album = track.extras.get("album")
+            album_id = album.get("id", "") if isinstance(album, dict) else ""
+            if album_id:
+                try:
+                    raw_album = self.yt.get_album(album_id) or {}
+                except Exception:
+                    return []
+                for t in raw_album.get("tracks", []) or []:
+                    if isinstance(t, dict) and t.get("videoId") == vid:
+                        credits_id = str(t.get("creditsBrowseId") or "")
+                        break
+        sections: list[dict] = []
+        if credits_id:
+            try:
+                raw = self.yt.get_song_credits(credits_id) or {}
+            except Exception:
+                return []
+            order = ("performed_by", "written_by", "produced_by")
+            for key in order:
+                block = raw.get(key)
+                if isinstance(block, dict) and block.get("data"):
+                    sections.append({
+                        "title": str(block.get("localized_title")
+                                     or key.replace("_", " ")),
+                        "names": [str(n) for n in block["data"]],
+                    })
+            for block in raw.get("other_sections") or []:
+                if isinstance(block, dict) and block.get("data"):
+                    sections.append({
+                        "title": str(block.get("localized_title") or ""),
+                        "names": [str(n) for n in block["data"]],
+                    })
+            meta = raw.get("music_metadata_provided_by")
+            if isinstance(meta, dict) and meta.get("data"):
+                sections.append({
+                    "title": str(meta.get("localized_title")
+                                 or "music metadata provided by"),
+                    "names": [str(n) for n in meta["data"]],
+                })
+        cache.put_json(_NS_CREDITS, vid, sections, _CREDITS_TTL)
+        return [CreditSection(title=s["title"], names=s["names"]) for s in sections]
+
+    # ---------- v1.5 browse (home engine feeds) ----------
+
+    def _album_entry_from_raw(self, a: dict) -> AlbumEntry | None:
+        bid = a.get("browseId") or ""
+        if not bid:
+            return None
+        return AlbumEntry(
+            browse_id=bid,
+            title=a.get("title", "") or "",
+            artists=_join_artists(a.get("artists")),
+            year=str(a.get("year") or ""),
+            thumbnail=_thumb(a.get("thumbnails")),
+            playlist_id=a.get("audioPlaylistId", "") or a.get("playlistId", "") or "",
+        )
+
+    @staticmethod
+    def _chart_entries(items: list, to_item) -> list:
+        """Wrap parsed chart rows in ChartEntry, tolerating rank garbage.
+        Unranked payloads (anonymous charts) get positional ranks so the
+        list still reads as a chart."""
+        from .base import ChartEntry
+        out = []
+        for i, raw in enumerate(items or []):
+            if not isinstance(raw, dict):
+                continue
+            item = to_item(raw)
+            if item is None:
+                continue
+            rank = safe_int(raw.get("rank"), 0) or (i + 1)
+            trend = str(raw.get("trend") or "").lower()
+            out.append(ChartEntry(rank=rank, trend=trend, item=item))
+        return out
+
+    def get_explore_data(self) -> dict:
+        """New releases + top songs + new videos + moods, one browse call.
+
+        Cached raw for 6h. ``top_songs`` only exists on premium sessions —
+        the home engine renders whatever keys come back and no block is
+        mandatory. Moods fall back to the dedicated categories browse when
+        the explore payload omits them (they're near-static, 24h cache).
+        """
+        from .base import MoodCategory
+        raw = cache.get_json(_NS_BROWSE, "explore")
+        if raw is None:
+            try:
+                raw = self.yt.get_explore() or {}
+            except Exception:
+                raw = {}
+            if raw:
+                cache.put_json(_NS_BROWSE, "explore", raw, _EXPLORE_TTL)
+        out: dict = {}
+        releases = []
+        for a in raw.get("new_releases") or []:
+            entry = self._album_entry_from_raw(a) if isinstance(a, dict) else None
+            if entry is not None:
+                releases.append(entry)
+        if releases:
+            out["new_releases"] = releases
+        top = raw.get("top_songs")
+        if isinstance(top, dict) and top.get("items"):
+            def _song_item(r: dict) -> ShelfItem | None:
+                tr = _to_track(r)
+                if tr is None:
+                    return None
+                return ShelfItem(kind="song", title=tr.title,
+                                 subtitle=tr.artists, thumbnail=tr.thumbnail,
+                                 track=tr)
+            entries = self._chart_entries(top["items"], _song_item)
+            if entries:
+                out["top_songs"] = entries
+        videos = []
+        for v in raw.get("new_videos") or []:
+            tr = _to_track(v) if isinstance(v, dict) else None
+            if tr is not None:
+                videos.append(tr)
+        if videos:
+            out["new_videos"] = videos
+        moods = raw.get("moods_and_genres")
+        sections: list = []
+        if moods:
+            cats = [MoodCategory(title=str(m.get("title") or ""),
+                                 params=str(m.get("params") or ""))
+                    for m in moods if isinstance(m, dict) and m.get("params")]
+            if cats:
+                sections = [("moods", cats)]
+        if not sections:
+            sections = self._mood_sections()
+        if sections:
+            out["moods"] = sections
+        return out
+
+    def _mood_sections(self) -> list:
+        from .base import MoodCategory
+        raw = cache.get_json(_NS_BROWSE, "moods")
+        if raw is None:
+            try:
+                raw = self.yt.get_mood_categories() or {}
+            except Exception:
+                return []
+            if raw:
+                cache.put_json(_NS_BROWSE, "moods", raw, _MOODS_TTL)
+        sections = []
+        for title, cats in raw.items():
+            if not isinstance(cats, list):
+                continue
+            parsed = [MoodCategory(title=str(c.get("title") or ""),
+                                   params=str(c.get("params") or ""))
+                      for c in cats if isinstance(c, dict) and c.get("params")]
+            if parsed:
+                sections.append((str(title), parsed))
+        return sections
+
+    def get_charts_data(self, country: str = "ZZ") -> dict:
+        """Ranked artists + chart playlists for one country. Anonymous
+        sessions get unranked artists (positional ranks stand in) and the
+        songs chart lives in explore — this bundle is the reliable part."""
+        key = f"charts.{country or 'ZZ'}"
+        raw = cache.get_json(_NS_BROWSE, key)
+        if raw is None:
+            try:
+                raw = self.yt.get_charts(country=country or "ZZ") or {}
+            except Exception:
+                raw = {}
+            if raw:
+                cache.put_json(_NS_BROWSE, key, raw, _CHARTS_TTL)
+        out: dict = {}
+        def _artist_item(r: dict) -> ShelfItem | None:
+            cid = r.get("browseId") or ""
+            if not cid:
+                return None
+            subs = str(r.get("subscribers") or "")
+            return ShelfItem(
+                kind="artist", title=r.get("title", "") or "",
+                subtitle=(f"{subs} subscribers" if subs else "artist"),
+                thumbnail=_thumb(r.get("thumbnails")),
+                artist=ArtistEntry(channel_id=cid,
+                                   name=r.get("title", "") or "",
+                                   thumbnail=_thumb(r.get("thumbnails")),
+                                   subscribers=subs),
+            )
+        artists = self._chart_entries(raw.get("artists"), _artist_item)
+        if artists:
+            out["artists"] = artists
+        playlists = []
+        for name in ("daily", "weekly", "videos", "genres", "trending"):
+            for p in raw.get(name) or []:
+                if not isinstance(p, dict) or not p.get("playlistId"):
+                    continue
+                playlists.append(PlaylistEntry(
+                    playlist_id=p["playlistId"],
+                    title=p.get("title", "") or "",
+                    thumbnail=_thumb(p.get("thumbnails")),
+                ))
+        if playlists:
+            out["playlists"] = playlists
+        selected = ((raw.get("countries") or {}).get("selected") or {})
+        label = selected.get("text") if isinstance(selected, dict) else str(selected or "")
+        if label:
+            out["selected"] = str(label)
+        return out
+
+    def get_mood_playlists_list(self, params: str) -> list[PlaylistEntry]:
+        if not params:
+            return []
+        key = f"mood.{params[:48]}"
+        raw = cache.get_json(_NS_BROWSE, key)
+        if raw is None:
+            try:
+                raw = self.yt.get_mood_playlists(params) or []
+            except Exception:
+                return []
+            cache.put_json(_NS_BROWSE, key, raw, _MOODS_TTL)
+        out = []
+        for p in raw:
+            if not isinstance(p, dict) or not p.get("playlistId"):
+                continue
+            out.append(PlaylistEntry(
+                playlist_id=p["playlistId"],
+                title=p.get("title", "") or "",
+                description=_join_artists(p.get("author")) or str(p.get("description") or ""),
+                thumbnail=_thumb(p.get("thumbnails")),
+            ))
+        return out
+
+    # ---------- v1.5 library parity ----------
+
+    _ORDERS = ("a_to_z", "z_to_a", "recently_added")
+
+    def get_library_songs_list(self, limit: int = 200,
+                               order: str | None = None) -> list[Track]:
+        kwargs: dict = {"limit": limit}
+        if order in self._ORDERS:
+            kwargs["order"] = order
+        items = self.yt.get_library_songs(**kwargs) or []
+        out: list[Track] = []
+        for item in items:
+            tr = _to_track(item)
+            if tr:
+                out.append(tr)
+        return out
+
+    def get_library_albums_list(self, limit: int = 100,
+                                order: str | None = None) -> list[AlbumEntry]:
+        kwargs: dict = {"limit": limit}
+        if order in self._ORDERS:
+            kwargs["order"] = order
+        items = self.yt.get_library_albums(**kwargs) or []
+        out: list[AlbumEntry] = []
+        for a in items:
+            entry = self._album_entry_from_raw(a) if isinstance(a, dict) else None
+            if entry is not None:
+                out.append(entry)
+        return out
+
+    def _artist_entries(self, items: list) -> list[ArtistEntry]:
+        out: list[ArtistEntry] = []
+        for r in items or []:
+            if not isinstance(r, dict):
+                continue
+            cid = r.get("browseId") or ""
+            if not cid:
+                continue
+            out.append(ArtistEntry(
+                channel_id=cid,
+                name=r.get("artist", "") or r.get("title", "") or "",
+                thumbnail=_thumb(r.get("thumbnails")),
+                subscribers=str(r.get("subscribers") or ""),
+            ))
+        return out
+
+    def get_library_artists_list(self, limit: int = 100,
+                                 order: str | None = None) -> list[ArtistEntry]:
+        kwargs: dict = {"limit": limit}
+        if order in self._ORDERS:
+            kwargs["order"] = order
+        return self._artist_entries(self.yt.get_library_artists(**kwargs))
+
+    def get_library_subscriptions_list(self, limit: int = 100) -> list[ArtistEntry]:
+        return self._artist_entries(
+            self.yt.get_library_subscriptions(limit=limit))
+
+    def create_playlist_remote(self, title: str, description: str = "",
+                               video_ids: list | None = None) -> str:
+        res = self.yt.create_playlist(title, description,
+                                      video_ids=list(video_ids or []) or None)
+        # Success is a bare playlist-id string; failure comes back as the
+        # raw response dict.
+        return res if isinstance(res, str) else ""
+
+    def add_to_playlist(self, playlist_id: str, video_ids: list) -> bool:
+        if not playlist_id or not video_ids:
+            return False
+        res = self.yt.add_playlist_items(playlist_id, videoIds=list(video_ids))
+        status = res.get("status") if isinstance(res, dict) else res
+        return "SUCCEEDED" in str(status)
+
+    def remove_from_playlist(self, playlist_id: str, tracks: list) -> bool:
+        """YT wants videoId + setVideoId per row; both ride in the raw
+        playlist item that get_playlist stashed into track.extras. Tracks
+        that arrived any other way can't be removed remotely — skip them."""
+        videos = []
+        for tr in tracks:
+            extras = getattr(tr, "extras", None) or {}
+            if extras.get("videoId") and extras.get("setVideoId"):
+                videos.append({"videoId": extras["videoId"],
+                               "setVideoId": extras["setVideoId"]})
+        if not playlist_id or not videos:
+            return False
+        res = self.yt.remove_playlist_items(playlist_id, videos)
+        return "SUCCEEDED" in str(res)
+
+    def edit_playlist_remote(self, playlist_id: str, *, title: str | None = None,
+                             description: str | None = None,
+                             privacy: str | None = None) -> bool:
+        if not playlist_id:
+            return False
+        kwargs: dict = {}
+        if title is not None:
+            kwargs["title"] = title
+        if description is not None:
+            kwargs["description"] = description
+        if privacy is not None:
+            kwargs["privacyStatus"] = privacy
+        if not kwargs:
+            return True
+        res = self.yt.edit_playlist(playlist_id, **kwargs)
+        return "SUCCEEDED" in str(res)
+
+    def delete_playlist_remote(self, playlist_id: str) -> bool:
+        if not playlist_id:
+            return False
+        res = self.yt.delete_playlist(playlist_id)
+        return "SUCCEEDED" in str(res) or isinstance(res, str)
+
+    def set_artist_subscribed(self, channel_id: str, subscribed: bool) -> bool:
+        if not channel_id:
+            return False
+        if subscribed:
+            self.yt.subscribe_artists([channel_id])
+        else:
+            self.yt.unsubscribe_artists([channel_id])
+        return True
+
+    def add_album_to_library(self, album) -> bool:
+        pid = getattr(album, "playlist_id", "") or ""
+        if not pid:
+            return False
+        res = self.yt.rate_playlist(pid, "LIKE")
+        return res is not None
+
+    def get_remote_history(self, limit: int = 200) -> list[Track]:
+        items = self.yt.get_history() or []
+        out: list[Track] = []
+        for item in items[:limit]:
+            tr = _to_track(item)
+            if tr is None:
+                continue
+            # get_history rows carry "played" (period label) + feedbackToken
+            # for removal — both stay in extras for the history view.
+            out.append(tr)
+        return out
+
+    def remove_remote_history(self, tracks: list) -> bool:
+        tokens = [t.extras.get("feedbackToken")
+                  for t in tracks
+                  if getattr(t, "extras", None) and t.extras.get("feedbackToken")]
+        if not tokens:
+            return False
+        self.yt.remove_history_items(tokens)
+        return True
+
+    def search_playlists(self, query: str, limit: int = 20) -> list[PlaylistEntry]:
+        if not query.strip():
+            return []
+        results = self.yt.search(query, filter="playlists", limit=limit) or []
+        out: list[PlaylistEntry] = []
+        for item in results:
+            pid = item.get("browseId") or item.get("playlistId") or ""
+            # Playlist browse ids arrive as "VL<id>" — the playlist endpoint
+            # wants the bare id.
+            if pid.startswith("VL"):
+                pid = pid[2:]
+            if not pid:
+                continue
+            out.append(PlaylistEntry(
+                playlist_id=pid,
+                title=item.get("title", "") or "",
+                description=str(item.get("author") or item.get("itemCount") or ""),
+                thumbnail=_thumb(item.get("thumbnails")),
+            ))
+        return out
+
+    def get_search_suggestions_list(self, query: str) -> list[str]:
+        if not query.strip():
+            return []
+        out = self.yt.get_search_suggestions(query) or []
+        return [s for s in out if isinstance(s, str)]
+
+    def get_taste_profile(self) -> list[str]:
+        raw = self.yt.get_tasteprofile() or {}
+        return sorted(k for k in raw.keys() if isinstance(k, str))
+
+    def set_taste_profile(self, artists: list) -> bool:
+        names = [str(a) for a in artists if a]
+        if not names:
+            return False
+        self.yt.set_tasteprofile(names)
+        return True
+
+    def get_comments(self, video_id: str, *, sort: str = "top",
+                     limit: int = 60) -> list[Comment]:
+        """Public comments via yt-dlp (ytmusicapi has no comments surface).
+
+        Deliberately ANONYMOUS — comments are public data, and this is a
+        yt-dlp extraction that must never be able to touch (or depend on)
+        the cookie jar. Slow by nature (one full extraction + N comment
+        pages, seconds); callers own the worker thread and the spinner.
+        Not cached here: the comments view session-caches per video, and a
+        sort flip should genuinely re-fetch.
+        """
+        if not video_id:
+            return []
+        sort_key = "new" if sort == "new" else "top"
+        # max_comments spec: max-comments,max-parents,max-replies,
+        # max-replies-per-thread. A small reply budget keeps threads
+        # skimmable without stretching the fetch.
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "getcomments": True,
+            "extractor_args": {"youtube": {
+                "max_comments": [str(limit + 40), str(limit), "40", "5"],
+                "comment_sort": [sort_key],
+            }},
+        }
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not isinstance(info, dict):
+            return []
+        # A full watch-page extraction rode along — bank its counts.
+        _harvest_ytdlp_info(video_id, info)
+        out: list[Comment] = []
+        for c in info.get("comments") or []:
+            if not isinstance(c, dict):
+                continue
+            text = str(c.get("text") or "").strip()
+            if not text:
+                continue
+            parent = str(c.get("parent") or "")
+            out.append(Comment(
+                comment_id=str(c.get("id") or ""),
+                author=str(c.get("author") or ""),
+                text=text,
+                likes=safe_int(c.get("like_count")),
+                time_text=_rel_time(c.get("timestamp")),
+                parent_id="" if parent == "root" else parent,
+                pinned=bool(c.get("is_pinned")),
+                hearted=bool(c.get("is_favorited")),
+                by_uploader=bool(c.get("author_is_uploader")),
+                author_thumbnail=str(c.get("author_thumbnail") or ""),
+            ))
+        return out
+
 
 # ---------- yt-dlp stream URL resolution ----------
 
@@ -842,13 +1511,43 @@ def _should_try_auth_pass(cookiefile: str) -> bool:
     return (time.monotonic() - failed_at) >= _AUTH_RETRY_SECS
 
 
-def _extract_stream_url(url: str, opts: dict) -> str | None:
+def _extract_stream_url(url: str, opts: dict) -> tuple[str | None, dict]:
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
+    if not isinstance(info, dict):
+        return None, {}
     stream_url = info.get("url")
     if not stream_url and "requested_formats" in info:
         stream_url = info["requested_formats"][0].get("url")
-    return stream_url
+    return stream_url, info
+
+
+def _harvest_ytdlp_info(video_id: str, info: dict) -> None:
+    """Bank the community numbers riding along on a yt-dlp extraction.
+
+    Every resolve already downloads view/like/comment counts and then used
+    to discard them — for the playing track, insights are free. Merged (not
+    overwritten) because ``get_song`` writes views/year into the same entry
+    and either side can land first.
+    """
+    partial: dict = {}
+    for src_key, dst_key in (("view_count", "views"),
+                             ("like_count", "likes"),
+                             ("comment_count", "comment_count")):
+        v = safe_int(info.get(src_key))
+        if v:
+            partial[dst_key] = v
+    channel = info.get("channel") or info.get("uploader") or ""
+    if channel:
+        partial["channel"] = str(channel)
+    upload_date = str(info.get("upload_date") or "")
+    if len(upload_date) >= 4 and upload_date[:4].isdigit():
+        partial["year"] = upload_date[:4]
+    if partial:
+        try:
+            cache.update_json(_NS_INSIGHTS, video_id, partial, _INSIGHTS_TTL)
+        except Exception:
+            pass
 
 
 def resolve_stream_url(video_id: str) -> str:
@@ -907,9 +1606,9 @@ def resolve_stream_url(video_id: str) -> str:
         try:
             if label == "auth":
                 with _AUTH_JAR_LOCK:
-                    stream_url = _extract_stream_url(url, pass_opts)
+                    stream_url, info = _extract_stream_url(url, pass_opts)
             else:
-                stream_url = _extract_stream_url(url, pass_opts)
+                stream_url, info = _extract_stream_url(url, pass_opts)
         except Exception as exc:
             if label == "auth" and _looks_like_dead_jar(exc):
                 try:
@@ -931,6 +1630,7 @@ def resolve_stream_url(video_id: str) -> str:
             continue
         perf.mark(f"resolve {video_id}: {label} pass ok "
                   f"({(time.monotonic() - t0) * 1000:.0f}ms)")
+        _harvest_ytdlp_info(video_id, info)
         cache.put_stream_url(SOURCE_SLUG, video_id, stream_url,
                              ttl_seconds=YTMusicSource.STREAM_TTL_SECONDS)
         return stream_url

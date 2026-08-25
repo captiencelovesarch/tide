@@ -98,6 +98,11 @@ def run_onboarding_if_needed(user_settings):
     if r.listenbrainz_enabled and r.listenbrainz_token:
         user_settings.listenbrainz_enabled = True
         user_settings.listenbrainz_token = r.listenbrainz_token
+    # Play reporting: only persisted when the step was actually answered —
+    # a cancelled wizard must not count as a privacy decision.
+    if getattr(r, "report_plays_answered", False):
+        user_settings.report_plays = bool(r.report_plays)
+        user_settings.report_plays_answered = True
     user_settings.first_launch_complete = True
     try:
         settings_module.save(user_settings)
@@ -458,6 +463,28 @@ def run(argv: list[str] | None = None) -> int:
     window._discord = discord
     window._lyric_tracker = lyric_tracker
     window._settings = user_settings
+
+    # v1.5 play reporting, upgrader path: the choice lives in the wizard,
+    # which existing users will never see again — so point at the setting
+    # exactly once. Shown after the window settles, stamped immediately
+    # (one mention, not a nag; the toggle keeps existing either way).
+    if (reg.is_enabled("ytmusic")
+            and not getattr(user_settings, "report_plays_answered", False)):
+        from PySide6.QtCore import QTimer as _QTimer
+
+        def _report_plays_pointer() -> None:
+            show_toast(
+                window.toast_host(),
+                "new setting: report plays to youtube music",
+                action_label="settings",
+                on_action=window.open_settings,
+            )
+        _QTimer.singleShot(2500, _report_plays_pointer)
+        user_settings.report_plays_answered = True
+        try:
+            settings_module.save(user_settings)
+        except Exception:
+            pass
     # Prefetch toggles are consulted at fire time (hover/press handlers were
     # wired before settings existed), so pushing the attr here is enough.
     window._prefetch.hover_enabled = bool(user_settings.prefetch_hover)

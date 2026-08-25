@@ -49,6 +49,7 @@ class Card(QWidget):
         payload,
         *,
         circular: bool = False,
+        thumb_px: int | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -57,6 +58,9 @@ class Card(QWidget):
         self._thumb_url = thumbnail_url
         self._payload = payload
         self._circular = circular
+        # v1.5 home patterns size cards per pattern (dense grids run small,
+        # mosaic features run big). None = the classic 144px shelf card.
+        self._thumb_base = thumb_px
         self._theme = theming.manager().current()
         self._refresh_scaled_sizes()
         theming.manager().theme_changed.connect(self._on_theme)
@@ -73,7 +77,8 @@ class Card(QWidget):
         from . import scale as _scale
         # Shadow the class-level base with scaled per-instance values.
         cls = type(self)
-        self.THUMB = _scale.px(cls.THUMB)
+        base = self._thumb_base if getattr(self, "_thumb_base", None) else cls.THUMB
+        self.THUMB = _scale.px(base)
         self.TEXT_HEIGHT = _scale.px(cls.TEXT_HEIGHT)
         self.MARGIN = _scale.px(cls.MARGIN)
 

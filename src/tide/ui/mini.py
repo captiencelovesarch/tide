@@ -1117,7 +1117,7 @@ class MiniPlayer(QWidget):
         glyph = "📍" if on else "📌"
         self.pin_btn.setLabel(glyph)
         self.pin_btn.setGlyph(glyph)
-        self.pin_btn.setToolTip("pinned on top — click to release" if on
+        self.pin_btn.setToolTip("pinned on top. click to release" if on
                                 else "keep on top of other windows")
         from PySide6.QtGui import QGuiApplication
         platform = QGuiApplication.platformName()
@@ -1182,7 +1182,7 @@ class MiniPlayer(QWidget):
         except Exception:
             if on:
                 from .toast import show_toast
-                show_toast(self, "pin needs kwin — use a window rule instead")
+                show_toast(self, "pin needs kwin. use a window rule instead")
         finally:
             if path is not None:
                 try:

@@ -74,8 +74,8 @@ class SubsonicSignInDialog(QDialog):
         seed = initial or SubsonicConfig()
 
         headline = QLabel(
-            "point tide at your subsonic-compatible server — navidrome, "
-            "airsonic, gonic, funkwhale, or the reference subsonic server. "
+            "point tide at your subsonic-compatible server (navidrome, "
+            "airsonic, gonic, funkwhale, or the reference server). "
             "tide streams audio straight from the server's url, no proxy."
         )
         headline.setWordWrap(True)

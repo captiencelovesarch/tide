@@ -90,6 +90,12 @@ class OnboardingResult:
     discord_app_id: str = ""
     listenbrainz_enabled: bool = False
     listenbrainz_token: str = ""
+    # v1.5 play reporting — a privacy decision, so the wizard step has no
+    # pre-checked answer and [next] holds until the user picks one.
+    # ``answered`` False means the user cancelled before reaching the step;
+    # app.py then leaves the settings defaults (off) untouched.
+    report_plays: bool = False
+    report_plays_answered: bool = False
 
 
 # ---------- progress dots ----------
@@ -317,7 +323,7 @@ class _AestheticStep(_Step):
         super().__init__(parent)
         self._choice: str = "brutalist"
 
-        prompt = QLabel("first — pick your vibe.")
+        prompt = QLabel("pick a look.")
         f = QFont(prompt.font())
         f.setBold(True)
         f.setPointSize(f.pointSize() + 6)
@@ -594,7 +600,7 @@ class _SourcesStep(_Step):
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("toggle any source — sources that need setup will ask. pick as many or as few as you like.")
+        sub = QLabel("turn on the sources you want. anything that needs setup will ask. zero is fine too.")
         sub.setProperty("class", "dim")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
@@ -807,7 +813,7 @@ class _FeelStep(_Step):
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("all of these are toggles in Settings later — this is just to bootstrap your vibe.")
+        sub = QLabel("all of this is in settings later. these are just starting values.")
         sub.setProperty("class", "dim")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
@@ -915,8 +921,8 @@ class _IntegrationsStep(_Step):
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("both are optional and live in Settings later — "
-                     "skip straight past if you just want music.")
+        sub = QLabel("both optional, both in settings later. "
+                     "skip if you just want music.")
         sub.setProperty("class", "dim")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
@@ -945,8 +951,8 @@ class _IntegrationsStep(_Step):
         discord_blurb = QLabel(
             "shows what you're listening to on your discord profile. takes "
             "~30 seconds: create an application at the developer portal and "
-            "paste its application id — discord shows whatever name/image "
-            "you give that app."
+            "paste its application id. discord shows the name and image you "
+            "give that app."
         )
         discord_blurb.setWordWrap(True)
         discord_blurb.setProperty("class", "dim")
@@ -1015,6 +1021,101 @@ class _IntegrationsStep(_Step):
         )
 
 
+class _PlayReportingStep(_Step):
+    """The v1.5 feedback-loop choice, asked as a real question.
+
+    Nothing is pre-selected on purpose: whether tide tells YouTube Music
+    what you play is a privacy call, and a default would make it for you.
+    [next] stays held until one of the two radios is picked.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._choice: bool | None = None
+
+        prompt = QLabel("report plays to youtube music?")
+        f = QFont(prompt.font())
+        f.setBold(True)
+        f.setPointSize(f.pointSize() + 4)
+        prompt.setFont(f)
+        prompt.setAlignment(Qt.AlignCenter)
+
+        sub = QLabel("this is a privacy setting, so nothing is pre-selected. "
+                     "tide works either way.")
+        sub.setProperty("class", "dim")
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setWordWrap(True)
+
+        how = QLabel(
+            "when a song starts, tide can send the same play event the "
+            "yt music web player sends. it goes to your own account and "
+            "nowhere else. your watch history and recommendations then "
+            "include what you play in tide."
+        )
+        how.setWordWrap(True)
+
+        privacy = QLabel(
+            "on: google sees what you play in tide. off: tide reports "
+            "nothing, and the only traffic is fetching the music. "
+            "recommendations stay however your browser left them."
+        )
+        privacy.setWordWrap(True)
+        privacy.setProperty("class", "dim")
+
+        self._yes = QRadioButton("yes, report my plays")
+        self._no = QRadioButton("no, keep my listening local")
+        group = QButtonGroup(self)
+        group.addButton(self._yes)
+        group.addButton(self._no)
+        self._yes.toggled.connect(lambda on: on and self._on_pick(True))
+        self._no.toggled.connect(lambda on: on and self._on_pick(False))
+
+        later = QLabel("change your mind anytime in settings → integrations.")
+        later.setProperty("class", "dim")
+        later.setWordWrap(True)
+
+        # Shown by on_enter when YT Music wasn't enabled in the sources step.
+        self._inactive_note = QLabel(
+            "(youtube music is off right now. this only matters if you "
+            "enable it later.)"
+        )
+        self._inactive_note.setProperty("class", "dim")
+        self._inactive_note.setWordWrap(True)
+        self._inactive_note.hide()
+
+        col = QVBoxLayout(self)
+        col.setSpacing(12)
+        col.addWidget(prompt)
+        col.addWidget(sub)
+        col.addSpacing(8)
+        col.addWidget(how)
+        col.addWidget(privacy)
+        col.addSpacing(10)
+        col.addWidget(self._yes)
+        col.addWidget(self._no)
+        col.addSpacing(6)
+        col.addWidget(later)
+        col.addWidget(self._inactive_note)
+        col.addStretch(1)
+
+    def _on_pick(self, yes: bool) -> None:
+        self._choice = yes
+        self.state_changed.emit()
+
+    def on_enter(self, result: OnboardingResult) -> None:
+        self._inactive_note.setVisible(
+            not result.sources_enabled.get("ytmusic", False))
+
+    def can_advance(self) -> bool:
+        return self._choice is not None
+
+    def apply_to(self, result: OnboardingResult) -> None:
+        if self._choice is None:
+            return
+        result.report_plays = self._choice
+        result.report_plays_answered = True
+
+
 class _AllSetStep(_Step):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1022,7 +1123,7 @@ class _AllSetStep(_Step):
         self._summary_label.setAlignment(Qt.AlignCenter)
         self._summary_label.setWordWrap(True)
 
-        title = QLabel("you're tide-ready.")
+        title = QLabel("all set.")
         f = QFont(title.font())
         f.setBold(True)
         f.setPointSize(f.pointSize() + 10)
@@ -1045,13 +1146,13 @@ class _AllSetStep(_Step):
 
     def on_enter(self, result: OnboardingResult) -> None:
         enabled = [k for k, v in result.sources_enabled.items() if v]
-        srcs = " · ".join(enabled) if enabled else "(no sources — add some in Settings)"
+        srcs = " · ".join(enabled) if enabled else "(no sources yet, add some in settings)"
         themes = theming.discover_themes()
         theme_name = themes[result.theme_slug].name if result.theme_slug in themes else result.theme_slug
         bits = [
-            f"theme — {theme_name} ({result.aesthetic})",
-            f"sources — {srcs}",
-            f"motion — {result.motion} · ui scale — {result.ui_scale}"
+            f"theme: {theme_name} ({result.aesthetic})",
+            f"sources: {srcs}",
+            f"motion: {result.motion} · ui scale: {result.ui_scale}"
             + (" · adaptive accent on" if result.adaptive_accent else ""),
         ]
         integrations = [name for name, on in (
@@ -1059,7 +1160,10 @@ class _AllSetStep(_Step):
             ("listenbrainz", result.listenbrainz_enabled),
         ) if on]
         if integrations:
-            bits.append("integrations — " + " · ".join(integrations))
+            bits.append("integrations: " + " · ".join(integrations))
+        if result.report_plays_answered:
+            bits.append("play reporting: on" if result.report_plays
+                        else "play reporting: off")
         self._summary_label.setText("\n".join(bits))
 
 
@@ -1085,6 +1189,7 @@ class OnboardingDialog(QDialog):
             _SourcesStep(self),
             _FeelStep(self),
             _IntegrationsStep(self),
+            _PlayReportingStep(self),
             _AllSetStep(self),
         ]
         # Wire state_changed to refresh the Next button enablement.

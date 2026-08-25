@@ -47,6 +47,24 @@ class _ArtistWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class _SubscribeWorker(QObject):
+    done = Signal(str, bool)        # channel_id, new state
+    failed = Signal(str, str)       # channel_id, msg
+
+    def __init__(self, api_obj: api.Api, channel_id: str, subscribe: bool) -> None:
+        super().__init__()
+        self.api = api_obj
+        self.channel_id = channel_id
+        self.subscribe = subscribe
+
+    def run(self) -> None:
+        try:
+            self.api.set_artist_subscribed(self.channel_id, self.subscribe)
+            self.done.emit(self.channel_id, self.subscribe)
+        except Exception as exc:
+            self.failed.emit(self.channel_id, str(exc))
+
+
 class ArtistView(QWidget):
     back_requested = Signal()
     play_now_requested = Signal(object, bool)
@@ -113,10 +131,21 @@ class ArtistView(QWidget):
         for _lbl in (self.heading, self.name_label, self.subs_label, self.description_label):
             _lbl.setTextFormat(Qt.PlainText)
 
+        # v1.5 — follow the artist on the source (library subscription).
+        # Shown only when the source supports it; the label carries state.
+        self.subscribe_btn = BracketButton("subscribe")
+        self.subscribe_btn.clicked.connect(self._on_subscribe_clicked)
+        self.subscribe_btn.hide()
+        sub_row = QHBoxLayout()
+        sub_row.setSpacing(2)
+        sub_row.addWidget(self.subscribe_btn)
+        sub_row.addStretch(1)
+
         meta = QVBoxLayout()
         meta.setSpacing(4)
         meta.addWidget(self.name_label)
         meta.addWidget(self.subs_label)
+        meta.addLayout(sub_row)
         meta.addSpacing(6)
         meta.addWidget(self.description_label)
         meta.addStretch(1)
@@ -181,6 +210,49 @@ class ArtistView(QWidget):
         root.addLayout(top_bar)
         root.addWidget(scroll, stretch=1)
 
+    # ---------- subscribe (v1.5) ----------
+
+    def _refresh_subscribe_button(self) -> None:
+        self.subscribe_btn.setLabel(
+            "subscribed ✓" if getattr(self, "_subscribed", False) else "subscribe")
+        self.subscribe_btn.setActiveState(getattr(self, "_subscribed", False))
+
+    def _on_subscribe_clicked(self) -> None:
+        cid = self._current_cid
+        if not cid:
+            return
+        target = not getattr(self, "_subscribed", False)
+        # Optimistic flip; failure reverts.
+        self._subscribed = target
+        self._refresh_subscribe_button()
+        self.subscribe_btn.setEnabled(False)
+        thread = QThread()
+        worker = _SubscribeWorker(self.api, cid, target)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_subscribe_done)
+        worker.failed.connect(self._on_subscribe_failed)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._sub_thread = thread
+        self._sub_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_subscribe_done(self, channel_id: str, subscribed: bool) -> None:
+        if channel_id == self._current_cid:
+            self.subscribe_btn.setEnabled(True)
+            self.status_message.emit(theming.styled_case(
+                "subscribed" if subscribed else "unsubscribed"))
+
+    def _on_subscribe_failed(self, channel_id: str, msg: str) -> None:
+        if channel_id == self._current_cid:
+            self._subscribed = not self._subscribed
+            self._refresh_subscribe_button()
+            self.subscribe_btn.setEnabled(True)
+        self.status_message.emit(f"couldn't update subscription: {msg}")
+
     # ---------- loading ----------
 
     def open_artist(self, channel_id: str, *, name_hint: str = "", thumbnail_hint: str = "") -> None:
@@ -191,6 +263,7 @@ class ArtistView(QWidget):
         self._art_for_cid = channel_id
         self.heading.setText(_line_heading("artist · loading…"))
         self.name_label.setText(theming.styled_case(name_hint or "loading…"))
+        self.subscribe_btn.hide()
         self.subs_label.setText("")
         self.description_label.setText("")
         self.songs.clear()
@@ -234,6 +307,15 @@ class ArtistView(QWidget):
         self.subs_label.setText(theming.styled_case("  ·  ".join(meta_parts)))
         self.description_label.setText(theming.styled_case(detail.description or ""))
         self.description_label.setVisible(bool(detail.description))
+
+        # Subscribe button: only for sources that can, and only once the
+        # detail told us the current state.
+        can_sub = bool(hasattr(self.api, "supports")
+                       and self.api.supports("subscribe")
+                       and detail.subscribed is not None)
+        self._subscribed = bool(detail.subscribed)
+        self._refresh_subscribe_button()
+        self.subscribe_btn.setVisible(can_sub)
 
         if detail.thumbnail:
             self._fetch_avatar(detail.channel_id, detail.thumbnail)

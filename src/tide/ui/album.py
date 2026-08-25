@@ -146,10 +146,16 @@ class AlbumView(QWidget):
         self.shuffle_btn = BracketButton("shuffle")
         self.play_all_btn.clicked.connect(self._on_play_all)
         self.shuffle_btn.clicked.connect(self._on_shuffle)
+        # v1.5 — save the album into the source's library. Shown when the
+        # source can and the album has an audio playlist id to save.
+        self.add_library_btn = BracketButton("+ library")
+        self.add_library_btn.clicked.connect(self._on_add_to_library)
+        self.add_library_btn.hide()
 
         actions_row = QHBoxLayout()
         actions_row.addWidget(self.play_all_btn)
         actions_row.addWidget(self.shuffle_btn)
+        actions_row.addWidget(self.add_library_btn)
         actions_row.addStretch(1)
 
         # ---- track list ----
@@ -180,6 +186,7 @@ class AlbumView(QWidget):
         self._current = None
         self._current_browse_id = browse_id
         self._art_for_browse_id = browse_id
+        self.add_library_btn.hide()
         self.heading.setText(_line_heading(f"album · loading…"))
         self.title_label.setText(theming.styled_case(title_hint or "loading…"))
         self.artist_label.setText("")
@@ -230,11 +237,54 @@ class AlbumView(QWidget):
             item = QListWidgetItem(theming.styled_case(f"{tr.artists or ''} — {tr.title or ''}"))
             item.setData(Qt.UserRole, tr)
             self.tracks.addItem(item)
+        self.add_library_btn.setLabel("+ library")
+        self.add_library_btn.setEnabled(True)
+        self.add_library_btn.setVisible(bool(
+            hasattr(self.api, "supports")
+            and self.api.supports("playlist_edit")
+            and detail.playlist_id))
         self.status_message.emit(theming.styled_case(f"{detail.title} · {len(detail.tracks)} tracks"))
 
     def _on_failed(self, msg: str) -> None:
         self.heading.setText(_line_heading("album load failed"))
         self.status_message.emit(f"album: {msg}")
+
+    # ---------- add to library (v1.5) ----------
+
+    def _on_add_to_library(self) -> None:
+        detail = self._current
+        if detail is None or not detail.playlist_id:
+            return
+        self.add_library_btn.setEnabled(False)
+
+        class _W(QObject):
+            done = Signal(bool)
+
+            def run(self_inner) -> None:
+                try:
+                    self_inner.done.emit(bool(self.api.add_album_to_library(detail)))
+                except Exception:
+                    self_inner.done.emit(False)
+
+        thread = QThread()
+        worker = _W()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_added_to_library)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._addlib_thread = thread
+        self._addlib_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_added_to_library(self, ok: bool) -> None:
+        self.add_library_btn.setEnabled(not ok)
+        if ok:
+            self.add_library_btn.setLabel("in library ✓")
+            self.status_message.emit(theming.styled_case("album saved to library"))
+        else:
+            self.status_message.emit(theming.styled_case("couldn't save album"))
 
     # ---------- cover art ----------
 

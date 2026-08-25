@@ -1,13 +1,19 @@
-"""Cache for stream URLs and album art.
+"""Cache for stream URLs, album art, and JSON payloads.
 
 Stream URLs are TTL'd because most CDN URLs expire (~6h for YouTube; longer
 for some, effectively infinite for Bandcamp). v1.2 splits the cache so each
 source gets its own file with its own retention policy. Album art is
 mtime-pruned in one shared directory.
 
+v1.5 adds a generic JSON payload cache for browse-shaped data (song
+insights, charts, moods, related shelves, …) so community surfaces don't
+re-hit the network on every navigation. Same shape as the stream cache but
+namespaced by caller instead of by source.
+
 Storage layout::
 
     ~/.cache/tide/streams/<source_slug>.json   {video_id: {url, expires_at}}
+    ~/.cache/tide/data/<namespace>.json        {key: {payload, expires_at}}
 
 Each source picks its own TTL when calling ``put_stream_url(source, ...)``.
 """
@@ -15,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -192,6 +199,148 @@ def _enforce_byte_cap(source: str) -> None:
         _save_disk(source, mem)
     except Exception:
         pass
+
+
+# ---------- generic JSON payload cache (v1.5) ----------
+
+# Browse-shaped data: song insights, charts, moods, related shelves, credits.
+# Payloads are whatever json.dump accepts. Unlike stream URLs these carry no
+# credentials, but the files stay 0600 anyway — insights and history-adjacent
+# payloads describe what the user listens to, which is nobody else's business.
+
+DATA_MAX_ENTRIES = 400          # per namespace
+
+# One lock for all namespaces: workers from several views can write at once
+# (insight fetch + related fetch + a home refresh), and unlike the stream
+# cache's "worst case one doomed extra pass", a torn read-modify-write here
+# would silently drop another writer's payload.
+_DATA_LOCK = threading.Lock()
+
+# namespace → {key: (payload, expires_at)}
+_data_mem: dict[str, dict[str, tuple[object, float]]] = {}
+
+
+def _data_dir() -> Path:
+    p = config.CACHE_DIR / "data"
+    p.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(p, 0o700)
+    except OSError:
+        pass
+    return p
+
+
+def _data_file(namespace: str) -> Path:
+    safe = "".join(c for c in namespace if c.isalnum() or c in "._-") or "default"
+    return _data_dir() / f"{safe}.json"
+
+
+def _data_load(namespace: str) -> dict[str, tuple[object, float]]:
+    if namespace in _data_mem:
+        return _data_mem[namespace]
+    out: dict[str, tuple[object, float]] = {}
+    path = _data_file(namespace)
+    if path.is_file():
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            out = {k: (v["payload"], float(v["expires_at"])) for k, v in raw.items()}
+        except Exception:
+            out = {}
+    _data_mem[namespace] = out
+    _data_prune(out)
+    return out
+
+
+def _data_prune(mem: dict[str, tuple[object, float]]) -> None:
+    now = time.time()
+    for k in [k for k, (_, exp) in mem.items() if exp <= now]:
+        mem.pop(k, None)
+    if len(mem) <= DATA_MAX_ENTRIES:
+        return
+    by_age = sorted(mem.items(), key=lambda kv: kv[1][1])
+    keep = dict(by_age[-DATA_MAX_ENTRIES:])
+    mem.clear()
+    mem.update(keep)
+
+
+def _data_save(namespace: str, mem: dict[str, tuple[object, float]]) -> None:
+    path = _data_file(namespace)
+    serializable = {k: {"payload": p, "expires_at": exp}
+                    for k, (p, exp) in mem.items()
+                    if exp != NEVER_EXPIRES}     # inf isn't valid JSON
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(serializable, f)
+    tmp.replace(path)
+
+
+def get_json(namespace: str, key: str):
+    """Return the cached payload for ``key`` in ``namespace``, or None if
+    absent/expired. Payload is whatever ``put_json`` stored (post-JSON, so
+    tuples come back as lists)."""
+    with _DATA_LOCK:
+        mem = _data_load(namespace)
+        hit = mem.get(key)
+        if not hit:
+            return None
+        payload, exp = hit
+        if exp <= time.time():
+            mem.pop(key, None)
+            return None
+        return payload
+
+
+def put_json(namespace: str, key: str, payload, ttl_seconds: float) -> None:
+    """Persist ``payload`` under ``namespace``/``key`` for ``ttl_seconds``."""
+    with _DATA_LOCK:
+        mem = _data_load(namespace)
+        mem[key] = (payload, time.time() + ttl_seconds)
+        _data_prune(mem)
+        try:
+            _data_save(namespace, mem)
+        except Exception:
+            pass
+
+
+def update_json(namespace: str, key: str, partial: dict, ttl_seconds: float):
+    """Merge ``partial``'s non-empty values into the cached dict for ``key``
+    (creating it if absent) and refresh the TTL. Returns the merged dict.
+
+    Exists for split writers: song insights arrive from two directions —
+    the yt-dlp resolver knows likes, ``get_song`` knows views — and either
+    may land first. Plain ``put_json`` from both would drop whichever half
+    arrived earlier. Zero/empty values never overwrite a known value.
+    """
+    with _DATA_LOCK:
+        mem = _data_load(namespace)
+        hit = mem.get(key)
+        base: dict = {}
+        if hit and hit[1] > time.time() and isinstance(hit[0], dict):
+            base = dict(hit[0])
+        for k, v in partial.items():
+            if v or k not in base:
+                base[k] = v
+        mem[key] = (base, time.time() + ttl_seconds)
+        _data_prune(mem)
+        try:
+            _data_save(namespace, mem)
+        except Exception:
+            pass
+        return base
+
+
+def clear_namespace(namespace: str) -> None:
+    """Drop a whole namespace, memory and disk. Sign-out calls this for
+    account-derived namespaces (home, library) so one user's shelves don't
+    greet the next sign-in."""
+    with _DATA_LOCK:
+        _data_mem.pop(namespace, None)
+        try:
+            _data_file(namespace).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 # ---------- art cache prune ----------

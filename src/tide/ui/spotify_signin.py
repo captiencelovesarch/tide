@@ -49,8 +49,8 @@ def confirm_spotify_enable(parent: QWidget | None = None) -> bool:
         "closed librespot's audio-decryption path. every track plays as "
         "silence, regardless of how you authenticate. there is no "
         "client-side workaround. spotify will need to reopen the audio "
-        "key endpoint OR librespot upstream will need a fix that "
-        "satisfies the new policy — neither is on a known timeline.\n\n"
+        "key endpoint, or librespot upstream will need a fix that "
+        "satisfies the new policy. neither is on a known timeline.\n\n"
         "what still works:\n"
         "  · search (capped at 10 results per query, dev-mode cap)\n"
         "  · browsing your library + playlists\n"
@@ -111,7 +111,7 @@ class SpotifySignInDialog(QDialog):
         )
         self._headline.setWordWrap(True)
 
-        self._step1 = QLabel("1.  click connect — tide opens spotify's sign-in page.")
+        self._step1 = QLabel("1.  click connect. tide opens spotify's sign-in page.")
         self._connect_btn = QPushButton("connect")
         self._connect_btn.clicked.connect(self._on_connect)
 
@@ -122,8 +122,8 @@ class SpotifySignInDialog(QDialog):
         self._step3.setWordWrap(True)
 
         self._client_id_label = QLabel(
-            "no shipped spotify app yet — paste a dev-app client_id below. "
-            "see README · spotify for the 90-second setup."
+            "no shipped spotify app yet. paste a dev-app client_id below, "
+            "see the README spotify section for setup."
         )
         self._client_id_label.setWordWrap(True)
         self._client_id_label.setStyleSheet("color: palette(mid);")

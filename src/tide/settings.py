@@ -171,6 +171,20 @@ class Settings:
     # how many top search results to warm in the background (0 = off).
     prefetch_hover: bool = True
     prefetch_warm_results: int = 3
+    # v1.5 — report plays back to the active source's own history (YouTube
+    # Music: the same videostats ping the web player sends), so the
+    # account's recommendations learn from what plays in tide. Privacy
+    # decision, so it is CHOSEN in the onboarding wizard, not defaulted on;
+    # upgraders who never see the wizard stay off until they opt in via
+    # Settings → integrations.
+    report_plays: bool = False
+    # Stamped True once the wizard's play-reporting step (or the settings
+    # toggle) has been answered — so upgraders get a one-time settings
+    # pointer instead of silently never learning the feature exists.
+    report_plays_answered: bool = False
+    # v1.5 home engine. "patterns" = the block/pattern home (hero, grids,
+    # mosaics, charts, moods); "shelves" = the v1.4 plain shelf rows.
+    home_layout: str = "patterns"
 
 
 def _to_toml(s: Settings) -> str:

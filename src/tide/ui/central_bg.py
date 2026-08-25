@@ -56,6 +56,11 @@ def corner_radius(style: str) -> int:
 
 # Animation tuning. The drift oscillators use mutually-prime-ish periods so
 # the composite motion never obviously loops.
+# How long the backdrop takes to cross from one album's palette to the
+# next. Long enough to read as a scene change, short enough that the new
+# song owns the room before its first chorus.
+_TONE_FADE_MS = 1400.0
+
 _ANIM_INTERVAL_MS = 42          # ~24 fps — a slow drift + bass swell needs no more,
                                 # and the content now composites over it each frame
 _PERIOD_FLOW_S = 43.0
@@ -107,6 +112,17 @@ def _hls_saturation(c: QColor) -> float:
     return colorsys.rgb_to_hls(c.redF(), c.greenF(), c.blueF())[2]
 
 
+def _lerp_color(a: QColor, b: QColor, t: float) -> QColor:
+    """Plain RGB lerp. The tones being blended are all dark, low-chroma
+    neighbors, so RGB is fine — no hue-wheel shortcuts needed."""
+    t = max(0.0, min(1.0, t))
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * t),
+        round(a.green() + (b.green() - a.green()) * t),
+        round(a.blue() + (b.blue() - a.blue()) * t),
+    )
+
+
 class CentralBg(QWidget):
     """Wraps the main app surface. When enabled, paints a slowly morphing
     album-palette field that also swells on bass.
@@ -144,6 +160,18 @@ class CentralBg(QWidget):
         self._tone_a = QColor("#141414")
         self._tone_b = QColor("#141414")
         self._tone_c = QColor("#141414")
+        # Tone crossfade: _tone_a/b/c are what the painters read (the
+        # displayed colors); on a palette change they lerp toward the
+        # targets below over _TONE_FADE_MS instead of snapping. blend == 1
+        # means settled. bg itself always snaps — it only moves on a real
+        # theme switch, and the QSS restyle around it snaps anyway.
+        self._tone_ta = QColor(self._tone_a)
+        self._tone_tb = QColor(self._tone_b)
+        self._tone_tc = QColor(self._tone_c)
+        self._tone_fa = QColor(self._tone_a)
+        self._tone_fb = QColor(self._tone_b)
+        self._tone_fc = QColor(self._tone_c)
+        self._tone_blend: float = 1.0
         self._pulse: float = 0.0            # target from the audio feed
         self._pulse_shown: float = 0.0      # smoothed value actually painted
         self._last_tick: float = 0.0        # when _tick last painted
@@ -196,6 +224,8 @@ class CentralBg(QWidget):
         if new_motion == self._motion:
             return
         self._motion = new_motion
+        if new_motion == "off":
+            self._snap_tones()
         self._sync_timer()
         self.update()
 
@@ -227,7 +257,10 @@ class CentralBg(QWidget):
     def _sync_timer(self) -> None:
         # Run only when there's something to animate and we're on screen.
         active = self._enabled and self.isVisible() and (
-            self._motion != "off" or self._pulse > 0.001 or self._pulse_shown > 0.001
+            self._motion != "off"
+            or self._pulse > 0.001
+            or self._pulse_shown > 0.001
+            or self._tone_blend < 1.0
         )
         if active and not self._anim.isActive():
             self._anim.start()
@@ -246,12 +279,27 @@ class CentralBg(QWidget):
             changed = True
         else:
             self._pulse_shown = self._pulse
+        if self._tone_blend < 1.0:
+            self._tone_blend = min(
+                1.0, self._tone_blend + _ANIM_INTERVAL_MS / _TONE_FADE_MS)
+            # Smoothstep: gentle in, gentle out.
+            t = self._tone_blend * self._tone_blend * (3.0 - 2.0 * self._tone_blend)
+            self._tone_a = _lerp_color(self._tone_fa, self._tone_ta, t)
+            self._tone_b = _lerp_color(self._tone_fb, self._tone_tb, t)
+            self._tone_c = _lerp_color(self._tone_fc, self._tone_tc, t)
+            changed = True
         if changed:
             self._last_tick = time.monotonic()
             self.update()
         else:
             # Nothing moving (motion off + steady/zero pulse) — idle the timer.
             self._sync_timer()
+
+    def _snap_tones(self) -> None:
+        self._tone_a = QColor(self._tone_ta)
+        self._tone_b = QColor(self._tone_tb)
+        self._tone_c = QColor(self._tone_tc)
+        self._tone_blend = 1.0
 
     # ---------- theme tracking ----------
 
@@ -290,13 +338,33 @@ class CentralBg(QWidget):
         # gradient reads against black); for a light theme, a step darker.
         # Content stays legible because these are still well away from fg.
         if self._bg.lightnessF() > 0.5:
-            self._tone_a = _bg_tone(body, 0.78, 0.22)
-            self._tone_b = _bg_tone(accent, 0.70, 0.28)
-            self._tone_c = _bg_tone(accent_alt, 0.62, 0.32)
+            new_a = _bg_tone(body, 0.78, 0.22)
+            new_b = _bg_tone(accent, 0.70, 0.28)
+            new_c = _bg_tone(accent_alt, 0.62, 0.32)
         else:
-            self._tone_a = _bg_tone(body, 0.22, 0.34)
-            self._tone_b = _bg_tone(accent, 0.29, 0.38)
-            self._tone_c = _bg_tone(accent_alt, 0.34, 0.42)
+            new_a = _bg_tone(body, 0.22, 0.34)
+            new_b = _bg_tone(accent, 0.29, 0.38)
+            new_c = _bg_tone(accent_alt, 0.34, 0.42)
+
+        # Same targets as the fade already in flight (theme_changed re-fires
+        # for scale changes and override re-emits): leave the blend alone.
+        if (new_a.rgb() == self._tone_ta.rgb()
+                and new_b.rgb() == self._tone_tb.rgb()
+                and new_c.rgb() == self._tone_tc.rgb()):
+            self.update()
+            return
+        self._tone_ta, self._tone_tb, self._tone_tc = new_a, new_b, new_c
+        if self._motion == "off" or not self._enabled or not self.isVisible():
+            # No animation budget (or nobody watching): keep the old snap.
+            self._snap_tones()
+        else:
+            # Crossfade from whatever is on screen right now — mid-fade
+            # palette changes re-anchor, so fast skips chain smoothly.
+            self._tone_fa = QColor(self._tone_a)
+            self._tone_fb = QColor(self._tone_b)
+            self._tone_fc = QColor(self._tone_c)
+            self._tone_blend = 0.0
+            self._sync_timer()
         self.update()
 
     # ---------- paint ----------

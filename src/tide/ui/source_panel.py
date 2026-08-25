@@ -206,7 +206,7 @@ class _GenericSourceDialog(QDialog):
             signin_btn.clicked.connect(self._on_signin)
             col.addWidget(signin_btn)
         elif not source.needs_auth:
-            note = QLabel(styled_case("public catalog — nothing to configure"))
+            note = QLabel(styled_case("public catalog, nothing to configure"))
             note.setObjectName("sourceStatus")
             col.addWidget(note)
 

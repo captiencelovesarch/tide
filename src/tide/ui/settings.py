@@ -231,6 +231,13 @@ class SettingsDialog(QDialog):
         self.loading_picker.addItem("dots · ●●●●●○○○○○", "dots")
         self.loading_picker.addItem("ascii · [#####-----]", "ascii")
 
+        # v1.5 home layout — the pattern engine vs. the classic shelf rows.
+        self.home_layout_picker = QComboBox()
+        self.home_layout_picker.addItem(
+            "patterns · hero, grids, mosaics, charts, moods", "patterns")
+        self.home_layout_picker.addItem(
+            "plain shelves · the classic rows", "shelves")
+
         # Motion intensity — gates every animation in the app via the motion
         # module. "lite" is the recommended default (signature + everyday
         # animations only); "full" enables atmospheric tier when it ships.
@@ -317,6 +324,7 @@ class SettingsDialog(QDialog):
         appearance_form.addRow("  size:", self.font_size_spin)
         appearance_form.addRow("text case:", self.case_picker)
         appearance_form.addRow("loading bar:", self.loading_picker)
+        appearance_form.addRow("home layout:", self.home_layout_picker)
         appearance_form.addRow("motion:", self.motion_picker)
         appearance_form.addRow("", self.ui_sounds_toggle)
         appearance_form.addRow("ui scale:", self.scale_picker)
@@ -334,7 +342,7 @@ class SettingsDialog(QDialog):
         mini_form.addRow("", self.mini_vis_toggle)
 
         mini_blurb = QLabel(
-            "the dedicated frameless window — open it by clicking the "
+            "the small frameless window. open it by clicking the "
             "now-playing art or ctrl+m. everything here is also on the "
             "mini's own right-click menu."
         )
@@ -352,9 +360,9 @@ class SettingsDialog(QDialog):
         self.prefetch_warm_picker.addItem("top 5", 5)
 
         prefetch_explainer = QLabel(
-            "gets stream urls ready before you click so playback starts "
-            "instantly. hover pre-resolves the row under the mouse; warm "
-            "results quietly resolves the top few search hits as they land."
+            "resolves stream urls before you click so playback starts "
+            "faster. hover resolves the row under the mouse. warm results "
+            "resolves the top few search hits in the background."
         )
         prefetch_explainer.setWordWrap(True)
         prefetch_explainer.setProperty("class", "dim")
@@ -399,8 +407,8 @@ class SettingsDialog(QDialog):
 
         discord_lyrics_explainer = QLabel(
             "when the playing track has synced lyrics, the current line "
-            "replaces artist · album on your profile — visible to everyone, "
-            "and song lyrics can be explicit. off by default."
+            "replaces artist · album on your profile. everyone can see it, "
+            "and lyrics can be explicit. off by default."
         )
         discord_lyrics_explainer.setWordWrap(True)
         discord_lyrics_explainer.setProperty("class", "dim")
@@ -428,7 +436,7 @@ class SettingsDialog(QDialog):
 
         discord_tpl_explainer = QLabel(
             "the two lines take {title} {artists} {album} {source} "
-            "placeholders — leave empty for the defaults. the live lyric "
+            "placeholders. leave empty for the defaults. the live lyric "
             "(above) still takes over the second line while one is playing."
         )
         discord_tpl_explainer.setWordWrap(True)
@@ -489,6 +497,40 @@ class SettingsDialog(QDialog):
         lb_col.addWidget(self.lb_toggle)
         lb_col.addLayout(lb_token_row)
         lb_col.addWidget(lb_explainer)
+
+        # ---- play reporting (v1.5) ----
+        report_heading = QLabel("── play reporting ────────────")
+        report_heading.setProperty("class", "dim")
+
+        self.report_plays_toggle = QCheckBox(
+            "report plays to youtube music")
+        report_explainer = QLabel(
+            "on: when a song starts, tide sends the same play event the "
+            "yt music web player sends. it goes to your own account and "
+            "nowhere else, and your history and recommendations pick up "
+            "what you play in tide. off: tide reports nothing, and the "
+            "only traffic is fetching the music."
+        )
+        report_explainer.setWordWrap(True)
+        report_explainer.setProperty("class", "dim")
+
+        self.taste_btn = QPushButton("tune recommendations  →")
+        self.taste_btn.setFlat(True)
+        self.taste_btn.clicked.connect(self._on_open_taste)
+        taste_blurb = QLabel(
+            "pick the artists youtube music should treat as your taste. "
+            "this steers home shelves and radio."
+        )
+        taste_blurb.setWordWrap(True)
+        taste_blurb.setProperty("class", "dim")
+
+        report_col = QVBoxLayout()
+        report_col.setSpacing(6)
+        report_col.addWidget(self.report_plays_toggle)
+        report_col.addWidget(report_explainer)
+        report_col.addSpacing(8)
+        report_col.addWidget(self.taste_btn, alignment=Qt.AlignLeft)
+        report_col.addWidget(taste_blurb)
 
         # ---- audio fx ----
         audio_fx_heading = QLabel("── audio fx ──────────────────")
@@ -601,7 +643,8 @@ class SettingsDialog(QDialog):
         tabs.addTab(_page(mini_blurb, mini_form), "mini player")
         tabs.addTab(_page(playback_col, audio_fx_heading, audio_fx_col),
                     "playback")
-        tabs.addTab(_page(discord_heading, discord_col, lb_heading, lb_col),
+        tabs.addTab(_page(discord_heading, discord_col, lb_heading, lb_col,
+                          report_heading, report_col),
                     "integrations")
         tabs.addTab(_page(advanced_heading, adv_col, about_heading, about_col),
                     "advanced")
@@ -664,6 +707,10 @@ class SettingsDialog(QDialog):
         if loading_idx >= 0:
             self.loading_picker.setCurrentIndex(loading_idx)
 
+        home_idx = self.home_layout_picker.findData(
+            getattr(self._settings, "home_layout", "patterns") or "patterns")
+        if home_idx >= 0:
+            self.home_layout_picker.setCurrentIndex(home_idx)
         motion_idx = self.motion_picker.findData(self._settings.motion or "lite")
         if motion_idx >= 0:
             self.motion_picker.setCurrentIndex(motion_idx)
@@ -751,6 +798,9 @@ class SettingsDialog(QDialog):
         self.lb_token.setText(self._settings.listenbrainz_token)
         self.lb_token.setEnabled(self._settings.listenbrainz_enabled)
 
+        self.report_plays_toggle.setChecked(
+            getattr(self._settings, "report_plays", False))
+
     # ---------- handlers ----------
 
     def _on_theme_changed(self, _idx: int) -> None:
@@ -832,12 +882,22 @@ class SettingsDialog(QDialog):
         self._settings.audio_device = self.audio_device_picker.currentData() or ""
         self._settings.listenbrainz_enabled = self.lb_toggle.isChecked()
         self._settings.listenbrainz_token = self.lb_token.text().strip()
+        # Flipping the toggle (or having it on at all) counts as answering
+        # the play-reporting question — the one-time upgrade pointer stops.
+        # Saving with it untouched-and-off doesn't: we can't know the user
+        # ever looked at this tab.
+        report_on = self.report_plays_toggle.isChecked()
+        if report_on or self._settings.report_plays != report_on:
+            self._settings.report_plays_answered = True
+        self._settings.report_plays = report_on
         self._settings.layout = self.layout_picker.currentData() or "classic"
         self._settings.layout_overrides = self._gather_overrides()
         self._settings.adaptive_accent = self.adaptive_toggle.isChecked()
         self._settings.loading_indicator_style = (
             self.loading_picker.currentData() or "blocks"
         )
+        self._settings.home_layout = (
+            self.home_layout_picker.currentData() or "patterns")
         self._settings.motion = self.motion_picker.currentData() or "lite"
         self._settings.ui_scale = self.scale_picker.currentData() or "normal"
         self._settings.preserve_pitch = self.preserve_pitch_toggle.isChecked()
@@ -931,6 +991,19 @@ class SettingsDialog(QDialog):
             "signed out. re-import from settings → sources whenever you like.",
         )
 
+    def _on_open_taste(self) -> None:
+        """v1.5 taste-profile editor. Talks to the live YT source from the
+        registry; the button just reports when there isn't one."""
+        from ..sources import registry
+        src = registry().get("ytmusic")
+        if src is None or not src.supports("taste"):
+            QMessageBox.information(
+                self, "tune recommendations",
+                "youtube music isn't signed in, so there's nothing to tune.")
+            return
+        dlg = _TasteProfileDialog(src, self)
+        dlg.exec()
+
     def _on_open_audio_fx(self) -> None:
         """Close this dialog + jump to the full audio FX panel. Settings
         dialog is modal so we save first; the FX panel mutates state
@@ -949,3 +1022,137 @@ class SettingsDialog(QDialog):
 
     def updated_settings(self) -> settings_module.Settings:
         return self._settings
+
+
+class _TasteProfileDialog(QDialog):
+    """Pick the artists the source's recommender should treat as taste.
+
+    Write-only by API design: YT hands back the tunable artist list but
+    not the current selection, so this is "select and apply", not an
+    editor of existing state — the blurb says so instead of pretending.
+    """
+
+    def __init__(self, source, parent=None) -> None:
+        super().__init__(parent)
+        from PySide6.QtCore import QObject, QThread, Signal as _Signal
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem
+        from .. import qthreads
+        self.setWindowTitle("tune recommendations")
+        self.setModal(True)
+        self.resize(420, 520)
+        self._source = source
+
+        blurb = QLabel(
+            "check the artists you actually listen to and hit apply. "
+            "youtube music rebuilds its recommendations from the "
+            "selection. the api doesn't report what's currently selected, "
+            "so this always applies fresh."
+        )
+        blurb.setWordWrap(True)
+        blurb.setProperty("class", "dim")
+
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("filter artists…")
+        self._filter.textChanged.connect(self._apply_filter)
+
+        self._list = QListWidget()
+        self._list.setUniformItemSizes(True)
+
+        self._status = QLabel("loading artists…")
+        self._status.setProperty("class", "dim")
+
+        self._apply_btn = QPushButton("apply")
+        self._apply_btn.setEnabled(False)
+        self._apply_btn.clicked.connect(self._on_apply)
+        close_btn = QPushButton("close")
+        close_btn.clicked.connect(self.reject)
+        btns = QHBoxLayout()
+        btns.addWidget(self._status, stretch=1)
+        btns.addWidget(self._apply_btn)
+        btns.addWidget(close_btn)
+
+        col = QVBoxLayout(self)
+        col.addWidget(blurb)
+        col.addWidget(self._filter)
+        col.addWidget(self._list, stretch=1)
+        col.addLayout(btns)
+
+        class _Loader(QObject):
+            done = _Signal(list)
+
+            def run(self_inner) -> None:
+                try:
+                    self_inner.done.emit(source.get_taste_profile())
+                except Exception:
+                    self_inner.done.emit([])
+
+        thread = QThread()
+        worker = _Loader()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_loaded)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._load_thread = thread
+        self._load_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_loaded(self, artists: list) -> None:
+        from PySide6.QtWidgets import QListWidgetItem
+        if not artists:
+            self._status.setText("couldn't load the artist list")
+            return
+        for name in artists:
+            item = QListWidgetItem(str(name))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            self._list.addItem(item)
+        self._status.setText(f"{len(artists)} artists")
+        self._apply_btn.setEnabled(True)
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
+
+    def _on_apply(self) -> None:
+        from PySide6.QtCore import QObject, QThread, Signal as _Signal
+        from .. import qthreads
+        picked = [self._list.item(i).text()
+                  for i in range(self._list.count())
+                  if self._list.item(i).checkState() == Qt.Checked]
+        if not picked:
+            self._status.setText("nothing checked, nothing sent")
+            return
+        self._apply_btn.setEnabled(False)
+        self._status.setText("applying…")
+        source = self._source
+
+        class _Applier(QObject):
+            done = _Signal(bool)
+
+            def run(self_inner) -> None:
+                try:
+                    self_inner.done.emit(bool(source.set_taste_profile(picked)))
+                except Exception:
+                    self_inner.done.emit(False)
+
+        thread = QThread()
+        worker = _Applier()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_applied)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._apply_thread = thread
+        self._apply_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_applied(self, ok: bool) -> None:
+        self._apply_btn.setEnabled(True)
+        self._status.setText(
+            "applied. recommendations will update" if ok
+            else "youtube refused, try again later")

@@ -493,6 +493,27 @@ class ThemeManager(QObject):
                         self.theme_changed.emit(self._with_overrides(self._current))
                 _QT.singleShot(110, _flush)
 
+    def replace_dynamic_tokens(self, overrides: dict[str, str]) -> None:
+        """Set the WHOLE dynamic override layer in one step (empty = clear).
+
+        The adaptive driver needs replace semantics per track:
+        ``override_tokens`` merges, so pushing only the keys one cover
+        produced left the previous cover's remaining keys standing, and a
+        clear-then-set pair emits ``theme_changed`` twice with the base
+        palette visible in between — which a color-transitioning backdrop
+        renders as a dip toward the theme color on every track change.
+        One replace, one restyle, one emit.
+        """
+        if overrides == self._dynamic_overrides:
+            return
+        self._dynamic_overrides = dict(overrides)
+        if self._current is None:
+            return
+        effective = self._with_overrides(self._current)
+        qss = _substitute(self._current.qss, effective)
+        self._queue_restyle(qss)
+        self.theme_changed.emit(effective)
+
     def clear_accent_override(self) -> None:
         """Remove the dynamic accent / ambient backdrop overrides so the base theme
         returns. User overrides (radius etc.) are deliberately preserved —

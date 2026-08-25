@@ -46,7 +46,6 @@ from ..sources import StreamRef, registry as source_registry
 from ..queue import Queue, RepeatMode, Role
 from .album import AlbumView
 from .artist import ArtistView
-from .explore import ExploreView
 from .history import HistoryView
 from .library import LibraryView
 from .loading_indicator import LoadingIndicator
@@ -95,6 +94,11 @@ class _SearchWorker(QObject):
                     self.done.emit(self.gen, self.filter, [])
                     return
                 out = self.api.search_videos(self.query)
+            elif self.filter == "playlists":
+                if not supports("playlist_search"):
+                    self.done.emit(self.gen, self.filter, [])
+                    return
+                out = self.api.search_playlists(self.query)
             else:
                 out = self.api.search_songs(self.query)
             self.done.emit(self.gen, self.filter, out)
@@ -214,6 +218,111 @@ class _RateWorker(QObject):
             self.failed.emit(self.video_id, str(exc))
 
 
+class _PlayStartedWorker(QObject):
+    """Runs once per track start, off-thread: fetch community insights for
+    the strip, then (opt-in) report the play to the source's own history.
+
+    Insights emit before the report call so the strip updates without
+    waiting on the second round-trip. Both halves swallow failures — a
+    missing insight line or a lost history ping must never surface as a
+    playback-adjacent error.
+    """
+    insights_ready = Signal(str, object)     # video_id, SongInsights
+    done = Signal()
+
+    def __init__(self, source, track: api.Track, report: bool) -> None:
+        super().__init__()
+        self.source = source
+        self.track = track
+        self.report = report
+
+    def run(self) -> None:
+        try:
+            if self.source.supports("insights"):
+                ins = self.source.get_song_insights(self.track.video_id)
+                if ins is not None:
+                    self.insights_ready.emit(self.track.video_id, ins)
+        except Exception:
+            pass
+        try:
+            if self.report and self.source.supports("history_sync"):
+                self.source.report_play(self.track)
+        except Exception:
+            pass
+        self.done.emit()
+
+
+class _SuggestWorker(QObject):
+    done = Signal(int, str, list)   # gen, query, suggestions
+
+    def __init__(self, api_obj: api.Api, query: str, gen: int) -> None:
+        super().__init__()
+        self.api = api_obj
+        self.query = query
+        self.gen = gen
+
+    def run(self) -> None:
+        try:
+            out = self.api.get_search_suggestions_list(self.query)
+        except Exception:
+            out = []
+        self.done.emit(self.gen, self.query, out)
+
+
+class _PlaylistMutateWorker(QObject):
+    """One-shot playlist write (add / create). ``fn`` returns truthy on
+    success; the label is what the status bar says."""
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, fn, label: str) -> None:
+        super().__init__()
+        self.fn = fn
+        self.label = label
+
+    def run(self) -> None:
+        try:
+            if self.fn():
+                self.done.emit(self.label)
+            else:
+                self.failed.emit(f"{self.label} — source refused")
+        except Exception as exc:
+            self.failed.emit(f"{self.label} — {exc}")
+
+
+class _PlaylistFetchWorker(QObject):
+    done = Signal(object)           # PlaylistDetail
+    failed = Signal(str)
+
+    def __init__(self, api_obj: api.Api, playlist_id: str) -> None:
+        super().__init__()
+        self.api = api_obj
+        self.playlist_id = playlist_id
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self.api.get_playlist(self.playlist_id))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class _DislikeWorker(QObject):
+    done = Signal(str)              # video_id
+    failed = Signal(str, str)       # video_id, msg
+
+    def __init__(self, source, video_id: str) -> None:
+        super().__init__()
+        self.source = source
+        self.video_id = video_id
+
+    def run(self) -> None:
+        try:
+            self.source.dislike_song(self.video_id)
+            self.done.emit(self.video_id)
+        except Exception as exc:
+            self.failed.emit(self.video_id, str(exc))
+
+
 class _InstrumentalSearchWorker(QObject):
     """Off-main-thread instrumental hunter for the karaoke mute toggle.
 
@@ -298,6 +407,10 @@ class MainWindow(QMainWindow):
         self._rate_thread: QThread | None = None
         self._rate_worker: _RateWorker | None = None
         self._liked_current: bool = False
+        # Once-per-track-start latch for the insights + play-report worker.
+        # Reset in _play_track, checked on the first PLAYING state — resume
+        # from pause must not re-report, repeat-one must.
+        self._play_started_fired_for: str | None = None
         self._mini_mode: bool = False
         self._mini = None                   # lazy MiniPlayer window
         self._upper_wrap_widget = None
@@ -434,21 +547,45 @@ class MainWindow(QMainWindow):
         self.search.setClearButtonEnabled(True)
         self._refresh_search_placeholder()
 
+        # v1.5 typeahead — the source's own suggestions under the bar.
+        # Unfiltered mode because the server already did the filtering;
+        # QCompleter supplies the popup + arrow-key/enter handling.
+        from PySide6.QtCore import QStringListModel
+        from PySide6.QtWidgets import QCompleter
+        self._suggest_model = QStringListModel(self)
+        self._suggest_completer = QCompleter(self._suggest_model, self)
+        self._suggest_completer.setCompletionMode(
+            QCompleter.UnfilteredPopupCompletion)
+        self._suggest_completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.search.setCompleter(self._suggest_completer)
+        # Picking a suggestion runs the search; the 0-timer lets QCompleter
+        # finish writing the text into the line edit first.
+        self._suggest_completer.activated.connect(
+            lambda _s: QTimer.singleShot(0, self._on_search))
+        self._suggest_gen = 0
+        self._suggest_timer = QTimer(self)
+        self._suggest_timer.setSingleShot(True)
+        self._suggest_timer.setInterval(200)
+        self._suggest_timer.timeout.connect(self._fetch_suggestions)
+
         self.heading = QLabel(self._line_heading("results"))
         self.heading.setProperty("class", "dim")
         self.heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        # Search filter tabs (songs/videos/albums/artists).
+        # Search filter tabs (songs/videos/albums/artists/playlists —
+        # playlists is the community's own curation, v1.5).
         self.search_tab_songs = BracketButton("songs")
         self.search_tab_videos = BracketButton("videos")
         self.search_tab_albums = BracketButton("albums")
         self.search_tab_artists = BracketButton("artists")
+        self.search_tab_playlists = BracketButton("playlists")
         self._search_filter = "songs"
         for btn, name in (
             (self.search_tab_songs, "songs"),
             (self.search_tab_videos, "videos"),
             (self.search_tab_albums, "albums"),
             (self.search_tab_artists, "artists"),
+            (self.search_tab_playlists, "playlists"),
         ):
             btn.clicked.connect(lambda _=False, n=name: self._set_search_filter(n))
 
@@ -459,6 +596,7 @@ class MainWindow(QMainWindow):
         tabs_row.addWidget(self.search_tab_videos)
         tabs_row.addWidget(self.search_tab_albums)
         tabs_row.addWidget(self.search_tab_artists)
+        tabs_row.addWidget(self.search_tab_playlists)
         tabs_row.addStretch(1)
 
         self.results = QListWidget()
@@ -538,10 +676,15 @@ class MainWindow(QMainWindow):
         self.radio_btn.clicked.connect(self._on_radio_toggle)
         self.clear_btn = BracketButton("clear queue")
         self.clear_btn.clicked.connect(self.queue.clear)
+        # v1.5 — the queue as a draft playlist. Saves the queue's tracks to
+        # a new playlist on the source that can hold them.
+        self.save_queue_btn = BracketButton("save as playlist")
+        self.save_queue_btn.clicked.connect(self._on_save_queue_as_playlist)
 
         queue_actions = QHBoxLayout()
         queue_actions.addWidget(self.radio_btn)
         queue_actions.addWidget(self.clear_btn)
+        queue_actions.addWidget(self.save_queue_btn)
         queue_actions.addStretch(1)
 
         queue_col = QVBoxLayout()
@@ -582,21 +725,35 @@ class MainWindow(QMainWindow):
         # on first PLAYING (e.g. session-restore mid-track).
         self._pending_seek: float = 0.0
 
+        # v1.5 library tabs route album/artist cards to the shared pages.
+        self.library_view.album_requested.connect(self._open_album_entry)
+        self.library_view.artist_requested.connect(self._open_artist_entry)
+
         # ----- history view -----
         self.history_view = HistoryView()
+        self.history_view.api = self.api      # for the [youtube] side (v1.5)
         self.history_view.play_now_requested.connect(self._play_now)
         self.history_view.queue_add_requested.connect(self._queue_add)
         self.history_view.radio_requested.connect(self._start_radio)
         self.history_view.status_message.connect(self._set_status)
 
-        # ----- explore + album + artist views -----
-        self.explore_view = ExploreView(self.api)
+        # ----- home engine + album + artist views -----
+        # v1.5: the pattern-based HomeView replaces ExploreView — same
+        # signal surface plus the hero's resume / shuffle-likes hooks. Kept
+        # under the explore_view name so every existing reference (source
+        # cascade, ensure_loaded, the home slot) stays true.
+        from .home import HomeView
+        self.explore_view = HomeView(
+            self.api,
+            settings_provider=lambda: getattr(self, "_settings", None))
         self.explore_view.play_now_requested.connect(self._play_now)
         self.explore_view.queue_add_requested.connect(self._queue_add)
         self.explore_view.radio_requested.connect(self._start_radio)
         self.explore_view.album_requested.connect(self._open_album_entry)
         self.explore_view.artist_requested.connect(self._open_artist_entry)
         self.explore_view.playlist_requested.connect(self._open_playlist_entry)
+        self.explore_view.resume_requested.connect(self._on_hero_resume)
+        self.explore_view.likes_shuffle_requested.connect(self._on_likes_shuffle)
         self.explore_view.status_message.connect(self._set_status)
         # Mount explore as the home-view bottom half, below the search bar.
         self._home_explore_slot.addWidget(self.explore_view, stretch=1)
@@ -621,6 +778,21 @@ class MainWindow(QMainWindow):
         self.artist_view.album_requested.connect(self._open_album_entry)
         self.artist_view.artist_requested.connect(self._open_artist_entry)
         self.artist_view.status_message.connect(self._set_status)
+
+        # v1.5 song page — the native watch panel (related/comments/credits).
+        from .song_page import SongPage
+        self.song_view = SongPage(self.api)
+        self.song_view.back_requested.connect(self._go_back)
+        self.song_view.play_now_requested.connect(self._play_now)
+        self.song_view.queue_add_requested.connect(self._queue_add)
+        self.song_view.queue_next_requested.connect(self._queue_next)
+        self.song_view.radio_requested.connect(self._start_radio)
+        self.song_view.dislike_requested.connect(self._dislike_track)
+        self.song_view.album_requested.connect(self._open_album_entry)
+        self.song_view.artist_requested.connect(self._open_artist_entry)
+        self.song_view.playlist_requested.connect(self._open_playlist_entry)
+        self.song_view.seek_requested.connect(self._on_song_page_seek)
+        self.song_view.status_message.connect(self._set_status)
 
         # ----- visualizer view -----
         self.visualizer_view = VisualizerView()
@@ -691,6 +863,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.visualizer_view)   # 8
         self.stack.addWidget(self.source_view)       # 9
         self.stack.addWidget(self.audio_fx_view)     # 10 — v1.2.2 audio FX rack
+        self.stack.addWidget(self.song_view)         # 11 — v1.5 song page
 
         # Simple back stack of previous indices so AlbumView/ArtistView can pop.
         self._view_history: list[int] = []
@@ -718,6 +891,12 @@ class MainWindow(QMainWindow):
         self.art = make_album_art(self._slot_album_art, 96)
         self._wire_art_click(self.art)
         self.now_label = make_now_label(self._slot_now_label)
+        # Art click opens the mini player (established v1.3 gesture); the
+        # label click opens the song page — the text names the track, so
+        # the text is the "tell me more" handle.
+        if hasattr(self.now_label, "clicked"):
+            self.now_label.clicked.connect(
+                lambda: self.open_song_page(self._current))
         self.up_next = QLabel("")
         self.up_next.setProperty("class", "dim")
         self.up_next.setVisible(False)
@@ -845,7 +1024,8 @@ class MainWindow(QMainWindow):
         self.api = new_source
         # Cascade to views that hold their own api ref.
         for view in (self.library_view, self.lyrics_view, self.explore_view,
-                     self.album_view, self.artist_view):
+                     self.album_view, self.artist_view, self.song_view,
+                     self.history_view):
             try:
                 view.api = new_source
             except Exception:
@@ -880,6 +1060,41 @@ class MainWindow(QMainWindow):
     def _on_search_text_changed(self, txt: str) -> None:
         if not txt.strip():
             self._enter_home_mode()
+            self._suggest_timer.stop()
+            self._suggest_model.setStringList([])
+            return
+        # Debounced typeahead; the fetch checks support + staleness itself.
+        self._suggest_timer.start()
+
+    def _fetch_suggestions(self) -> None:
+        q = self.search.text().strip()
+        if len(q) < 2:
+            return
+        src = self.api
+        if not (hasattr(src, "supports") and src.supports("suggest")):
+            return
+        self._suggest_gen += 1
+        thread = QThread()
+        worker = _SuggestWorker(src, q, self._suggest_gen)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_suggestions)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._suggest_thread = thread
+        self._suggest_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_suggestions(self, gen: int, query: str, suggestions: list) -> None:
+        # Stale if another fetch started, or the box has moved on/emptied.
+        if gen != self._suggest_gen or not suggestions:
+            return
+        if self.search.text().strip() != query:
+            return
+        self._suggest_model.setStringList([str(s) for s in suggestions[:8]])
+        if self.search.hasFocus():
+            self._suggest_completer.complete()
 
     def _refresh_search_placeholder(self) -> None:
         federated = (
@@ -1078,7 +1293,7 @@ class MainWindow(QMainWindow):
         self._expiry_warned = False      # fresh cookies → watch the new deadline
         if not rebuilt:
             from .toast import show_toast
-            show_toast(self.toast_host(), "token refreshed — restart tide to use it")
+            show_toast(self.toast_host(), "token refreshed. restart tide to use it")
             return
         # Success is deliberately quiet: the whole point is that the user
         # never has to look at this. Status bar only, no toast.
@@ -1158,7 +1373,7 @@ class MainWindow(QMainWindow):
         self._expiry_warned = False      # fresh cookies → warn again next time
         from .toast import show_toast
         if not rebuilt:
-            show_toast(self.toast_host(), "token refreshed — restart tide to use it")
+            show_toast(self.toast_host(), "token refreshed. restart tide to use it")
             return
         self.statusBar().showMessage(f"token refreshed from {profile_label}")
         show_toast(self.toast_host(), f"token refreshed from {profile_label}")
@@ -1305,7 +1520,7 @@ class MainWindow(QMainWindow):
             self._set_stack_index(10)
         # Reset back-stack on root-level navigation so [back] doesn't
         # bounce between top-level views.
-        if prev in (6, 7) and self.stack.currentIndex() not in (6, 7):
+        if prev in (6, 7, 11) and self.stack.currentIndex() not in (6, 7, 11):
             self._view_history.clear()
 
     def _push_view(self, target_index: int) -> None:
@@ -1392,7 +1607,7 @@ class MainWindow(QMainWindow):
         self.heading.setText(self._line_heading(f"results · {len(items)}"))
         self.statusBar().showMessage(f"{len(items)} results")
 
-        is_cards = filter_ in ("albums", "artists")
+        is_cards = filter_ in ("albums", "artists", "playlists")
         self.results.setVisible(not is_cards)
         self._results_card_scroll.setVisible(is_cards)
 
@@ -1429,12 +1644,15 @@ class MainWindow(QMainWindow):
                     pass
             return
 
-        # Cards (albums or artists).
+        # Cards (albums, artists, or community playlists).
         from .card import Card
         for entry in items:
             if filter_ == "albums":
                 c = Card(entry.title, entry.artists, entry.thumbnail, entry)
                 c.clicked.connect(self._open_album_entry)
+            elif filter_ == "playlists":
+                c = Card(entry.title, entry.description, entry.thumbnail, entry)
+                c.clicked.connect(self._open_playlist_entry)
             else:
                 c = Card(entry.name, "artist", entry.thumbnail, entry, circular=True)
                 c.clicked.connect(self._open_artist_entry)
@@ -1473,7 +1691,26 @@ class MainWindow(QMainWindow):
         a_add.triggered.connect(lambda: self._queue_add(tr))
         a_radio.triggered.connect(lambda: self._start_radio(tr))
         a_artist.triggered.connect(lambda: self._open_artist_by_name(tr.artists))
+        a_info = QAction("song info", menu)
+        menu.addAction(a_info)
+        a_info.triggered.connect(lambda: self.open_song_page(tr))
+        self._attach_playlist_menu(menu, tr)
+        if self._track_can_dislike(tr):
+            menu.addSeparator()
+            a_less = QAction("dislike", menu)
+            menu.addAction(a_less)
+            a_less.triggered.connect(lambda: self._dislike_track(tr))
         menu.exec(self.results.viewport().mapToGlobal(pos))
+
+    def _track_can_dislike(self, tr: api.Track) -> bool:
+        """True when the track's source actually implements a dislike — a
+        negative-signal write, not just the like toggle. Checked as an
+        override (not a capability key) so a source that grows ``rating``
+        without a dislike path never shows a dead menu item."""
+        from ..sources.base import MusicSource
+        src = source_registry().get(tr.source or "ytmusic")
+        return (src is not None
+                and type(src).dislike_song is not MusicSource.dislike_song)
 
     # ---------- queue interactions ----------
 
@@ -1499,6 +1736,15 @@ class MainWindow(QMainWindow):
         a_play.triggered.connect(lambda: self._play_index(row))
         a_radio.triggered.connect(lambda: self._start_radio(tr))
         a_remove.triggered.connect(lambda: self.queue.remove(row))
+        a_info = QAction("song info", menu)
+        menu.addAction(a_info)
+        a_info.triggered.connect(lambda: self.open_song_page(tr))
+        self._attach_playlist_menu(menu, tr)
+        if self._track_can_dislike(tr):
+            menu.addSeparator()
+            a_less = QAction("dislike", menu)
+            menu.addAction(a_less)
+            a_less.triggered.connect(lambda: self._dislike_track(tr))
         menu.exec(self.queue_view.viewport().mapToGlobal(pos))
 
     def _on_radio_toggle(self) -> None:
@@ -1612,6 +1858,29 @@ class MainWindow(QMainWindow):
         qthreads.retain(thread, worker)
         thread.start()
 
+    def open_song_page(self, track: api.Track | None) -> None:
+        """The v1.5 watch panel. Reachable from the now-playing label and
+        the per-track "song info" menu item — works for any track, playing
+        or not."""
+        if track is None or not track.video_id:
+            return
+        self.song_view.open_track(track)
+        self._push_view(11)
+
+    def _on_song_page_seek(self, track: api.Track, secs: float) -> None:
+        """Timestamp link inside a comment. Same track that's playing →
+        plain seek; anything else starts the track through the normal play
+        path with a pending seek that lands on first PLAYING (the same
+        mechanism the karaoke swap uses)."""
+        if self._current and self._current.video_id == track.video_id:
+            try:
+                self.player.seek(secs)
+            except Exception:
+                pass
+            return
+        self._pending_seek = max(0.0, float(secs or 0.0))
+        self._play_now(track, False)
+
     def _open_playlist_entry(self, entry: api.PlaylistEntry) -> None:
         # Hand off to the library view's detail page, then switch to it.
         if not entry:
@@ -1686,6 +1955,10 @@ class MainWindow(QMainWindow):
         self._current = track
         self.now_label.setTrackAnimated(track.artists, track.title, track.album)
         self.now_label.setStatus("loading")
+        # Stale numbers from the previous track must not ride into this one;
+        # fresh ones arrive via _on_insights_ready after audio starts.
+        self.now_label.setInsights("")
+        self._play_started_fired_for = None
         self.progress.reset()
         self.time_label.setText("0:00 / 0:00")
         style = getattr(self._settings, "loading_indicator_style", "blocks") \
@@ -1867,6 +2140,277 @@ class MainWindow(QMainWindow):
         self.like_btn.setGlyph(glyph)
         if self._mini is not None:
             self._mini.set_liked(self._liked_current)
+
+    # ---------- v1.5 insights + play reporting ----------
+
+    def _spawn_play_started_worker(self, track: api.Track) -> None:
+        source = source_registry().get(track.source or "ytmusic")
+        if source is None:
+            return
+        report = bool(
+            getattr(getattr(self, "_settings", None), "report_plays", False)
+            and not self._restoring_session
+        )
+        if not (report and source.supports("history_sync")) \
+                and not source.supports("insights"):
+            return
+        thread = QThread()
+        worker = _PlayStartedWorker(source, track, report)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.insights_ready.connect(self._on_insights_ready)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._play_started_thread = thread
+        self._play_started_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_insights_ready(self, video_id: str, insights: object) -> None:
+        if not self._current or self._current.video_id != video_id:
+            return
+        from ..sources.base import human_count
+        parts: list[str] = []
+        views = human_count(getattr(insights, "views", 0))
+        likes = human_count(getattr(insights, "likes", 0))
+        if views:
+            parts.append(f"{views} plays")
+        if likes:
+            parts.append(f"{likes} likes")
+        # A lone year with no counts reads like a typo — only append it to
+        # something.
+        year = getattr(insights, "year", "")
+        if parts and year:
+            parts.append(year)
+        self.now_label.setInsights(" · ".join(parts))
+
+    # ---------- v1.5 add-to-playlist ----------
+
+    PLAYLIST_CACHE_TTL = 600.0
+
+    def _playlist_edit_source(self, tr: api.Track):
+        """The track's source, iff it can hold this track in a playlist."""
+        src = source_registry().get(tr.source or "ytmusic")
+        if src is not None and src.supports("playlist_edit") \
+                and src.supports("library"):
+            return src
+        return None
+
+    def _attach_playlist_menu(self, menu: QMenu, tr: api.Track) -> None:
+        src = self._playlist_edit_source(tr)
+        if src is None:
+            return
+        sub = menu.addMenu("add to playlist")
+        cached = getattr(self, "_playlist_menu_cache", None)
+        fresh = (cached is not None and
+                 time.monotonic() - getattr(self, "_playlist_cache_at", 0.0)
+                 < self.PLAYLIST_CACHE_TTL)
+        a_new = QAction("new playlist…", sub)
+        a_new.triggered.connect(lambda: self._create_playlist_with(src, tr))
+        sub.addAction(a_new)
+        if not fresh:
+            loading = QAction("loading playlists…", sub)
+            loading.setEnabled(False)
+            sub.addAction(loading)
+            self._warm_playlist_cache(src)
+            return
+        sub.addSeparator()
+        for p in cached:
+            if p.playlist_id in ("", "LM"):
+                continue        # liked songs isn't an add target — that's ♥
+            a = QAction(p.title or p.playlist_id, sub)
+            a.triggered.connect(
+                lambda _=False, pid=p.playlist_id, title=p.title:
+                self._add_track_to_playlist(src, tr, pid, title))
+            sub.addAction(a)
+
+    def _warm_playlist_cache(self, src) -> None:
+        if getattr(self, "_playlist_cache_warming", False):
+            return
+        self._playlist_cache_warming = True
+
+        class _W(QObject):
+            done = Signal(list)
+            failed = Signal(str)
+
+            def run(self_inner) -> None:
+                try:
+                    self_inner.done.emit(src.get_library_playlists())
+                except Exception as exc:
+                    self_inner.failed.emit(str(exc))
+
+        thread = QThread()
+        worker = _W()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_playlist_cache)
+        worker.failed.connect(lambda _m: self._on_playlist_cache(None))
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._plcache_thread = thread
+        self._plcache_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_playlist_cache(self, items) -> None:
+        self._playlist_cache_warming = False
+        if items is None:
+            return
+        self._playlist_menu_cache = items
+        self._playlist_cache_at = time.monotonic()
+
+    def _add_track_to_playlist(self, src, tr: api.Track,
+                               playlist_id: str, title: str) -> None:
+        thread = QThread()
+        worker = _PlaylistMutateWorker(
+            lambda: src.add_to_playlist(playlist_id, [tr.video_id]),
+            f"added to {title}")
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(
+            lambda text: self.statusBar().showMessage(theming.styled_case(text)))
+        worker.failed.connect(self.statusBar().showMessage)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._plmut_thread = thread
+        self._plmut_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _create_playlist_with(self, src, tr: api.Track | None,
+                              video_ids: list[str] | None = None) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "new playlist", "name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        ids = list(video_ids or ([] if tr is None else [tr.video_id]))
+        thread = QThread()
+        worker = _PlaylistMutateWorker(
+            lambda: bool(src.create_playlist_remote(name, video_ids=ids)),
+            f"created {name}" + (f" · {len(ids)} tracks" if ids else ""))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_playlist_created)
+        worker.failed.connect(self.statusBar().showMessage)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._plmut_thread = thread
+        self._plmut_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_playlist_created(self, text: str) -> None:
+        self.statusBar().showMessage(theming.styled_case(text))
+        # New playlist must show up in the next add-to menu + library.
+        self._playlist_menu_cache = None
+        try:
+            self.library_view.reload_playlists()
+        except Exception:
+            pass
+
+    def _on_save_queue_as_playlist(self) -> None:
+        """The queue as a draft playlist. Mixed-source queues save the
+        tracks the target source can hold and say how many that was."""
+        tracks = list(self.queue.tracks())
+        if not tracks:
+            self.statusBar().showMessage(theming.styled_case("queue is empty"))
+            return
+        src = None
+        ids: list[str] = []
+        for tr in tracks:
+            s = self._playlist_edit_source(tr)
+            if s is None:
+                continue
+            if src is None:
+                src = s
+            if s is src:
+                ids.append(tr.video_id)
+        if src is None or not ids:
+            self.statusBar().showMessage(theming.styled_case(
+                "none of these tracks can be saved to a playlist"))
+            return
+        kept = len(ids)
+        total = len(tracks)
+        if kept < total:
+            self.statusBar().showMessage(theming.styled_case(
+                f"saving {kept} of {total} tracks ({src.name})"))
+        self._create_playlist_with(src, None, video_ids=ids)
+
+    def _on_hero_resume(self) -> None:
+        """Hero [resume]: the session was already restored into the queue at
+        startup, so resuming is just pressing play; with nothing restored,
+        fall back to playing the queue's current or the last history track."""
+        if self._current is not None:
+            self.player.play()
+            return
+        if self.queue.current is not None:
+            self._play_index(self.queue.current_index)
+            return
+        try:
+            recent = history_module.read_recent(1)
+        except Exception:
+            recent = []
+        if recent:
+            self._play_now(recent[0].to_track(), False)
+
+    def _on_likes_shuffle(self) -> None:
+        """Hero [shuffle likes]: fetch the liked-songs playlist and play it
+        shuffled. YT-only today (playlist id "LM"); the hero shows the
+        button only for that source."""
+        thread = QThread()
+        worker = _PlaylistFetchWorker(self.api, "LM")
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_likes_ready)
+        worker.failed.connect(
+            lambda msg: self.statusBar().showMessage(f"couldn't load likes: {msg}"))
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._likes_thread = thread
+        self._likes_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+        self.statusBar().showMessage(theming.styled_case("loading likes…"))
+
+    def _on_likes_ready(self, detail: object) -> None:
+        import random
+        tracks = list(getattr(detail, "tracks", []) or [])
+        if not tracks:
+            self.statusBar().showMessage(theming.styled_case("no liked songs yet"))
+            return
+        random.shuffle(tracks)
+        self._play_all(tracks)
+        self.statusBar().showMessage(
+            theming.styled_case(f"shuffling {len(tracks)} liked songs"))
+
+    def _dislike_track(self, track: api.Track) -> None:
+        source = source_registry().get(track.source or "ytmusic")
+        if source is None or not source.supports("rating"):
+            return
+        thread = QThread()
+        worker = _DislikeWorker(source, track.video_id)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_dislike_done)
+        worker.failed.connect(self._on_dislike_failed)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._dislike_thread = thread
+        self._dislike_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_dislike_done(self, _video_id: str) -> None:
+        self.statusBar().showMessage(theming.styled_case("dislike sent"))
+
+    def _on_dislike_failed(self, _video_id: str, msg: str) -> None:
+        self.statusBar().showMessage(f"couldn't send dislike: {msg}")
 
     def _on_next_clicked(self) -> None:
         tr = self.queue.advance()
@@ -2347,6 +2891,13 @@ class MainWindow(QMainWindow):
             self.play_btn.setGlyph("▮▮")
             # Audio actually started — stop the loading indicator.
             self._loading.finish("playing")
+            # First PLAYING for this track: fetch insights + (opt-in) report
+            # the play. Anchored here, not at resolve, so a track that never
+            # produced audio never claims a listen.
+            cur = self._current
+            if cur and cur.video_id != self._play_started_fired_for:
+                self._play_started_fired_for = cur.video_id
+                self._spawn_play_started_worker(cur)
             # One summary line per play (not per pause/resume — t0 clears).
             # This is the ground truth for tuning instant-play behavior.
             if self._perf_t0 is not None:

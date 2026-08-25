@@ -591,7 +591,14 @@ class AlbumArt(QLabel):
 
 
 class NowPlayingLabel(QWidget):
-    """artist — title  (album)   |   small dim status row underneath."""
+    """artist — title  (album)   |   small dim status row underneath.
+
+    Clicking it opens the song page (v1.5) — the label is the one thing on
+    the strip that *names* the track, so it's the natural handle for
+    "tell me more about this". Cursor advertises it; window wires it.
+    """
+
+    clicked = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -599,17 +606,27 @@ class NowPlayingLabel(QWidget):
         self._title = ""
         self._album = ""
         self._status = ""
+        # v1.5 community numbers ("84.2m plays · 1.1m likes · 2016").
+        # Rides in the dim line beside album/status; empty = absent, so
+        # sources without insights change nothing about the paint.
+        self._insights = ""
         self._theme = theming.manager().current()
         theming.manager().theme_changed.connect(self._on_theme)
         from . import scale as _scale
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMinimumHeight(_scale.px(40))
+        self.setCursor(Qt.PointingHandCursor)
 
     def _on_theme(self, theme) -> None:
         self._theme = theme
         from . import scale as _scale
         self.setMinimumHeight(_scale.px(40))
         self.update()
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(ev)
 
     def setTrack(self, artist: str, title: str, album: str = "") -> None:
         self._artist = artist
@@ -695,8 +712,15 @@ class NowPlayingLabel(QWidget):
         self._status = text
         self.update()
 
+    def setInsights(self, text: str) -> None:
+        if text == self._insights:
+            return
+        self._insights = text
+        self.update()
+
     def clear(self) -> None:
         self._artist = self._title = self._album = self._status = ""
+        self._insights = ""
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -724,10 +748,12 @@ class NowPlayingLabel(QWidget):
         line1 = fm.elidedText(theming.styled_case(line1, self._theme), Qt.ElideRight, line1_rect.width())
         p.drawText(line1_rect, Qt.AlignVCenter | Qt.AlignLeft, line1)
 
-        # line 2: album · status (dim)
+        # line 2: album · insights · status (dim)
         line2_parts: list[str] = []
         if self._album:
             line2_parts.append(theming.styled_case(self._album, self._theme))
+        if self._insights:
+            line2_parts.append(theming.styled_case(self._insights, self._theme))
         if self._status:
             line2_parts.append(theming.styled_case(self._status, self._theme))
         line2 = "  ·  ".join(line2_parts)

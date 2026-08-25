@@ -277,6 +277,13 @@ class AdaptiveDriver(QObject):
         # long as it is on screen, regardless of the app-wide toggles above.
         self._mini_active = False
         self._current_url: str | None = None
+        # Monotonic per-track-change id. Every async stage (art fetch →
+        # palette worker → apply) carries the gen it was started for and is
+        # discarded when a newer track change happened meanwhile. The old
+        # URL-equality guard couldn't tell "stale result for the same art"
+        # from "fresh result", and worse, it had no answer for *failures* —
+        # see _apply_palette.
+        self._gen = 0
 
         self._palette_jobs: set[_PaletteWorker] = set()
 
@@ -365,6 +372,7 @@ class AdaptiveDriver(QObject):
             self._on_track_changed(self._queue.current)
 
     def _on_track_changed(self, track) -> None:
+        self._gen += 1
         if not self.is_enabled():
             return
         if track is None or not track.thumbnail:
@@ -372,61 +380,74 @@ class AdaptiveDriver(QObject):
             self._current_url = None
             return
         self._current_url = track.thumbnail
+        gen = self._gen
         # Need a QImage. Try cache first.
         url = track.thumbnail
         img = art_cache.cache().request(
-            url, lambda image, url=url: self._on_art_ready(url, image)
+            url, lambda image, gen=gen: self._on_art_ready(gen, image)
         )
         if img is not None:
-            self._on_art_ready(url, img)
+            self._on_art_ready(gen, img)
 
-    def _on_art_ready(self, url: str, img: QImage | None) -> None:
-        if img is None or img.isNull():
+    def _on_art_ready(self, gen: int, img: QImage | None) -> None:
+        if gen != self._gen:
             return
-        if url != self._current_url:
+        if img is None or img.isNull():
+            # The fetch failed for the track that's actually playing. The
+            # old code returned here, which meant the PREVIOUS track's
+            # palette stayed on screen for the whole song. Baseline theme
+            # colors are the correct fallback.
+            theming.manager().clear_accent_override()
             return
         # Extract in worker.
         worker = _PaletteWorker(img)
         self._palette_jobs.add(worker)
         worker.signals.done.connect(
-            lambda palette, worker=worker, url=url: self._on_palette_done_from_worker(
-                worker, url, palette
+            lambda palette, worker=worker, gen=gen: self._on_palette_done_from_worker(
+                worker, gen, palette
             )
         )
         QThreadPool.globalInstance().start(worker)
 
     def _on_palette_done_from_worker(
-        self, worker: _PaletteWorker, url: str, palette: list
+        self, worker: _PaletteWorker, gen: int, palette: list
     ) -> None:
         try:
             worker.signals.done.disconnect()
         except (RuntimeError, TypeError):
             pass
         self._palette_jobs.discard(worker)
-        if url != self._current_url:
+        if gen != self._gen:
             return
-        self._on_palette_done(palette)
+        self._apply_palette(palette)
 
-    def _on_palette_done(self, palette: list) -> None:
-        if not palette:
-            return
+    def _apply_palette(self, palette: list) -> None:
+        """Apply this track's palette, replacing the previous track's.
+
+        The dynamic override layer is REPLACED wholesale every time, never
+        merged into. ``override_tokens`` merges, so the old flow of pushing
+        only the keys this cover produced left the rest of the previous
+        song's palette standing — a grayscale cover with a usable tint kept
+        the last song's accent, and a cover that produced nothing kept
+        everything. Both read as "the backdrop is stuck on the previous
+        song". An empty replacement returns the theme baseline.
+        """
         theme = theming.manager().current()
         if theme is None:
             return
-        bg = QColor(theme.token("bg", "#0b0b0b"))
-        new_accent = pick_accent(palette, bg)
-        new_ambient_bg = pick_bg_tint(palette) if self._wants_ambient_bg() else None
-
         overrides: dict[str, str] = {}
-        if new_accent is not None:
-            overrides["accent"] = new_accent.name()
-            # Pick a second color for accent_alt (used by neon-grid visualizer
-            # + a few QSS spots), but only from colors actually in the cover.
-            new_accent_alt = pick_accent_alt(palette, new_accent, bg)
-            if new_accent_alt is not None:
-                overrides["accent_alt"] = new_accent_alt.name()
-        if new_ambient_bg is not None:
-            overrides["ambient_bg"] = new_ambient_bg.name()
-        if not overrides:
-            return
-        theming.manager().override_tokens(overrides)
+        if palette:
+            bg = QColor(theme.token("bg", "#0b0b0b"))
+            new_accent = pick_accent(palette, bg)
+            new_ambient_bg = pick_bg_tint(palette) if self._wants_ambient_bg() else None
+            if new_accent is not None:
+                overrides["accent"] = new_accent.name()
+                # Pick a second color for accent_alt (used by neon-grid
+                # visualizer + a few QSS spots), but only from colors
+                # actually in the cover.
+                new_accent_alt = pick_accent_alt(palette, new_accent, bg)
+                if new_accent_alt is not None:
+                    overrides["accent_alt"] = new_accent_alt.name()
+            if new_ambient_bg is not None:
+                overrides["ambient_bg"] = new_ambient_bg.name()
+        theming.manager().replace_dynamic_tokens(overrides)

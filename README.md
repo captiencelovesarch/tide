@@ -22,7 +22,7 @@ if none of those fit, drop a `theme.toml` + `theme.qss` into `~/.config/tide/the
 
 | source | search | library | needs |
 |---|---|---|---|
-| youtube music | yes | playlists, albums, artists, home shelves | cookie import |
+| youtube music | yes | playlists (editable), songs, albums, artists, subscriptions, home, charts, moods, account history | cookie import |
 | spotify | yes | playlists, liked songs | login. playback is dead, see below |
 | subsonic / navidrome | yes | playlists, albums, artists, shelves | your server url + login |
 | local files | yes | albums, artists | a music directory |
@@ -37,6 +37,10 @@ about spotify: the integration exists and works for search and your library, but
 ## what it does day to day
 
 plays music, obviously. queue with radio autoplay when it runs low. synced lyrics (youtube's own timings first, LRClib fallback) with a karaoke mode. a history view, sleep timer, like button, resume-on-launch, and stream prefetch so track changes are close to instant.
+
+v1.5 filled out the youtube music side. the home tab is an actual feed now: greeting with your listening stats, quick-pick grids, mosaics that reshuffle daily, ranked charts, new releases, mood chips. if you preferred the plain rows, settings → appearance → "plain shelves" brings them back. every track has a song page (click the now-playing title) with view and like counts, credits, related songs including other recordings of the same track, and the youtube comments. comments are read-only and threaded, and timestamps inside them are clickable, so "the drop at 3:31" seeks to 3:31. the library got real tabs (songs / albums / artists / following), playlists can be edited from any right-click, the queue can be saved as a playlist, and the history view shows both what tide played and what your account played everywhere else.
+
+tide can also report plays to your youtube music account, using the same play event the web player sends. that keeps your recommendations current when you listen here instead of in a browser. it's off unless you turn it on: the setup wizard asks directly, with nothing pre-checked, and explains that off means google gets nothing from tide. existing installs stay off until you flip it in settings → integrations.
 
 there is a proper mini player now (v1.3): click the album art and you get a small frameless card where the window border is the progress bar, the backdrop breathes with the bass, a synced lyric ticks under the artist, and the controls fade out when you leave it alone. click the art again to come back. it can pin itself above other windows, KWin willing.
 

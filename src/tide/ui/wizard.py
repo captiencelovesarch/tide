@@ -166,7 +166,7 @@ class SignInDialog(QDialog):
 
     def _on_open(self) -> None:
         QDesktopServices.openUrl(QUrl(YT_MUSIC_URL))
-        self._status.setText("opened music.youtube.com — sign in there, then click import.")
+        self._status.setText("opened music.youtube.com. sign in there, then click import.")
 
     def _on_import(self) -> None:
         profile: bi.BrowserProfile | None = self._picker.currentData()

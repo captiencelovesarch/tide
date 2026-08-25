@@ -262,7 +262,7 @@ class AudioFxView(QWidget):
 
         sub = QLabel(styled_case(
             "10-band eq · reverb · loudness norm · the rest of the rack. "
-            "filter chain rebuilds live — no restart, no resume. "
+            "filter chain rebuilds live, no restart needed. "
             "double-click any eq slider readout to zero it."
         ))
         sub.setObjectName("sectionSub")
