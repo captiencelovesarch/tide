@@ -4,7 +4,31 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
-## [1.4.1] — 2026-08-24 — the token minds itself, the desktop hears every update, and the light holds the edges
+## [1.5.0] — 2026-08-24 — youtube music, all of it
+
+The YouTube Music update. Everything below is capability-gated per source, so other sources keep working and just show less.
+
+### Added
+- **Play reporting (opt-in).** tide can send YouTube Music the same play event its web player sends, so your account history and recommendations include what you play in tide. This is a privacy setting: the setup wizard asks it as a direct question with nothing pre-selected, and explains that off means Google gets nothing from tide. Existing installs stay off and get a one-time pointer to the toggle in Settings → integrations.
+- **Counts on the now-playing strip.** A dim line like `84.2m plays · 1.1m likes · 2016`. The data comes from the stream resolve that already runs for playback, so it costs no extra requests. Sources that don't have it show nothing.
+- **Song page.** Click the now-playing title, or right-click any track → "song info". Three tabs: **related** (similar songs, other recordings of the same track, more from the artist), **comments** (the actual YouTube comments: author, age, like counts, pinned and artist-hearted badges, threaded replies, top/newest sort; timestamps inside comments are clickable and seek the player), and **credits** (performed / written / produced by). Comments are read-only and fetched anonymously; posting is not supported and won't be, since that would mean driving write endpoints with your imported cookies.
+- **Home rework.** The feed is built from blocks with different layouts instead of identical shelf rows: a greeting header with your local listening stats and a resume card, quick picks as a compact grid, listen-again as small tiles, artist shelves as circle rows, mixed shelves as a mosaic that reshuffles daily. Where the source has the data there are also ranked top songs, charts artists for your country, new releases, new music videos, chart playlists, and mood/genre chips that open playlist grids. Each block loads and fails independently, so one broken parser removes one block instead of blanking the page. Settings → appearance → "home layout: plain shelves" restores the old look.
+- **Full library.** New tabs next to playlists: songs, albums, artists, and following (subscriptions). Playlist management: add to playlist from any right-click (including "new playlist…"), remove from playlist, rename, delete, and "save as playlist" on the queue. A mixed-source queue saves what the source can hold and reports the count.
+- **[subscribe] on artist pages, [+ library] on album pages, [playlists] search tab** for finding other people's playlists.
+- **Two-sided history.** `[tide]` is the local log as before. `[youtube]` is your account's history from every device, with per-row removal. With play reporting on the two converge.
+- **Search suggestions** as you type (from the source, debounced, arrow keys + enter).
+- **Dislike** on every track's right-click and on the song page. It sends a real thumbs-down, which is different from un-liking.
+- **Taste profile editor** in Settings → integrations: pick the artists YT Music should base recommendations on.
+
+### Changed
+- The Explore view is gone; the home engine replaces it on the same Ctrl+1 surface with the same refresh and navigation behavior.
+- Sources declare the new surfaces via capability keys (`insights`, `comments`, `credits`, `related`, `history_sync`, `explore`, `charts`, `moods`, `library_full`, `playlist_edit`, `subscribe`, `remote_history`, `playlist_search`, `suggest`, `taste`). A source without a capability doesn't show the surface.
+
+### Fixed
+- **The adaptive backdrop no longer gets stuck on the previous song's colors.** Three causes, all real: a slow palette extraction could land after you skipped to the next track and win anyway; a failed art fetch or an unusable cover (grayscale, empty palette) kept the old colors for the whole song instead of falling back to the theme; and per-key override merging let half of the old song's palette survive under the new one. Track changes are now generation-stamped so stale results get dropped, failures fall back to the theme baseline, and each track's palette replaces the previous one wholesale.
+- **The backdrop crossfades between songs.** Palette changes fade over about 1.4 seconds instead of snapping. Fast skips re-anchor mid-fade, motion "off" still snaps, and the mini player gets the same behavior since it shares the backdrop widget.
+
+## [1.4.1] — 2026-08-24 — self-refreshing yt token · mpris fixes · rim light backdrop
 
 ### Fixed
 - **The YouTube Music token refreshes itself.** Expiry handling used to stop at a toast — tide noticed the dead session on its own, then waited for you to come click [refresh token], even though the fix (silently re-importing cookies from your still-signed-in browser) needs no interaction at all. Now a 401 starts that re-import by itself, and the expiry watcher renews *ahead* of the recorded cookie deadline (3 days out, checked half-hourly and shortly after launch) so most sessions never die in the first place. Success is deliberately quiet — a status-bar line, no toast. A 15-minute cooldown keeps a dead browser session from causing a refresh loop, and the toast survives only for the cases silence can't fix: no browser holds a live session, or the fresh cookies die right back.
@@ -14,7 +38,7 @@ The canonical source of truth for the diff lives in the [GitHub Releases](https:
 ### Added
 - **Rim light backdrop.** Seventh backdrop style: the edges hold the light and the center stays dark — four inward-fading edge gradients frame the window (overlapping at the corners, which brightens them for free), with corner blooms as the light sources. Deliberately static: nothing travels; only the bass pulse pushes the glow deeper into the room as well as brighter. In the main backdrop picker, the mini player's right-click menu, and Settings → mini player.
 
-## [1.4.0] — 2026-08-17 — the pulse lands on the beat, the sky learns new weather, and settings finds its drawers
+## [1.4.0] — 2026-08-17 — bass pulse timing · three new backdrops · tabbed settings
 
 ### Fixed
 - **The bass pulse lands on the beat.** The backdrop's swell trailed the music by up to ~0.3s, and it was two delays stacked. The capture loop treated `parec`'s normal short pipe reads as "stream paused" — discarding the bytes and napping 50ms, which dropped roughly a third of the audio and processed the rest 50–70ms stale (the visualizer bars and waveform feed from the same loop, so they were quietly choppy too). And the paint side re-smoothed an envelope that already has instant attack, adding ~130ms of onset lag plus up to a frame of timer wait. Partial reads now accumulate into whole FFT chunks with nothing dropped, the display attack near-snaps (release keeps its slow settle), and a sharp onset paints immediately instead of waiting out the animation timer. Net: ~250–300ms of lag down to ~30–50ms.
@@ -29,7 +53,7 @@ The canonical source of truth for the diff lives in the [GitHub Releases](https:
 ### Changed
 - **The settings dialog went tabbed.** One 30-row scroll with ASCII headings became five tabs — appearance / mini player / playback / integrations / advanced — each independently scrollable. The mini player got its own page (with a hint about the right-click menu), preserve-pitch moved to playback where it belongs, and Discord + ListenBrainz share the integrations tab.
 
-## [1.3.3] — 2026-08-14 — the player stops lying, fx takes its seat, and the sleep timer shows its face
+## [1.3.3] — 2026-08-14 — player error fix · fx tab · sleep timer button
 
 ### Fixed
 - **"player error" on some songs is gone.** YouTube now gates individual songs behind PO tokens. For those, the signed-in yt-dlp pass loses all its formats and the anonymous default client (android_vr) still hands back a URL — one that answers HTTP 403 to every request mpv makes. A resolved URL is now **probed before anyone trusts it** and the resolver walks a client fallback chain (cookies → anonymous → web_music → android) until something actually answers; gated songs play again (via YT Music's own web client formats).
@@ -45,7 +69,7 @@ The canonical source of truth for the diff lives in the [GitHub Releases](https:
 ### Changed
 - **`Ctrl+6`–`Ctrl+9` mirror the rail again.** `Ctrl+6` was a ghost duplicate of home left over from the explore→home merge, so the digit row visibly skipped a number. The digits now match the tab order exactly: visualizer 6, source 7, fx 8, settings 9. Every stale hint (fx popover, settings blurb, library empty-state, README) got renumbered with it.
 
-## [1.3.2] — 2026-08-09 — the window shows up, the wizard listens, and the hill is one hill again
+## [1.3.2] — 2026-08-09 — bug fixes
 
 ### Changed
 - **The setup wizard stopped pre-checking sources.** SoundCloud and Bandcamp arrived already ticked — a checked box the user never touched isn't a choice. Everything now starts off, and picking zero sources is fine (the app binds to a fallback until you enable one in Settings).
@@ -58,7 +82,7 @@ The canonical source of truth for the diff lives in the [GitHub Releases](https:
 - **The setup wizard's [next] notices you signed in.** Completing YouTube Music sign-in (or Spotify / Subsonic / local-folder setup) inside the sources step updated the state but never told the button, so [next] stayed dead until you toggled the source off and back on. Setup outcomes now re-emit the state change.
 - **The pause glyph sits on the baseline with everybody else.** `⏸` (U+23F8) only exists in symbol/emoji fallback fonts whose metrics ride high, so the pause button floated above its neighbors. It's now `▮▮` from Geometric Shapes — the same block as `▶` — so whatever font draws the play triangle draws the pause bars, at the same baseline.
 
-## [1.3.1] — 2026-08-03 — shuffle and repeat take their seats, and the chrome gets straightened
+## [1.3.1] — 2026-08-03 — shuffle + repeat
 
 ### Added
 - **Shuffle and repeat, on the control bar, where they always belonged.** `[shuffle]` draws randomly from what hasn't played this cycle (tracked by id, so queue edits can't confuse it) and `[prev]` walks back through the actual random order you heard. `[repeat]` cycles off → all → one: *all* wraps the queue (shuffled, it deals a fresh cycle instead), *one* replays the finished track — but a manual `[next]` always moves on, because a next button that refuses to go next is a prank, not a mode. Both latch in the theme's accent when on (repeat-one wears a small ¹), live in every controls variant plus the mini player, persist with the session, sync over MPRIS (`Shuffle`/`LoopStatus`, writable — KDE's media widget can drive them), and answer to Ctrl+S / Ctrl+R. The up-next line and the stream prefetcher both honor the modes, so "next:" never lies and shuffled skips stay instant.
@@ -72,7 +96,7 @@ The canonical source of truth for the diff lives in the [GitHub Releases](https:
 - **The little black box in the bottom-right corner is gone.** It was the status bar's QSizeGrip: themes paint every bare QWidget with `background: @bg`, so the grip sat as an opaque square on the adaptive gradient. The grip is retired (edge-drag resize already covers the corner in CSD, native borders cover it otherwise) and a QSS guard keeps any future grip transparent.
 - Layout mode switches now explicitly retain the audio-fx and speed buttons across the now-playing strip rebuild instead of relying on event-loop timing to rescue them from the discarded layout.
 
-## [1.3.0] — 2026-07-30 — the mini player deserves to exist, and the window is all tide now
+## [1.3.0] — 2026-07-30 — mini player redo · tide titlebar · five new themes
 
 Mini mode used to be the main window with everything hidden, shrunk to 340×360 with its title bar still on. Full redo: it is now a **dedicated frameless window** (`ui/mini.py`) with the adaptive gradient painted edge to edge, and the old shrink-in-place behavior is gone.
 
@@ -102,7 +126,7 @@ Mini mode used to be the main window with everything hidden, shrunk to 340×360 
 - Quitting from the tray while the mini is open closes it cleanly instead of leaving a headless window keeping a dead player company; closing the mini from the compositor exits to the full window instead of stranding the app with no windows at all.
 - **The mini no longer spazzes when a new lyric line lands.** The title/artist/ticker labels are pinned to the art's width: without the pin, every scramble frame re-measured the label (non-mono theme fonts give each random-glyph frame a different pixel width) and the fixed-size layout re-negotiated the *window* per frame — a visible shudder on every ticker update, zen included. Scrambles are also skipped entirely while zen has the ticker invisible.
 
-## [1.2.7] — 2026-07-29 — the prev button works, expiry stops being a surprise, and a freeze-crash dies
+## [1.2.7] — 2026-07-29 — prev button · expiry detection · freeze-crash fix
 
 Four annoyances from the first AUR release, all small on the surface and none small underneath.
 
