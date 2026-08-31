@@ -283,7 +283,6 @@ class UnknownKeyFilterTests(_SandboxedCase):
         self.assertEqual(back.volume, 33)
         self.assertFalse(hasattr(back, "bogus_scalar"))
         self.assertFalse(hasattr(back, "bogus_table"))
-        # The known nested table still lands.
         self.assertEqual(
             back.preset_state, {"brutalist": {"theme": "brutalist-mono"}}
         )

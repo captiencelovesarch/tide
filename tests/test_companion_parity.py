@@ -1,17 +1,12 @@
 """Phase 3 companion parity — the mini + fullscreen consume the personality.
 
-What's pinned here:
-- ``backdrops.resolve`` is the ONE encoding of the companion "follow"
-  semantics (full truth table, including the deliberate mini-vs-fullscreen
-  divergence when the main backdrop is off), and both companion windows
-  actually route through it;
-- a ``switch_preset`` while a companion window is open re-lands backdrop
-  style / pulse gate / backdrop motion on it (the phase-1 apply_settings
-  path), and the incoming personality's glyph overrides reach the
-  companion transports (the phase-2 refresh_glyphs walk → sync_now);
-- brutalist zero-animation: at intensity OFF every companion move — zen
-  fade, zen collapse, ticker height, lyrics panel, fullscreen pane —
-  snaps synchronously with ZERO animation objects constructed.
+Pinned: ``backdrops.resolve`` is the ONE encoding of the companion
+"follow" semantics (full truth table, including the deliberate
+mini-vs-fullscreen divergence), and both companions route through it; a
+``switch_preset`` while a companion is open re-lands backdrop style /
+pulse gate / motion on it, and the incoming glyph overrides reach the
+companion transports; at intensity OFF every companion move snaps
+synchronously with ZERO animation objects constructed.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -80,9 +75,9 @@ class ResolveTruthTableTest(unittest.TestCase):
                     "aurora")
 
     def test_adaptive_off_divergence_is_explicit_data(self) -> None:
-        # Fullscreen mirrors the main surface's WHOLE look, backdrop
-        # master toggle included; the mini keeps its gradient because the
-        # mini IS its backdrop. This split is the reason resolve exists.
+        # fullscreen mirrors the main surface's whole look, master toggle
+        # included; the mini keeps its gradient because the mini IS its
+        # backdrop — this split is the reason resolve exists
         self.assertEqual(
             backdrops.resolve(backdrops.FOLLOW, adaptive_on=False,
                               surface="fullscreen", main_style="aurora"),
@@ -111,8 +106,6 @@ class ResolveTruthTableTest(unittest.TestCase):
                     "field")
 
     def test_unknown_style_passes_through_verbatim(self) -> None:
-        # Real-slug validation stays central_bg.set_style's job — same
-        # division of labor as before the helper existed.
         self.assertEqual(
             backdrops.resolve("wibble", adaptive_on=False, surface="mini"),
             "wibble")
@@ -123,12 +116,8 @@ class ResolveTruthTableTest(unittest.TestCase):
 
 
 class _FlipCase(unittest.TestCase):
-    """Window-building preset-flip case. Same hygiene as
-    test_preset_flip._FlipCase: hermetic settings file, app-wide
-    setStyleSheet suppressed for the whole case (leaked windows from
-    earlier files make every real push quadratic), deleteLater+drain
-    teardown, and full global-state restore (theme, motion, glyph
-    overrides)."""
+    """Window-building preset-flip case — test_preset_flip._FlipCase's
+    hygiene plus companion reaping and glyph/motion restore."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -151,16 +140,15 @@ class _FlipCase(unittest.TestCase):
                 pass
             companions = list(self.w._companions())
             self.w.close()
-            # The companions are parentless top-levels — the main
+            # the companions are parentless top-levels — the main
             # window's deleteLater won't reap them, and a leaked mini
-            # keeps ~100 widgets listening to every later restyle.
+            # keeps ~100 widgets listening to every later restyle
             for c in companions:
                 c.close()
                 c.deleteLater()
             self.w.deleteLater()
             self.w = None
         QTest.qWait(30)
-        # Restore every piece of global state a flip touches.
         glyphs.set_overrides({})
         motion_module.set_intensity("lite")
         config.SETTINGS_FILE = self._orig_settings_file
@@ -221,14 +209,14 @@ class MiniFlipParityTest(_FlipCase):
         w.set_mini_mode(True)
         mini = w._mini
         QTest.qWait(30)
-        # Brutalist: flat card, no pulse consumer.
+        # brutalist: flat card, no pulse consumer
         self.assertEqual(mini.resolved_backdrop_style(), "off")
         self.assertFalse(mini.central_bg._enabled)
         self.assertFalse(amb.mini_active)
 
         w.switch_preset("modern")
         QTest.qWait(30)
-        # Modern: follow → the main window's liquid, breathing at full.
+        # modern: follow → the main window's liquid, breathing at full
         self.assertEqual(mini.resolved_backdrop_style(), "liquid")
         self.assertTrue(mini.central_bg._enabled)
         self.assertEqual(mini.central_bg._style, "liquid")
@@ -238,14 +226,12 @@ class MiniFlipParityTest(_FlipCase):
 
         w.switch_preset("brutalist")
         QTest.qWait(30)
-        # And all the way back — still cold, still flat.
         self.assertEqual(mini.resolved_backdrop_style(), "off")
         self.assertFalse(mini.central_bg._enabled)
         self.assertFalse(amb.mini_active)
 
     def test_flip_glyph_overrides_reach_the_mini_transport(self) -> None:
         s = _brutalist_settings()
-        # Modern remembers a personal glyph vocabulary.
         s.preset_state["modern"] = {
             "glyph_overrides": {"prev": "«", "next": "»", "shuffle": "⤨"},
         }
@@ -390,12 +376,10 @@ class CompanionMotionOffTest(_CompanionCase):
             mini._zen_wake()
             self.assertEqual(mini._zen_eff.opacity(), 1.0)
             self.assertFalse(mini._group_constrained())
-            # Ticker growth for a wrapped line.
             mini._on_ticker_line(
                 "a long enough synced line that must wrap to more rows "
                 "than one and therefore grow the reserved ticker height")
             self.assertIsNone(mini._ticker_h_anim)
-            # Lyrics panel open/close on the animate=True path.
             mini._toggle_lyrics(True)
             self.assertEqual(mini.lyrics_panel.height(),
                              mini.lyrics_panel.maximumHeight())
@@ -420,7 +404,6 @@ class CompanionMotionOffTest(_CompanionCase):
             fs._zen_wake()
             self.assertEqual(fs._top_eff.opacity(), 1.0)
             self.assertEqual(fs._bottom_eff.opacity(), 1.0)
-            # Pane close + reopen snap, no glide object.
             fs._apply_pane("off")
             self.assertIsNone(fs._pane_anim)
             self.assertFalse(fs._lyrics_host.isVisibleTo(fs))

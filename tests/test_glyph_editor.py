@@ -1,25 +1,10 @@
 """v2.0 phase 2 — the glyph editor power tool (ui/glyph_editor.py).
-
-Pinned here:
-- rows: every key in glyphs.KEYS gets an edit + preview + reset, the
-  1-3 character cap holds, existing overrides populate, the pack
-  column shows the override-free base;
-- live preview: typing changes the preview label AND the live override
-  layer (glyphs.glyph resolves the candidate) and reaches the parent
-  window's refresh_glyphs when it exists — hasattr-guarded when it
-  doesn't;
-- previews never commit: cancel / Esc leaves ZERO trace — settings
-  object, disk and the live glyph layer all exactly as found;
-- accept persists exactly glyph_overrides via save_fields (field-
-  scoped, no whole-object save), an untouched accept writes nothing,
-  clearing an override saves the removal, stale keys from another
-  version are filtered;
-- the deferred-dialog rule: open_glyph_editor never constructs inside
-  the calling turn ([[feedback-pyside-modal]]).
-
-Settings writes are stubbed in the dialog cases (a dialog test must
-never be able to clobber a config file); one class runs the REAL
-save_fields against a per-test settings path to prove the round-trip.
+Every key in glyphs.KEYS gets an edit + preview + reset row with a 1-3
+character cap; typing previews through the live override layer and
+reaches the parent window's refresh_glyphs (hasattr-guarded); cancel /
+Esc leaves zero trace; accept persists exactly glyph_overrides via
+save_fields, stale keys filtered; open_glyph_editor never constructs
+inside the calling turn (the modal-from-click segfault rule).
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -103,9 +88,7 @@ class _StubbedCase(_EditorCase):
         self.addCleanup(mock.patch.stopall)
 
 
-# ---------------------------------------------------------------------------
-# rows
-# ---------------------------------------------------------------------------
+# ---------- rows ----------
 
 class RowTests(_StubbedCase):
     def test_window_title(self) -> None:
@@ -144,7 +127,6 @@ class RowTests(_StubbedCase):
         glyphs.set_overrides({"play": "P"})
         dlg = self._dialog(s)
         self.assertEqual(dlg.base_glyph("play"), PLAY)
-        # And reading the base did not disturb the live layer.
         self.assertEqual(glyphs.glyph("play"), "P")
 
     def test_stale_keys_from_another_version_do_not_crash(self) -> None:
@@ -156,9 +138,7 @@ class RowTests(_StubbedCase):
         self.assertNotIn("warp", dlg.current_overrides())
 
 
-# ---------------------------------------------------------------------------
-# live preview
-# ---------------------------------------------------------------------------
+# ---------- live preview ----------
 
 class LivePreviewTests(_StubbedCase):
     def test_typing_previews_in_dialog_and_through_the_registry(self) -> None:
@@ -168,7 +148,6 @@ class LivePreviewTests(_StubbedCase):
         self.assertEqual(dlg.preview_for("shuffle").text(), "xX")
         self.assertEqual(glyphs.glyph("shuffle"), "xX",
                          "live preview must ride the override layer")
-        # …but nothing was persisted or written onto the settings object.
         self.assertEqual(s.glyph_overrides, {})
         self.assertEqual(self.saved_field_calls, [])
 
@@ -223,9 +202,7 @@ class LivePreviewTests(_StubbedCase):
         self.assertEqual(dlg.result(), QDialog.Accepted)
 
 
-# ---------------------------------------------------------------------------
-# cancel — previews never commit
-# ---------------------------------------------------------------------------
+# ---------- cancel — previews never commit ----------
 
 class CancelTests(_StubbedCase):
     def test_cancel_leaves_zero_trace(self) -> None:
@@ -239,13 +216,10 @@ class CancelTests(_StubbedCase):
         self.assertEqual(glyphs.glyph("play"), "P")
         dlg.cancel_btn.click()
         self.assertEqual(dlg.result(), QDialog.Rejected)
-        # Live layer: exactly as found.
         self.assertEqual(glyphs.glyph("play"), PLAY)
         self.assertEqual(glyphs.glyph("pause"), PAUSE)
         self.assertEqual(glyphs.glyph("like_on"), "L")
-        # Settings object: untouched.
         self.assertEqual(s.glyph_overrides, {"like_on": "L"})
-        # Disk: untouched.
         self.assertEqual(self.saved_field_calls, [])
         self.assertFalse(config.SETTINGS_FILE.exists())
 
@@ -273,9 +247,7 @@ class CancelTests(_StubbedCase):
         self.assertEqual(glyphs.glyph("play"), PLAY)
 
 
-# ---------------------------------------------------------------------------
-# accept — the only write path
-# ---------------------------------------------------------------------------
+# ---------- accept — the only write path ----------
 
 class AcceptTests(_StubbedCase):
     def test_accept_persists_exactly_glyph_overrides(self) -> None:
@@ -335,9 +307,7 @@ class AcceptTests(_StubbedCase):
         self.assertGreater(win.refreshes, before)
 
 
-# ---------------------------------------------------------------------------
-# disk round-trip — the real save_fields, sandboxed path
-# ---------------------------------------------------------------------------
+# ---------- disk round-trip — the real save_fields, sandboxed path ----------
 
 class DiskRoundTripTests(_EditorCase):
     """No stubs: accept writes exactly glyph_overrides to the settings
@@ -379,9 +349,7 @@ class DiskRoundTripTests(_EditorCase):
         self.assertFalse(config.SETTINGS_FILE.exists())
 
 
-# ---------------------------------------------------------------------------
-# the deferred-dialog rule
-# ---------------------------------------------------------------------------
+# ---------- the deferred-dialog rule ----------
 
 class DeferredOpenTests(_EditorCase):
     def test_open_is_deferred_out_of_the_calling_turn(self) -> None:

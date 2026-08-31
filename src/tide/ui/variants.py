@@ -486,8 +486,7 @@ class WedgeVolume(QWidget):
 
 class _VolumeSpringSlider(SpringSlider):
     """Volume-flavored SpringSlider: a wheel notch steps ±5 like every
-    other volume face (the raw one-step would make a notch a 1% crawl).
-    Same accumulate-then-nudge shape as the base wheelEvent."""
+    other volume face (a raw one-step would make a notch a 1% crawl)."""
 
     WHEEL_STEPS = 5
 
@@ -498,8 +497,8 @@ class _VolumeSpringSlider(SpringSlider):
             ev.ignore()
             return
         self._wheel_accum -= notches * 120
-        # Same accept-only-if-it-moved rule as the base: a dead notch at
-        # 0% / 100% belongs to whatever scrolls behind us.
+        # Accept only if it moved — a dead notch at 0/100 belongs to
+        # whatever scrolls behind us.
         if self._nudge(notches * self.WHEEL_STEPS):
             ev.accept()
         else:
@@ -507,13 +506,9 @@ class _VolumeSpringSlider(SpringSlider):
 
 
 class SpringVolume(QWidget):
-    """SpringSlider-backed volume — the modern personality's face.
-
-    Magnetic detents at 0 / 50 / 100, springy settle on release (motion
-    OFF snaps synchronously — the slider is gated by construction). Same
-    surface as the other volume variants (``setVolume`` / ``volume`` /
-    ``volume_changed``) so window wiring doesn't care which it got.
-    """
+    """SpringSlider volume, the modern face: detents at 0/50/100, springy
+    settle (motion OFF snaps). Same surface as the other volume variants
+    so window wiring doesn't care which it got."""
 
     volume_changed = Signal(int)
 

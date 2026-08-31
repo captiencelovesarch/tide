@@ -1,19 +1,13 @@
-"""Settings dialog — GENERATED from the option-descriptor table.
+"""Settings dialog — generated from settings_schema.REGISTRY: tabs →
+sections → one widget per descriptor kind. Adding an option: add the
+Settings field, its OptionDesc, (maybe) a live applier.
 
-v1.x hand-wrote every option four times: a widget in _build_ui, a load
-in _populate, a store in _on_save, and a live-apply block in
-window._do_open_settings. This dialog builds itself from
-settings_schema.REGISTRY instead: tabs → sections (line headings) → one
-widget per descriptor kind. Adding an option is now: add the Settings
-field, add its OptionDesc, (maybe) name a live applier — the dialog,
-the diff-save and the live-apply chain follow.
-
-The dialog reads the LIVE Settings object (no deepcopy-replace — the
-old whole-object save is what raced the satellite savers). Edits are
-diffed against an opening snapshot; accept writes ONLY the changed
-fields (settings.save_fields) and hands the changed-key set to
-window.run_live_appliers. preview=True descriptors apply while the
-dialog is open and revert on cancel — previews never commit.
+The dialog reads the LIVE Settings object (the old whole-object save
+raced the satellite savers). Edits are diffed against an opening
+snapshot; accept writes ONLY the changed fields (save_fields) and
+hands the changed-key set to window.run_live_appliers. preview=True
+descriptors apply while the dialog is open and revert on cancel —
+previews never commit.
 """
 from __future__ import annotations
 
@@ -48,10 +42,9 @@ DISCORD_HELP_URL = "https://discord.com/developers/applications"
 # dialog-side chrome the schema doesn't carry
 # ---------------------------------------------------------------------------
 
-# Generated widgets keep their v1 attribute names — muscle memory (and
-# the existing dialog tests) still find dlg.theme_picker, dlg.csd_toggle
-# and friends. Every REGISTRY key MUST have an entry (pinned by the
-# engine tests) so a new descriptor can't ship an anonymous widget.
+# Generated widgets keep their v1 attribute names (tests and muscle
+# memory still find dlg.theme_picker etc.). Every REGISTRY key MUST
+# have an entry — pinned by the engine tests.
 _WIDGET_ATTRS: dict[str, str] = {
     "theme": "theme_picker",
     "theme_picker_show_all": "theme_show_all_toggle",
@@ -121,8 +114,8 @@ _STR_SPECS: dict[str, dict] = {
     "spotify_audio_device": {"placeholder": "default sink"},
 }
 
-# Controller key → dependent keys enabled only while the controller is
-# on (the v1 hand-wired toggled→setEnabled chains, as data).
+# Controller key → dependent keys enabled only while the controller
+# is on.
 _ENABLE_RULES: dict[str, tuple[str, ...]] = {
     "adaptive_background": ("adaptive_background_style", "adaptive_pulse"),
     "mini_pulse": ("mini_pulse_resize",),
@@ -138,18 +131,15 @@ _ENABLE_RULES: dict[str, tuple[str, ...]] = {
     "listenbrainz_enabled": ("listenbrainz_token",),
 }
 
-# Descriptor keys whose change reshapes the DIALOG rather than the app:
-# key → a niladic method run right after the pending diff is recorded.
-# (App-side effects are `live` appliers and `preview` flags; these are
-# neither — the show-all tick only decides which rows the theme combo
-# holds.) Kept as data so the change handler stays generic.
+# Keys whose change reshapes the DIALOG, not the app (neither `live`
+# nor `preview`): key → niladic method run right after the pending
+# diff is recorded.
 _CHANGE_HOOKS: dict[str, str] = {
     "theme_picker_show_all": "refresh_theme_choices",
 }
 
-# kind == "custom" descriptors resolve their widget builder here:
-# key → callable(dialog) -> QWidget. Registered by the power tools;
-# empty today (the font picker is its own first-class kind).
+# kind == "custom" widget builders: key → callable(dialog) -> QWidget.
+# Empty today (the font picker is its own first-class kind).
 CUSTOM_BUILDERS: dict[str, object] = {}
 
 
@@ -203,8 +193,7 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(620)
         self.resize(680, 720)
 
-        # The LIVE settings object. Reads populate the widgets; accept
-        # writes only the changed fields back onto it.
+        # The LIVE settings object; accept writes changed fields onto it.
         self._settings = current_settings
         self._defaults = settings_module.Settings()
         self._descs = settings_schema.REGISTRY
@@ -217,18 +206,16 @@ class SettingsDialog(QDialog):
         self._accepted_changes: tuple[str, ...] = ()
         self._populating = False
         # reject() is every cancel path (button, Esc, window close);
-        # these guard the revert so it runs at most once and never
-        # after an accept (the theme editor's pattern).
+        # these guard the revert to run at most once, never after accept.
         self._accepted = False
         self._reverted = False
-        # A strip-builder pick made while the LAYOUT itself is only a
-        # preview is parked here instead of committed — accept lands
-        # layout + bar together, cancel drops both (rule 8).
+        # A strip-builder pick made while the LAYOUT is only a preview
+        # parks here — accept lands layout + bar together, cancel drops
+        # both.
         self._pending_strip_overrides: dict | None = None
         self._pending_strip_base = ""
 
-        # Preview snapshot — what cancel puts back (previews never
-        # commit; ground rule since the phase-1 browse-flip bug).
+        # Preview snapshot — what cancel puts back.
         self._initial_theme = current_settings.theme
         self._initial_thumbnails = current_settings.show_thumbnails or "theme"
         self._initial_font = current_settings.font_family_override or ""
@@ -240,9 +227,9 @@ class SettingsDialog(QDialog):
         self._build_ui()
         self._populate()
 
-        # Manual session refresh reports through a window signal (the worker
-        # and its dedup live on MainWindow, not here). Qt drops the
-        # connection with the dialog, so no teardown bookkeeping needed.
+        # Manual session refresh reports through a window signal (worker
+        # + dedup live on MainWindow). Qt drops the connection with the
+        # dialog — no teardown bookkeeping.
         win = self._find_main_window()
         if win is not None:
             win.session_refresh_finished.connect(self._on_refresh_session_finished)
@@ -352,39 +339,31 @@ class SettingsDialog(QDialog):
     # ---------- personality-aware theme picking ----------
 
     def _choice_rows(self, desc: settings_schema.OptionDesc):
-        """The rows one choice descriptor renders with.
-
-        Identical to ``settings_schema.resolve_choices`` for every
-        descriptor but ``theme``, which is narrowed to the active
-        personality's aesthetic (the schema keeps the whole catalog —
-        it's the layer the coverage/pickable meta-tests read, and the
-        narrowing needs a Settings object the schema doesn't have)."""
+        """``settings_schema.resolve_choices`` for every descriptor but
+        ``theme``, which is narrowed to the active personality (the
+        schema keeps the whole catalog; the narrowing needs a Settings
+        object it doesn't have)."""
         if desc.key == "theme":
             return self._theme_rows()
         return settings_schema.resolve_choices(desc)
 
     def _show_all_themes(self) -> bool:
-        """The escape hatch's live state — the checkbox once it exists,
-        the stored preference while the theme combo is being built (the
-        descriptors build in registry order, and theme comes first)."""
+        """The checkbox once it exists; the stored preference while the
+        theme combo is being built (theme comes first in registry
+        order)."""
         w = self._widgets.get("theme_picker_show_all")
         if w is not None:
             return bool(w.isChecked())
         return bool(getattr(self._settings, "theme_picker_show_all", False))
 
     def _theme_rows(self, selected: str = ""):
-        """The theme combo's rows for the current personality + show-all
-        state.
-
-        Two slugs are listed whatever their aesthetic: the theme this
-        dialog opened on, and an unaccepted pick in flight
-        (``_pending``). A picker that can't display the value it holds
-        would re-write the setting to another theme on the next accept.
-        The pick in flight is read from the pending diff rather than
-        from the combo itself, so a personality flip mid-dialog — which
-        clears the diff and re-bases the snapshot before rebuilding
-        (_rebase_after_personality_flip) — doesn't drag the outgoing
-        personality's theme into the incoming one's list.
+        """The theme combo's rows for the current personality +
+        show-all state. Kept whatever their aesthetic: the opening
+        theme and the pick in flight (see theme_choices_for for why).
+        The pick is read from the pending diff, not the combo, so a
+        mid-dialog personality flip — which clears the diff and
+        re-bases the snapshot — doesn't drag the outgoing theme into
+        the incoming list.
         """
         return settings_schema.theme_choices_for(
             str(getattr(self._settings, "preset", "") or ""),
@@ -395,13 +374,11 @@ class SettingsDialog(QDialog):
         )
 
     def refresh_theme_choices(self, select: str = "") -> None:
-        """Rebuild the theme combo's rows in place — the show-all tick's
-        hook, and the way a freshly saved theme joins the list.
-
-        ``select`` names a slug to end up on (a theme the editor just
-        wrote); otherwise the current pick is kept. Repopulation runs
-        under the populate guard so re-adding rows can never fire a
-        theme preview — previews are user picks, not bookkeeping."""
+        """Rebuild the theme combo in place — the show-all hook, and
+        how a freshly saved theme joins the list. ``select`` names a
+        slug to land on; otherwise the current pick is kept. Runs under
+        the populate guard so re-adding rows can never fire a theme
+        preview."""
         combo = self._widgets.get("theme")
         if combo is None:
             return
@@ -412,10 +389,9 @@ class SettingsDialog(QDialog):
             combo.clear()
             for value, label in rows:
                 combo.addItem(label, value)
-            # Land on the requested slug, else back on the pick in
-            # flight, else the theme the dialog opened with. Silently
-            # ending up on some other row would turn a list rebuild into
-            # a theme change nobody asked for.
+            # Requested slug, else the pick in flight, else the opening
+            # theme — landing anywhere else would turn a list rebuild
+            # into a theme change nobody asked for.
             idx = -1
             for candidate in (select, pending, self._initial_theme):
                 idx = combo.findData(candidate) if candidate else -1
@@ -466,12 +442,10 @@ class SettingsDialog(QDialog):
         return box
 
     def _build_font_picker(self, desc: settings_schema.OptionDesc) -> QComboBox:
-        """The full-family font picker, preserved from v1: every system
-        family listed, each row rendered in its own face, bundled fonts
-        pinned up top, editable so any family name can be typed."""
+        """The v1 full-family font picker: every system family in its
+        own face, bundled fonts pinned up top, editable."""
         picker = QComboBox()
         picker.addItem("from theme", "")
-        # Tide-bundled fonts pinned up top, always available.
         for f in ("IBM Plex Mono", "JetBrains Mono", "Inter"):
             picker.addItem(f"{f} · bundled", f)
         try:
@@ -479,8 +453,7 @@ class SettingsDialog(QDialog):
             from PySide6.QtWidgets import QListView
 
             def _preview_font(family: str) -> QFont:
-                # Pin the size so one display face can't blow up row heights,
-                # and so every preview resolves against a bounded engine.
+                # Pin the size so a display face can't blow up row heights.
                 font = QFont(family)
                 font.setPointSize(10)
                 return font
@@ -496,25 +469,24 @@ class SettingsDialog(QDialog):
                     continue    # dupes + private system faces
                 systems = QFontDatabase.writingSystems(f)
                 if systems and latin not in systems:
-                    # Symbol/emoji/CJK-only faces are useless as a UI font,
-                    # and rendering their names in themselves is a glyph-
+                    # Symbol/emoji/CJK-only faces are useless as a UI
+                    # font, and rendering their names in themselves is a
                     # fallback stress test Qt has been seen to lose.
                     continue
                 picker.addItem(f, f)
                 picker.setItemData(
                     picker.count() - 1, _preview_font(f), Qt.FontRole
                 )
-            # One prototype row sizes the whole popup. Without this, every
-            # app restyle made the popup's list view re-measure EVERY row in
-            # its own font (shapeText × hundreds of families × fallback
-            # queries) — the layout storm a real session died inside.
+            # One prototype row sizes the whole popup. Without this,
+            # every app restyle re-measured EVERY row in its own font —
+            # the layout storm a real session died inside.
             view = picker.view()
             if isinstance(view, QListView):
                 view.setUniformItemSizes(True)
         except Exception:
             pass
-        # Make editable so users can paste any family name. Typed names
-        # apply on save; picked rows apply live.
+        # Editable so any family can be pasted. Typed names apply on
+        # save; picked rows apply live.
         picker.setEditable(True)
         picker.setInsertPolicy(QComboBox.NoInsert)
         picker.currentIndexChanged.connect(
@@ -525,9 +497,7 @@ class SettingsDialog(QDialog):
 
     def _tab_prelude(self, tab: str) -> list:
         if tab == "appearance":
-            # The personality section leads the appearance tab: everything
-            # below it (theme, layout, chrome, backdrop, motion) is a
-            # detail OF the personality that owns it.
+            # Personality leads — everything below is a detail of it.
             return self._personality_chrome()
         if tab == "sources":
             return [_dim(QLabel(
@@ -598,10 +568,9 @@ class SettingsDialog(QDialog):
             session_heading = _dim(QLabel(line_heading("youtube music session", 34)))
             self.refresh_session_btn = QPushButton("refresh session")
             self.refresh_session_btn.clicked.connect(self._on_refresh_session)
-            # Inline state: current session at rest, "checking browsers…"
-            # while the window's worker runs, then the outcome. The window
-            # also toasts, but this modal dialog sits over the toast host —
-            # the row is the feedback the user actually sees.
+            # Inline state row: at rest → "checking browsers…" → outcome.
+            # The window also toasts, but this modal sits over the toast
+            # host — the row is what the user actually sees.
             self.refresh_session_status = _dim(QLabel(self._session_state_text()))
             refresh_key = self._binding_text("refresh_session", "ctrl+shift+r")
             key_line = (f" {refresh_key} does the same thing without opening "
@@ -627,13 +596,11 @@ class SettingsDialog(QDialog):
         return []
 
     def _power_tool_chrome(self) -> list:
-        """The appearance tab's power-tool launchers + the shortcuts
-        section — the brutalist arsenal's front door. Every open is
-        DEFERRED out of the click emission: the theme editor via our own
-        singleShot handler, the other three inside their module openers
-        (open_strip_builder / open_glyph_editor / open_keymap_editor all
-        defer internally — wiring them straight to clicked is sanctioned,
-        double-deferring is not needed)."""
+        """Power-tool launchers + the shortcuts section. Every open is
+        DEFERRED out of the click emission: the theme editor via our
+        own singleShot; open_strip_builder / open_glyph_editor /
+        open_keymap_editor defer internally, so wiring those straight
+        to clicked is sanctioned."""
         tools_heading = _dim(QLabel(line_heading("power tools", 34)))
         tools_blurb = _dim(QLabel(
             "the deep-cut editors. everything they change is previewable, "
@@ -681,21 +648,14 @@ class SettingsDialog(QDialog):
     # ---------- personality (v2.0 phase 4 — the settings re-pick route) ----
 
     def _personality_chrome(self) -> list:
-        """The appearance tab's "personality" section: a quick flip and
-        the front door back to the chooser.
-
-        Deliberately NOT a descriptor. Every OptionDesc names a Settings
-        field that the accept-time diff writes with a plain setattr +
-        save_fields; ``preset`` is in INTERNAL_FIELDS on purpose
-        ("chooser/switcher owns it") because it can only move through
-        presets.apply_preset — which stashes the outgoing personality,
-        restores the incoming one and pushes four managers in contract
-        order. A generic setattr would leave ``settings.preset`` naming a
-        personality nothing ever applied, holding the other one's stash.
-        So this is dialog chrome, like power tools and shortcuts (its
-        neighbours on this tab), and it commits through the very same
-        app.commit_personality_choice as the wizard and the chooser.
-        """
+        """The "personality" section: a quick flip and the door back
+        to the chooser. Deliberately NOT a descriptor: ``preset`` may
+        only move through presets.apply_preset (stash outgoing,
+        restore incoming, managers in contract order) — the accept
+        diff's generic setattr would leave ``settings.preset`` naming
+        a personality nothing ever applied, holding the other one's
+        stash. So: dialog chrome, committing through the same
+        app.commit_personality_choice as the wizard and chooser."""
         heading = _dim(QLabel(line_heading("personality", 34)))
         blurb = _dim(QLabel(
             "tide is two players sharing one library. each side remembers "
@@ -725,9 +685,8 @@ class SettingsDialog(QDialog):
         return [heading, col]
 
     def _sync_personality_picker(self) -> None:
-        """(Re)build the flip picker's rows and point it at the active
-        personality. Signals stay blocked: this is bookkeeping, and only
-        a user activation may start a flip."""
+        """(Re)build the flip picker's rows, signals blocked — only a
+        user activation may start a flip."""
         from .. import presets
         from .chooser import PANE_ORDER
         picker = self.personality_picker
@@ -742,8 +701,8 @@ class SettingsDialog(QDialog):
             idx = picker.findData(active)
             if idx < 0:
                 # Pre-adoption / hand-edited config: don't claim a
-                # personality the app never applied. The row disappears
-                # on the first real pick (this runs again after a flip).
+                # personality the app never applied. The row goes away
+                # on the first real pick.
                 picker.insertItem(0, "— not picked yet —", "")
                 idx = 0
             picker.setCurrentIndex(idx)
@@ -755,21 +714,17 @@ class SettingsDialog(QDialog):
         if not preset_id or preset_id == str(
                 getattr(self._settings, "preset", "") or ""):
             return      # re-picking what's already on is not a flip
-        # A flip re-applies the theme bundle and rebuilds the window's
-        # slots. Get off the combo's activated emission first — the same
-        # deferral every restyle/modal path in this dialog takes.
+        # A flip restyles and rebuilds slots — get off the combo's
+        # activated emission first, like every restyle/modal path here.
         QTimer.singleShot(0, lambda: self._flip_personality(preset_id))
 
     def _flip_personality(self, preset_id: str) -> None:
-        """Commit a personality flip from inside the open dialog.
-
-        Routed through app.commit_personality_choice — the ONE commit
-        path the wizard and the chooser take too — so the stamp, the
-        first-visit slot seeding, the manager ordering and the
+        """Commit a flip from inside the open dialog, through
+        app.commit_personality_choice — the ONE commit path the wizard
+        and chooser take too, so stamp / slot seeding / manager order /
         field-scoped save are identical whichever door the user came
         through. With the MainWindow in reach it lands live via
-        switch_preset (one queued restyle, one slot rebuild).
-        """
+        switch_preset."""
         from .. import app as app_module
         win = self._find_main_window()
         if not app_module.commit_personality_choice(
@@ -780,7 +735,7 @@ class SettingsDialog(QDialog):
         self._rebase_after_personality_flip()
 
     def _on_open_chooser(self) -> None:
-        # Deferred out of the click emission — opening a modal
+        # Deferred out of the click emission — a modal opened
         # synchronously from a click inside an already-modal dialog is
         # the PySide6 + py3.14 segfault pattern ([[feedback-pyside-modal]]).
         self._tool_sound("modal_open")
@@ -796,33 +751,21 @@ class SettingsDialog(QDialog):
                                         window=win)
         self._tool_sound("modal_close")
         if choice:
-            # Even a re-pick of the personality already on re-applies the
-            # preset (and so drops any open theme preview) — re-base so
-            # the dialog and the app agree about what's on screen.
+            # Even a re-pick of the current personality re-applies the
+            # preset (dropping any open theme preview) — re-base so the
+            # dialog and the app agree.
             self._rebase_after_personality_flip()
 
     def _rebase_after_personality_flip(self) -> None:
         """Re-open this dialog onto the personality that just landed.
-
-        A flip is a COMMIT, not a preview: apply_preset already pushed
-        the managers and persisted the fields. Every snapshot this dialog
-        holds was taken against the OUTGOING personality, so without a
-        re-base (a) accept would diff the new values against the old ones
-        and write the outgoing look straight back over the flip, and (b)
-        cancel would "revert" to the pre-flip theme and layout — undoing
-        a commit, which is rule 8 in the mirror.
-
-        Unsaved edits survive where they can: per-personality fields are
-        by definition replaced by the flip, but everything shared
-        (integrations, playback, sources …) is re-staged afterwards, so
-        a half-typed token isn't lost to a look change.
-
-        The WINDOW holds a snapshot too (MainWindow._do_open_settings
-        takes one for its accept-time preset reconcile), so it gets the
-        same re-base. Skipping it left the reconcile handing the theme
-        of a personality the user had already flipped away from to the
-        one they flipped TO — modern remembering a brutalist slug.
-        """
+        A flip is a COMMIT — every snapshot here was taken against the
+        OUTGOING personality, so without a re-base accept would write
+        the outgoing look back over the flip and cancel would "revert"
+        a commit. Per-personality pending edits are dropped (the flip
+        replaced them); shared ones are re-staged so a half-typed
+        token survives. The WINDOW's snapshot gets the same re-base
+        (rebase_settings_snapshot) — skipping it handed the outgoing
+        personality's theme to the incoming one."""
         keep = {
             key: value for key, value in self._pending.items()
             if key in self._by_key and not self._by_key[key].per_preset
@@ -842,27 +785,24 @@ class SettingsDialog(QDialog):
         win = self._find_main_window()
         if win is not None and hasattr(win, "rebase_settings_snapshot"):
             win.rebase_settings_snapshot(s)
-        # Rebuild the theme rows BEFORE _populate re-selects: they are
-        # personality-aware, so the combo would otherwise still hold the
-        # outgoing personality's catalog and _populate would fall back to
-        # a theme the user never picked. refresh_theme_choices' one
-        # precondition — cleared _pending, re-based _initial_theme — is
-        # met by the block above, so the outgoing theme can't ride along
-        # as a keeper row.
+        # Rebuild the theme rows BEFORE _populate re-selects: the combo
+        # still holds the outgoing personality's catalog, and _populate
+        # would fall back to a theme the user never picked. The cleared
+        # _pending / re-based _initial_theme above keep the outgoing
+        # theme out of the keeper rows.
         self.refresh_theme_choices()
         self._populate()
         self._sync_personality_picker()
         for key, value in keep.items():
-            # Re-staging goes through the widgets, so the pending diff is
-            # rebuilt by the normal change handler (nothing here previews:
-            # every preview descriptor is per-personality and was dropped).
+            # Through the widgets, so the normal change handler rebuilds
+            # the diff. Nothing previews: every preview descriptor is
+            # per-personality and was dropped.
             self._set_widget_value(self._by_key[key], value)
 
     def _set_widget_value(self, desc: settings_schema.OptionDesc,
                           value) -> None:
-        """Push one explicit value into its widget (the re-stage half of
-        a personality re-base). _populate_widget's twin — that one reads
-        the settings object, this one takes what it's given."""
+        """Push one value into its widget — _populate_widget's twin for
+        the re-stage half of a personality re-base."""
         w = self._widgets.get(desc.key)
         if w is None:
             return
@@ -926,9 +866,8 @@ class SettingsDialog(QDialog):
     # ---------- populate / read / diff ----------
 
     def _populate(self) -> None:
-        """Load the live settings into every generated widget, with all
-        change handling suppressed — loading saved values must not fire
-        the live-apply previews (theme, layout, …)."""
+        """Load the live settings into the widgets, change handling
+        suppressed — loading saved values must not fire previews."""
         self._populating = True
         try:
             for desc in self._descs:
@@ -948,9 +887,9 @@ class SettingsDialog(QDialog):
         elif desc.kind == "choice":
             idx = w.findData(raw)
             if idx < 0:
-                # Stored value isn't pickable (stale slug etc.) — show the
-                # dataclass default, which the schema meta-test guarantees
-                # is always a real row.
+                # Stored value isn't pickable (stale slug) — fall back to
+                # the dataclass default, which the meta-test guarantees
+                # is a row.
                 idx = w.findData(getattr(self._defaults, desc.key))
             if idx >= 0:
                 w.setCurrentIndex(idx)
@@ -964,8 +903,7 @@ class SettingsDialog(QDialog):
             if idx >= 0:
                 w.setCurrentIndex(idx)
             else:
-                # Custom family not in the list — show it in the editable
-                # combo's text field directly.
+                # Custom family not in the list — show it as free text.
                 w.setCurrentText(value)
         # custom widgets own their own populate
 
@@ -992,10 +930,10 @@ class SettingsDialog(QDialog):
         if desc.kind == "str":
             return w.text().strip()
         if desc.kind == "font":
-            # A picked row's data wins — INCLUDING the "from theme" row,
-            # whose data is deliberately "". Free text only counts when it
-            # differs from the selected row's label, i.e. the user actually
-            # typed a family name (the "from theme"-as-a-font regression).
+            # A picked row's data wins — INCLUDING "from theme" (data
+            # ""). Free text counts only when it differs from the row's
+            # label, i.e. the user actually typed a family name (the
+            # "from theme"-as-a-font regression).
             data = w.currentData()
             text = w.currentText().strip()
             row_label = w.itemText(w.currentIndex()).strip()
@@ -1030,10 +968,9 @@ class SettingsDialog(QDialog):
                 w.setEnabled(on)
 
     def _apply_preview(self, key: str, value) -> None:
-        """Live-preview one preview-flagged option through the managers.
-        Never persists anything — cancel reverts via the opening snapshot
-        (_on_cancel), and the managers no-op on same-value pushes so a
-        populate-or-return-to-original change is harmless."""
+        """Live-preview one option through the managers. Never persists
+        — cancel reverts via the opening snapshot, and the managers
+        no-op on same-value pushes."""
         if key == "theme":
             if value:
                 theming.manager().apply(str(value))
@@ -1057,9 +994,9 @@ class SettingsDialog(QDialog):
             theming.manager().theme_changed.emit(current)
 
     def _preview_layout(self, slug: str) -> None:
-        """Live-apply a layout pick through the parent MainWindow. The
-        per-slot overrides ride along unchanged from settings — the strip
-        builder owns editing those."""
+        """Live-apply a layout pick through the parent MainWindow;
+        per-slot overrides ride along unchanged (the strip builder owns
+        editing those)."""
         if not slug:
             return
         parent = self.parent()
@@ -1074,10 +1011,9 @@ class SettingsDialog(QDialog):
     # ---------- accept / cancel ----------
 
     def _on_save(self) -> None:
-        """Diff-apply: write ONLY the fields whose widget value differs
-        from the opening snapshot onto the live settings, save exactly
-        those via save_fields, and remember the changed keys for the
-        window's live-apply chain."""
+        """Write ONLY the fields whose widget value differs from the
+        opening snapshot, save exactly those via save_fields, and
+        remember the changed keys for the live-apply chain."""
         s = self._settings
         changed: list[str] = []
         for desc in self._descs:
@@ -1087,21 +1023,17 @@ class SettingsDialog(QDialog):
             if value != self._originals[desc.key]:
                 setattr(s, desc.key, value)
                 changed.append(desc.key)
-        # A parked strip-builder pick commits WITH the layout it was
-        # built against — only if the accepted layout still IS that
-        # layout. A pick whose base the combo abandoned afterwards is
-        # dropped: its diff describes another layout's slots, and
-        # committing it is exactly the skew this parking prevents (the
-        # combo move already re-previewed the window past it).
+        # A parked strip pick commits only if the accepted layout is
+        # still the one it was diffed against; otherwise it's dropped —
+        # its diff describes another layout's slots.
         parked = self._pending_strip_overrides
         if parked is not None:
             self._pending_strip_overrides = None
             if (s.layout or "classic") == self._pending_strip_base:
                 self._commit_strip_overrides(parked)
-        # Flipping the play-reporting toggle (or having it on at all)
-        # counts as answering the one-time question — the upgrade pointer
-        # stops. Saving with it untouched-and-off doesn't: we can't know
-        # the user ever looked at this tab.
+        # Flipping the play-reporting toggle (or having it on) answers
+        # the one-time question and stops the upgrade pointer.
+        # Untouched-and-off doesn't — we can't know the user looked.
         if ((bool(s.report_plays) or "report_plays" in changed)
                 and not s.report_plays_answered):
             s.report_plays_answered = True
@@ -1113,30 +1045,26 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def changed_keys(self) -> tuple[str, ...]:
-        """The accepted diff — what the window's live-apply chain runs
-        on. Empty until an accept happens."""
+        """The accepted diff the live-apply chain runs on; empty until
+        an accept happens."""
         return self._accepted_changes
 
     def _on_cancel(self) -> None:
-        # The [cancel] button. Everything happens in reject() so that
-        # button-cancel, Esc and the window-manager close share ONE
-        # revert path.
+        # Everything happens in reject() so button-cancel, Esc and the
+        # window-manager close share ONE revert path.
         self.reject()
 
     def reject(self) -> None:   # cancel button, Esc, AND window close
-        """QDialog routes its built-in cancel paths — the Esc key and
-        the titlebar close — straight here, NOT through the cancel
-        button. The preview revert therefore lives here, guarded so it
-        runs once and never after an accept: previews never commit, on
-        ANY way out (rule 8; phase 1's browse-flip bug class)."""
+        """QDialog routes Esc and the titlebar close straight here, NOT
+        through the cancel button — so the preview revert lives here,
+        guarded to run once and never after an accept."""
         if not self._accepted and not self._reverted:
             self._reverted = True
             self._revert_previews()
         super().reject()
 
     def _revert_previews(self) -> None:
-        # Put back whatever the session started with (no-ops when
-        # untouched). Previews never commit.
+        # Put back the opening state (no-ops when untouched).
         theming.manager().set_user_font(self._initial_font)
         theming.manager().set_user_font_size(self._initial_font_size)
         theming.set_case_override(self._initial_case)
@@ -1149,8 +1077,8 @@ class SettingsDialog(QDialog):
         layout_now = self._widgets["layout"].currentData() or "classic"
         if (self._initial_layout != layout_now
                 or self._pending_strip_overrides is not None):
-            # A parked strip pick is pixels-only — dropping the dict and
-            # re-applying the opening layout+overrides erases it.
+            # A parked strip pick is pixels-only — re-applying the
+            # opening layout+overrides erases it.
             self._pending_strip_overrides = None
             self._revert_layout_preview()
 
@@ -1167,10 +1095,8 @@ class SettingsDialog(QDialog):
     # ---------- session / advanced chrome handlers ----------
 
     def _on_sign_out(self) -> None:
-        # Defer the confirm/inform message boxes past this button's click
-        # emission — a nested modal opened synchronously from a click inside
-        # an already-modal dialog is the PySide6 + py3.14 segfault pattern
-        # ([[feedback-pyside-modal]]).
+        # Defer the message boxes past the click emission
+        # ([[feedback-pyside-modal]] segfault pattern).
         QTimer.singleShot(0, self._do_sign_out)
 
     def _do_sign_out(self) -> None:
@@ -1189,37 +1115,34 @@ class SettingsDialog(QDialog):
         )
 
     def _find_main_window(self):
-        """Walk up to the MainWindow (same trick as _on_open_audio_fx) — it
-        owns the refresh worker, the dedup flags and the completion signal."""
+        """Walk up to the MainWindow — it owns the refresh worker, the
+        dedup flags and the completion signal."""
         win = self.parent()
         while win is not None and not hasattr(win, "refresh_session_manual"):
             win = win.parent()
         return win
 
     def _binding_text(self, action_id: str, fallback: str) -> str:
-        """A live key binding for dialog blurbs, resolved through the
-        main window's keymap (binding_display) so a rebind can't orphan
-        the copy. Parentless dialogs (tests) fall back to the shipped
-        default text; a deliberately unbound action resolves to "" so
-        callers drop the key mention entirely."""
+        """A live key binding for dialog blurbs (binding_display), so a
+        rebind can't orphan the copy. Parentless dialogs (tests) fall
+        back to the shipped default; a deliberately unbound action
+        resolves to "" so callers drop the mention."""
         win = self._find_main_window()
         if win is not None and hasattr(win, "binding_display"):
             return win.binding_display(action_id)
         return fallback
 
     def _tool_sound(self, key: str) -> None:
-        """Click feedback for the power-tool launchers, routed through
-        the main window's UiSoundPlayer (the _ui_sound pattern — this
-        dialog has no player of its own). Silently absent when the
-        dialog is parentless."""
+        """Click feedback via the main window's UiSoundPlayer; silently
+        absent when the dialog is parentless."""
         win = self._find_main_window()
         if win is not None and hasattr(win, "_ui_sound"):
             win._ui_sound(key)
 
     def _session_state_text(self) -> str:
-        """The yt session at rest, phrased for the settings row. Expiry is
-        best effort — imports from before tide recorded it show plain
-        "signed in", and that must not read as a problem."""
+        """The yt session at rest. Expiry is best effort — imports from
+        before tide recorded it show plain "signed in", which must not
+        read as a problem."""
         if not auth.have_auth():
             return "not signed in"
         remaining = auth.seconds_until_expiry()
@@ -1242,8 +1165,8 @@ class SettingsDialog(QDialog):
     def _on_refresh_session(self) -> None:
         win = self._find_main_window()
         if win is None:
-            # Constructed without a MainWindow parent (tests) — nothing to
-            # delegate to, and nothing will emit the completion signal.
+            # No MainWindow parent (tests) — nothing to delegate to,
+            # nothing will emit completion.
             self.refresh_session_status.setText("couldn't reach the main window")
             return
         self.refresh_session_btn.setEnabled(False)
@@ -1255,13 +1178,12 @@ class SettingsDialog(QDialog):
         self.refresh_session_status.setText(message)
 
     def _on_open_taste(self) -> None:
-        # Deferred out of the click emission per the modal-from-click
-        # crash rule ([[feedback-pyside-modal]]).
+        # Deferred past the click emission ([[feedback-pyside-modal]]).
         QTimer.singleShot(0, self._do_open_taste)
 
     def _do_open_taste(self) -> None:
-        """v1.5 taste-profile editor. Talks to the live YT source from the
-        registry; the button just reports when there isn't one."""
+        """Taste-profile editor. Talks to the live YT source from the
+        registry; reports when there isn't one."""
         from ..sources import registry
         src = registry().get("ytmusic")
         if src is None or not src.supports("taste"):
@@ -1273,9 +1195,8 @@ class SettingsDialog(QDialog):
         dlg.exec()
 
     def _on_open_audio_fx(self) -> None:
-        """Close this dialog + jump to the full audio FX panel. Settings
-        dialog is modal so we save first; the FX panel mutates state
-        without needing this dialog reopened."""
+        """Save + close, then jump to the full audio FX panel (which
+        mutates state without this dialog)."""
         self._on_save()
         win = self.parent()
         while win is not None and not hasattr(win, "_switch_view"):
@@ -1289,9 +1210,7 @@ class SettingsDialog(QDialog):
     # ---------- power tools ----------
 
     def _on_open_theme_editor(self) -> None:
-        # Deferred out of the click emission — constructing/exec'ing a
-        # modal inside a clicked() handler is the PySide6 + py3.14
-        # segfault pattern ([[feedback-pyside-modal]]).
+        # Deferred past the click emission ([[feedback-pyside-modal]]).
         self._tool_sound("modal_open")
         QTimer.singleShot(0, self._do_open_theme_editor)
 
@@ -1304,34 +1223,27 @@ class SettingsDialog(QDialog):
         self._tool_sound("modal_close")
 
     def _on_theme_saved(self, slug: str) -> None:
-        """A theme was just written AND applied by the editor (which also
-        refreshed the registry). Persisting ``settings.theme`` is OUR
-        job: repopulate the theme combo from the fresh registry and
-        select the new slug, so the pick rides the dialog's normal
-        pending-diff + accept path (save_fields, live-apply chain,
-        _reconcile_preset_after_dialog). Cancel still reverts the applied
-        theme — previews never commit; the saved theme dir simply stays
-        available in every picker.
-
-        The rebuild routes through refresh_theme_choices, so the saved
-        slug is listed and selected even when it landed on the other
-        personality's side of the aesthetic filter.
-        """
+        """A theme was just written AND applied by the editor (registry
+        already refreshed). Persisting ``settings.theme`` is OUR job:
+        rebuild the combo (via refresh_theme_choices, so the slug is
+        listed even across the aesthetic filter) and select it, so the
+        pick rides the normal pending-diff + accept path. Cancel still
+        reverts the applied theme — previews never commit; the saved
+        theme dir just stays on disk."""
         combo = self._widgets.get("theme")
         if combo is None:
             return
         self.refresh_theme_choices(select=slug)
         if combo.currentData() != slug:
             return      # not in the registry after all — nothing staged
-        # The rebuild runs under the populate guard, so no signal fired:
-        # file the pending change (and its preview) by hand.
+        # The rebuild ran under the populate guard (no signal fired) —
+        # file the pending change and its preview by hand.
         self._on_option_changed("theme")
 
     def _on_open_strip_builder(self) -> None:
-        """open_strip_builder defers construction internally — wiring it
-        straight to the click is sanctioned (no double-defer needed).
-        A parked pick (made while a layout preview is pending) re-opens
-        as the builder's starting state, not the stale saved dict."""
+        """open_strip_builder defers construction internally. A parked
+        pick re-opens as the builder's starting state, not the stale
+        saved dict."""
         self._tool_sound("modal_open")
         from .strip_builder import open_strip_builder
         overrides = (dict(self._pending_strip_overrides)
@@ -1344,20 +1256,18 @@ class SettingsDialog(QDialog):
         )
 
     def _layout_preview_pending(self) -> bool:
-        """True while the layout combo shows an unaccepted preview — the
-        layout manager is re-based on it, so a strip-builder diff made
-        now describes a layout settings doesn't hold yet."""
+        """True while the layout combo shows an unaccepted preview — a
+        strip diff made now describes a layout settings doesn't hold
+        yet."""
         layout_now = self._widgets["layout"].currentData() or "classic"
         return layout_now != self._initial_layout
 
     def _on_strip_overrides(self, payload: dict) -> None:
-        """The strip builder's accepted diff. With no layout preview
-        pending it commits immediately through the window's sanctioned
-        route; with one pending it is PARKED — previewed on the window,
-        committed only when the dialog's accept commits the layout it
-        was diffed against, dropped on cancel. Only fires on a real
-        change; an empty dict means "clear back to the layout defaults"
-        and MUST still apply."""
+        """The strip builder's accepted diff: committed immediately
+        when no layout preview is pending, otherwise PARKED — previewed
+        on the window, committed only when accept commits the layout it
+        was diffed against, dropped on cancel. An empty dict means
+        "clear to layout defaults" and MUST still apply."""
         if self._layout_preview_pending():
             self._pending_strip_overrides = dict(payload)
             self._pending_strip_base = (
@@ -1373,21 +1283,19 @@ class SettingsDialog(QDialog):
         if win is not None and hasattr(win, "apply_strip_overrides"):
             win.apply_strip_overrides(dict(payload))
         else:
-            # Parentless (tests): keep the settings + layout manager
-            # truthful even with no window strip to rebuild.
+            # Parentless (tests): keep settings + layout manager
+            # truthful with no window strip to rebuild.
             from .. import layout as layout_module
             self._settings.layout_overrides = dict(payload)
             layout_module.manager().update_overrides(dict(payload))
             settings_module.save_fields(self._settings, "layout_overrides")
-        # The committed bar is a COMMIT, not a preview — if the user then
-        # cancels this dialog with a layout preview pending, the revert
-        # must land on these overrides, not the opening snapshot.
+        # The committed bar is a COMMIT — a later cancel must revert
+        # onto these overrides, not the opening snapshot.
         self._initial_overrides = dict(self._settings.layout_overrides or {})
 
     def _preview_parked_strip(self) -> None:
-        """Show the parked bar on the previewed layout — pixels only,
-        through the same live path as the layout preview. Nothing
-        persists; cancel re-applies the opening snapshot over it."""
+        """Show the parked bar on the previewed layout — pixels only;
+        nothing persists, cancel re-applies the opening snapshot."""
         parent = self.parent()
         if parent is None or not hasattr(parent, "apply_layout"):
             return
@@ -1418,12 +1326,10 @@ class SettingsDialog(QDialog):
 
 
 class _TasteProfileDialog(QDialog):
-    """Pick the artists the source's recommender should treat as taste.
-
-    Write-only by API design: YT hands back the tunable artist list but
+    """Pick the artists the source's recommender should treat as
+    taste. Write-only by API design: YT returns the tunable list but
     not the current selection, so this is "select and apply", not an
-    editor of existing state — the blurb says so instead of pretending.
-    """
+    editor."""
 
     def __init__(self, source, parent=None) -> None:
         super().__init__(parent)

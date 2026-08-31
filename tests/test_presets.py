@@ -94,9 +94,8 @@ class _FakeManagersCase(_PatchCase):
         self._patch(layout_module, "manager", lambda: self.layout_mgr)
         self._patch(motion_module, "set_intensity",
                     lambda v: self.log.append(("set_intensity", v)))
-        # bind_preset is NOT faked — the dialect binding is part of what
-        # these tests pin — but its global is restored so an applied
-        # preset here can't decide another test file's dialect.
+        # bind_preset is NOT faked (the dialect binding is pinned here)
+        # but its global is restored so it can't decide another file's dialect
         self._bound_profile = motion_module._preset_profile
         self.addCleanup(
             setattr, motion_module, "_preset_profile", self._bound_profile)
@@ -150,8 +149,8 @@ class ContractShapeTests(unittest.TestCase):
         for name in STASH_FIELDS:
             self.assertIn(name, known)
         self.assertEqual(len(STASH_FIELDS), len(set(STASH_FIELDS)))
-        # The preset bookkeeping itself must never be stashed — a stash
-        # containing "preset" would make restore() self-referential.
+        # the preset bookkeeping itself must never be stashed — a stash
+        # containing "preset" would make restore() self-referential
         for meta in ("preset", "preset_chosen", "preset_state"):
             self.assertNotIn(meta, STASH_FIELDS)
 
@@ -261,8 +260,8 @@ class RestoreTests(unittest.TestCase):
         self.assertEqual(s.font_size_override_pt, 0)
 
     def test_partial_stash_backfills_per_field(self) -> None:
-        # A stash from an older build that predates two of the fields:
-        # known fields restore, missing ones fall to builtin/defaults.
+        # a stash from an older build that predates two of the fields:
+        # known fields restore, missing ones fall to builtin/defaults
         s = Settings()
         s.preset_state["modern"] = {"theme": "ambient", "motion": "lite"}
         restore(s, "modern")
@@ -276,8 +275,8 @@ class RestoreTests(unittest.TestCase):
             restore(Settings(), "vaporwave")
 
     def test_unknown_preset_with_stash_restores(self) -> None:
-        # Phase-2 custom presets ride the same stash path — only the
-        # builtin-defaults fallback needs a known id.
+        # custom presets ride the same stash path — only the
+        # builtin-defaults fallback needs a known id
         s = Settings()
         s.preset_state["vaporwave"] = {
             name: getattr(Settings(), name) for name in STASH_FIELDS
@@ -303,9 +302,8 @@ class ApplyPresetTests(_FakeManagersCase):
         ])
 
     def test_apply_binds_the_motion_dialect_to_the_personality(self) -> None:
-        # Bounce belongs to the personality, not the intensity: a
-        # brutalist user is free to turn motion up to full, and must
-        # still get mechanical curves.
+        # the dialect follows the personality, not the intensity —
+        # brutalist at motion full still gets mechanical curves
         s = _brutalist_customized()
         apply_preset(s, "modern", persist=False)
         self.assertEqual(motion_module.bound_profile(), "springy")
@@ -373,11 +371,9 @@ class ApplyPresetTests(_FakeManagersCase):
         self.assertNotIn("", s.preset_state)
 
     def test_reapplying_the_active_preset_keeps_live_values(self) -> None:
-        # Same-id apply (startup bootstrap) must NOT restore: the live
-        # fields are the truth — the settings dialog edits them without
-        # touching the stash, and restoring a stale snapshot here is what
-        # reverted every dialog customization on the next launch. The
-        # stash refreshes from the live values instead.
+        # same-id apply (startup bootstrap) must NOT restore: restoring a
+        # stale snapshot is what reverted every dialog customization on
+        # the next launch. The stash refreshes from the live values.
         s = _brutalist_customized()
         stash(s)
         s.theme = "abyss"            # dialog-style edit, stash untouched
@@ -387,7 +383,6 @@ class ApplyPresetTests(_FakeManagersCase):
         self.assertEqual(s.motion, "full")
         self.assertEqual(s.preset_state["brutalist"]["theme"], "abyss")
         self.assertEqual(s.preset_state["brutalist"]["motion"], "full")
-        # And the managers were pushed the LIVE values.
         self.assertIn(
             ("apply_bundle", {"slug": "abyss", "font_family": "Terminus",
                               "font_size": 11, "case": "upper"}),
@@ -395,9 +390,8 @@ class ApplyPresetTests(_FakeManagersCase):
         )
 
     def test_same_id_reapply_of_unknown_preset_does_not_raise(self) -> None:
-        # A future version's third preset after a downgrade: as long as
-        # it's the ACTIVE id, startup re-apply pushes the live fields and
-        # never consults restore() (which would KeyError on it).
+        # a downgrade's unknown ACTIVE id: startup re-apply pushes the
+        # live fields, never consults restore() (which would KeyError)
         s = _brutalist_customized()
         s.preset = "vaporwave"
         s.preset_state.clear()
@@ -459,7 +453,6 @@ class ApplyPresetPersistIntegrationTests(_FakeManagersCase):
                          {"progress": "blocks", "strip": "bottom"})
         self.assertIs(brut["ui_sounds_enabled"], True)
         self.assertIs(brut["mini_pulse"], False)
-        # And the reloaded state flips back losslessly.
         apply_preset(back, "brutalist", persist=False)
         self.assertEqual(back.theme, "gruvbox-mono")
         self.assertEqual(back.font_family_override, "Terminus")
@@ -494,8 +487,8 @@ class AdoptCurrentTests(_FakeManagersCase):
         self.assertEqual(s.preset, "modern")
 
     def test_adoption_is_visually_lossless(self) -> None:
-        # The migration invariant: a 1.x user's settings change in NOTHING
-        # but the preset bookkeeping. Every visible field stays verbatim.
+        # the migration invariant: nothing but the preset bookkeeping
+        # moves; every visible field stays verbatim
         self.theme_mgr.themes = [self._theme("gruvbox-mono", "brutalist")]
         s = _brutalist_customized()
         s.preset = ""
@@ -504,13 +497,12 @@ class AdoptCurrentTests(_FakeManagersCase):
         after = dataclasses.asdict(s)
         changed = {k for k in before if before[k] != after[k]}
         self.assertEqual(changed, {"preset", "preset_state"})
-        # The stash snapshots the current values verbatim...
         self.assertEqual(
             s.preset_state["brutalist"],
             {name: before[name] for name in STASH_FIELDS},
         )
-        # ...and adoption is NOT a choice — the chooser can still offer
-        # itself later.
+        # …and adoption is NOT a choice — the chooser can still offer
+        # itself later
         self.assertFalse(s.preset_chosen)
 
     def test_weird_aesthetic_value_falls_back_to_modern(self) -> None:

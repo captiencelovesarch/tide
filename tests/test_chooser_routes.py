@@ -1,21 +1,18 @@
-"""v2.0 phase 4 — the three doors to "choose your tide".
+"""v2.0 phase 4 — the three routes into a personality choice.
 
-Every route funnels through app.commit_personality_choice, so what's
-pinned here is the routing and what each door is allowed to change:
+Every route funnels through app.commit_personality_choice; pinned here
+is the routing and what each door may change:
 
-  (b1) fresh install — the wizard's aesthetic step IS the chooser's
-       panes now; a click there SELECTS, and only app.py's post-wizard
-       handoff commits (pre-window, before MainWindow exists);
-  (b2) update into 2.0 — the chooser is offered exactly once, and a
-       DISMISSAL moves nothing on disk but the "asked" stamp (the
-       migration invariant's last mile);
-  (b3) settings re-pick — the appearance tab's personality section flips
-       live through window.switch_preset, keeps each personality's own
-       customizations, and re-bases the open dialog so neither accept
-       nor cancel can undo the commit.
+  (b1) fresh install — the wizard's aesthetic step hosts the chooser's
+       panes; a click selects, and only app.py's post-wizard handoff
+       commits (pre-window);
+  (b2) update into 2.0 — the chooser is offered exactly once; a
+       dismissal moves nothing on disk but the "asked" stamp;
+  (b3) settings re-pick — flips live through window.switch_preset,
+       keeps each personality's customizations, and re-bases the open
+       dialog so neither accept nor cancel can undo the commit.
 
-Run offscreen:
-  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
+Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
 import dataclasses
 import sys
@@ -85,13 +82,9 @@ class _FakeWizard:
 
 
 class _RouteCase(unittest.TestCase):
-    """Hermetic settings file, real managers, no app-wide QSS pushes.
-
-    The QSS spy is test_restyle_coalesce's pattern: this deep into the
-    suite every real push repolishes every window an earlier file leaked.
-    Manager state stays fully real — these routes are only interesting
-    because they drive the actual theming/layout/motion managers.
-    """
+    """Hermetic settings file, no app-wide QSS pushes; manager state
+    stays real — the routes are only interesting because they drive the
+    actual managers."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -151,9 +144,7 @@ class _RouteCase(unittest.TestCase):
         return mock.patch.object(chooser_module, "ChooserDialog", _FakeChooser)
 
 
-# ---------------------------------------------------------------------------
-# (b1) fresh install — the wizard's aesthetic step
-# ---------------------------------------------------------------------------
+# ---------- (b1) fresh install: the wizard's aesthetic step ----------
 
 
 class FreshInstallRouteTest(_RouteCase):
@@ -163,14 +154,11 @@ class FreshInstallRouteTest(_RouteCase):
         return step
 
     def test_the_step_hosts_the_real_chooser_panes(self) -> None:
-        # Not a fork of the design: literally the chooser's widget, so
-        # the pitch can only ever be written once.
         step = self._step()
         self.assertEqual(sorted(step._panes), ["brutalist", "modern"])
         for preset_id, pane in step._panes.items():
             self.assertIsInstance(pane, chooser_module.PersonalityPane)
             self.assertEqual(pane.preset_id, preset_id)
-            # Real theme tokens, not a hardcoded swatch.
             self.assertEqual(pane.theme.slug,
                              presets.builtin(preset_id).theme)
             self.assertTrue(pane._compact, "the wizard canvas needs compact")
@@ -201,10 +189,8 @@ class FreshInstallRouteTest(_RouteCase):
         self.assertEqual(result.aesthetic, "modern")
 
     def test_the_pane_button_says_what_it_does_in_this_host(self) -> None:
-        # The pane's button COMMITS in the standalone dialog, so there it
-        # says "choose". Here it only moves the selection ring — the
-        # wizard's own [next] advances — so a button labelled "choose"
-        # would look broken the moment it was pressed.
+        # here the button only moves the selection ring (the wizard's
+        # [next] advances); in the standalone dialog it commits
         step = self._step()
         brutalist = step._panes["brutalist"]
         modern = step._panes["modern"]
@@ -219,7 +205,6 @@ class FreshInstallRouteTest(_RouteCase):
         self._widgets.append(dlg)
         self.assertEqual(dlg.pane("brutalist")._button.text(), "[choose]")
         self.assertEqual(dlg.pane("modern")._button.text(), "choose")
-        # Arrow-key focus is not a decision: the label must not move.
         dlg._move_focus(1)
         self.assertTrue(dlg.pane("modern").is_selected())
         self.assertEqual(dlg.pane("modern")._button.text(), "choose")
@@ -231,8 +216,6 @@ class FreshInstallRouteTest(_RouteCase):
         self.assertTrue(step._panes["modern"].is_selected())
 
     def test_the_step_commits_nothing(self) -> None:
-        # Selecting in the wizard is not a personality: only the
-        # post-wizard handoff commits (tools emit, callers persist).
         with mock.patch.object(settings_module, "save") as save, \
                 mock.patch.object(settings_module, "save_fields") as fields:
             step = self._step()
@@ -262,22 +245,17 @@ class FreshInstallRouteTest(_RouteCase):
         self.assertEqual(s.preset, "modern")
         self.assertTrue(s.preset_chosen)
         self.assertEqual(s.theme, "nord")
-        # Live on the managers before MainWindow is even a thought.
         self.assertEqual(theming.manager().current().slug, "nord")
         self.assertEqual(motion_module.intensity().value, "full")
         disk = settings_module.load()
         self.assertEqual(disk.preset, "modern")
         self.assertTrue(disk.preset_chosen)
         self.assertEqual(disk.preset_state["modern"]["theme"], "nord")
-        # run()'s actual next line: the update route must stay quiet for
-        # someone who just answered the question in the wizard.
         with self._fake_chooser("brutalist"):
             self.assertEqual(app_module.run_chooser_if_needed(s), "")
         self.assertEqual(_FakeChooser.opened, [])
 
     def test_a_fresh_install_never_sees_the_update_route(self) -> None:
-        # The wizard owns first launch; the standalone chooser must not
-        # pile on top of it.
         s = Settings()                          # first_launch_complete False
         with self._fake_chooser("modern"):
             self.assertEqual(app_module.run_chooser_if_needed(s), "")
@@ -285,9 +263,7 @@ class FreshInstallRouteTest(_RouteCase):
         self.assertFalse(s.preset_chosen)
 
 
-# ---------------------------------------------------------------------------
-# (b2) update into 2.0 — the standalone chooser, once
-# ---------------------------------------------------------------------------
+# ---------- (b2) update into 2.0: the standalone chooser, once ----------
 
 
 class UpdateRouteTest(_RouteCase):
@@ -297,8 +273,6 @@ class UpdateRouteTest(_RouteCase):
         with self._fake_chooser("modern"):
             self.assertEqual(app_module.run_chooser_if_needed(s), "modern")
             self.assertEqual(len(_FakeChooser.opened), 1)
-            # Pre-window: no parent, and preselected on the personality
-            # the silent adoption filed them under.
             parent, initial = _FakeChooser.opened[0]
             self.assertIsNone(parent)
             self.assertEqual(initial, "brutalist")
@@ -316,16 +290,14 @@ class UpdateRouteTest(_RouteCase):
         disk = settings_module.load()
         self.assertEqual(disk.preset, "modern")
         self.assertTrue(disk.preset_chosen)
-        # The brutalist look they arrived with is stashed, not lost.
         self.assertEqual(disk.preset_state["brutalist"]["theme"], "gruvbox")
         self.assertEqual(
             disk.preset_state["brutalist"]["layout_overrides"],
             {"progress": "blocks"})
 
     def test_first_visit_wears_the_new_personality_slots(self) -> None:
-        # Pre-window parity with switch_preset's first-visit seeding —
-        # without it a chooser pick made before MainWindow exists would
-        # wear the outgoing personality's slot variants forever.
+        # pre-window parity with switch_preset's first-visit seeding —
+        # without it a pre-window pick wears the outgoing slots forever
         s = self._upgrader()
         with self._fake_chooser("modern"):
             app_module.run_chooser_if_needed(s)
@@ -370,9 +342,7 @@ class UpdateRouteTest(_RouteCase):
         self.assertEqual(_FakeChooser.opened, [])
 
 
-# ---------------------------------------------------------------------------
-# the shared commit helper
-# ---------------------------------------------------------------------------
+# ---------- the shared commit helper ----------
 
 
 class CommitHelperTest(_RouteCase):
@@ -395,10 +365,8 @@ class CommitHelperTest(_RouteCase):
         self.assertTrue(settings_module.load().preset_chosen)
 
     def test_re_picking_the_active_personality_keeps_its_tweaks(self) -> None:
-        # Re-picking must not reset anything — the same-id apply_preset
-        # path refreshes the stash from the live fields, it never
-        # restores over them. "Re-pick" means the question has already
-        # been answered; the FIRST answer is the case below.
+        # same-id apply_preset refreshes the stash from live fields, never
+        # restores over them; the FIRST answer is the case below
         s = self._upgrader()
         s.preset_chosen = True
         self.assertTrue(app_module.commit_personality_choice(s, "brutalist"))
@@ -409,8 +377,6 @@ class CommitHelperTest(_RouteCase):
         self.assertTrue(s.preset_chosen)
 
     def test_first_answer_keeps_are_all_real_stash_fields(self) -> None:
-        # A typo in FIRST_ANSWER_KEEPS silently resets a field the user
-        # brought with them, and nothing else would notice.
         self.assertTrue(
             set(presets.FIRST_ANSWER_KEEPS) <= set(presets.STASH_FIELDS),
             set(presets.FIRST_ANSWER_KEEPS) - set(presets.STASH_FIELDS))
@@ -420,12 +386,9 @@ class CommitHelperTest(_RouteCase):
             presets.claim_builtin(Settings(), "vaporwave")
 
     def test_the_first_answer_delivers_the_product_it_advertises(self) -> None:
-        # The migration adopts an upgrader into a personality before the
-        # chooser opens, so picking that same pane used to be a dead
-        # button: they clicked the side that says "nothing moves. ever."
-        # and kept every rounded corner. A FIRST answer claims the
-        # builtin feel; the look they brought (theme, layout, slots)
-        # survives it.
+        # the migration adopts pre-chooser, so picking the adopted pane
+        # used to be a dead button. A FIRST answer claims the builtin
+        # feel; the look they brought (theme, layout, slots) survives.
         s = Settings()
         s.first_launch_complete = True
         s.theme = "gruvbox"                     # aesthetic=brutalist
@@ -444,11 +407,9 @@ class CommitHelperTest(_RouteCase):
         self.assertEqual(s.motion, "off")
         self.assertFalse(s.adaptive_background)
         self.assertEqual(s.nav_icon_set, "off")
-        # …and the look they arrived with is untouched.
         self.assertEqual(s.theme, "gruvbox")
         self.assertEqual(s.layout, "classic")
         self.assertEqual(s.layout_overrides, {"progress": "blocks"})
-        # Live on the managers, and stashed as brutalist's own state.
         self.assertEqual(motion_module.intensity().value, "off")
         self.assertEqual(s.preset_state["brutalist"]["corner_style"], "sharp")
         disk = settings_module.load()
@@ -456,9 +417,8 @@ class CommitHelperTest(_RouteCase):
         self.assertEqual(disk.theme, "gruvbox")
 
     def test_the_first_answer_on_the_modern_side_wakes_it_up(self) -> None:
-        # The mirror: a 1.5 user whose theme reads modern but who has
-        # motion off and no backdrop picks the pane promising "backdrops
-        # that breathe with the track" — and gets them.
+        # the mirror: a modern-themed 1.5 user with motion off picks the
+        # modern pane and gets the full builtin feel
         s = Settings()
         s.first_launch_complete = True
         s.theme = "adaptive"                    # aesthetic=modern
@@ -478,8 +438,8 @@ class CommitHelperTest(_RouteCase):
         self.assertEqual(live.theme, "adaptive")
 
     def test_a_second_answer_is_a_re_pick_not_a_reset(self) -> None:
-        # Answer once (claims the builtin), tweak, re-pick: the tweak
-        # stands. The claim is gated on the stamp, not on the id.
+        # answer once, tweak, re-pick: the tweak stands — the claim is
+        # gated on the stamp, not the id
         s = self._upgrader()
         app_module.commit_personality_choice(s, "brutalist")
         s.corner_style = "rounded"
@@ -489,9 +449,8 @@ class CommitHelperTest(_RouteCase):
         self.assertEqual(s.motion, "lite")
 
     def test_a_dismissal_then_a_settings_pick_is_a_re_pick(self) -> None:
-        # Dismissing stamps the question as ASKED (they kept their 1.x
-        # look on purpose), so a later pick of the same personality from
-        # settings must not retroactively reset it.
+        # a dismissal stamps the question as asked, so a later
+        # same-personality pick from settings is a re-pick, not a reset
         s = self._upgrader()
         with self._fake_chooser(""):
             app_module.run_chooser_if_needed(s)
@@ -501,9 +460,8 @@ class CommitHelperTest(_RouteCase):
         self.assertEqual(s.theme, "gruvbox")
 
     def test_the_wizards_own_answers_are_never_claimed_over(self) -> None:
-        # Route (b1) stamps preset_chosen itself before handing off, so
-        # the handoff is a re-pick by construction — a wizard user who
-        # asked for motion=off on the modern side keeps it.
+        # (b1) stamps preset_chosen before handing off, so the handoff is
+        # a re-pick by construction — a wizard user's motion=off survives
         from tide.ui import onboarding as onboarding_module
         _FakeWizard.accept = True
         _FakeWizard.result = OnboardingResult(
@@ -521,9 +479,7 @@ class CommitHelperTest(_RouteCase):
         self.assertEqual(s.theme, "nord")
 
 
-# ---------------------------------------------------------------------------
-# --theme vs the boot side-quests
-# ---------------------------------------------------------------------------
+# ---------- --theme vs the boot routes ----------
 
 
 class CliThemeOverrideTest(_RouteCase):
@@ -536,13 +492,12 @@ class CliThemeOverrideTest(_RouteCase):
         self.assertEqual(theming.manager().current().slug, "nord")
         with self._fake_chooser("modern"):
             app_module.run_chooser_if_needed(s)
-        # The commit legitimately re-applied modern's bundle over it…
+        # the commit re-applied modern's bundle over it…
         self.assertEqual(theming.manager().current().slug,
                          presets.builtin("modern").theme)
         # …and run()'s next line puts the override back.
         app_module._reassert_cli_theme("nord")
         self.assertEqual(theming.manager().current().slug, "nord")
-        # Still run-only: nothing about it reached settings or the stash.
         self.assertEqual(s.theme, presets.builtin("modern").theme)
         disk = settings_module.load()
         self.assertEqual(disk.theme, presets.builtin("modern").theme)
@@ -566,9 +521,7 @@ class CliThemeOverrideTest(_RouteCase):
             self.assertEqual(spy.call_count, 0)
 
 
-# ---------------------------------------------------------------------------
-# (b3) settings re-pick
-# ---------------------------------------------------------------------------
+# ---------- (b3) settings re-pick ----------
 
 
 class SettingsRepickTest(_RouteCase):
@@ -638,7 +591,6 @@ class SettingsRepickTest(_RouteCase):
                          presets.builtin("modern").theme)
         self.assertEqual(w._slot_progress, "bar")   # the window rebuilt
         self.assertEqual(settings_module.load().preset, "modern")
-        # The picker and the theme combo followed the flip.
         self.assertEqual(dlg.personality_picker.currentData(), "modern")
         self.assertEqual(dlg.theme_picker.currentData(), s.theme)
 
@@ -657,9 +609,8 @@ class SettingsRepickTest(_RouteCase):
         self.assertEqual(theming.manager().current().slug, "gruvbox")
 
     def test_accept_after_a_flip_keeps_the_new_personality(self) -> None:
-        # The dialog's snapshots were taken against brutalist; without
-        # the re-base, accept would diff modern's live values against
-        # them and write the whole outgoing look back over the flip.
+        # without the re-base, accept diffs modern's live values against
+        # brutalist-era snapshots and writes the outgoing look back
         s = self._brutalist()
         w = self._window(s)
         QTest.qWait(20)
@@ -675,9 +626,8 @@ class SettingsRepickTest(_RouteCase):
         self.assertEqual(disk.theme, presets.builtin("modern").theme)
 
     def test_the_windows_accept_path_does_not_flip_back(self) -> None:
-        # _do_open_settings reconciles the preset after an accepted
-        # dialog. Its `before` snapshot predates the flip, so the
-        # reconcile has to read the ACCEPTED state and leave it alone.
+        # _do_open_settings' `before` snapshot predates the flip; the
+        # reconcile must read the ACCEPTED state and leave it alone
         import copy
         s = self._brutalist()
         w = self._window(s)
@@ -692,7 +642,6 @@ class SettingsRepickTest(_RouteCase):
         self.assertEqual(s.theme, presets.builtin("modern").theme)
         self.assertEqual(theming.manager().current().slug,
                          presets.builtin("modern").theme)
-        # The brutalist look is still remembered for the trip back.
         self.assertEqual(s.preset_state["brutalist"]["theme"], "gruvbox")
 
     # ---- flip + cross-personality pick, through the REAL open path
@@ -717,24 +666,19 @@ class SettingsRepickTest(_RouteCase):
         QTest.qWait(40)
 
     def test_a_flip_then_a_cross_pick_files_each_theme_on_its_own_side(self) -> None:
-        # The window snapshots the settings at dialog-OPEN for its
-        # accept-time reconcile, and the reconcile hands that snapshot's
-        # theme back to the outgoing personality. Phase 4 lets the
-        # personality move while the dialog is up, so the snapshot has to
-        # move with it — otherwise modern ends up remembering the
-        # brutalist theme the dialog happened to open on.
+        # the accept-time reconcile files the dialog-open snapshot's theme
+        # under the outgoing personality. The personality can move
+        # mid-dialog, so the snapshot must move with it — else modern
+        # remembers the brutalist theme the dialog opened on.
         s = self._brutalist()                   # brutalist / gruvbox
         w = self._window(s)
         QTest.qWait(20)
         self._open_flip_and_pick(w, "modern", "terminal-green")
-        # The pick was brutalist, so it took them back to brutalist…
         self.assertEqual(s.preset, "brutalist")
         self.assertEqual(s.theme, "terminal-green")
         self.assertEqual(theming.manager().current().slug, "terminal-green")
         self.assertEqual(s.preset_state["brutalist"]["theme"],
                          "terminal-green")
-        # …and modern kept what it was actually wearing when they left
-        # it, not the theme the dialog opened on.
         self.assertEqual(
             s.preset_state["modern"]["theme"],
             presets.builtin("modern").theme,
@@ -744,7 +688,6 @@ class SettingsRepickTest(_RouteCase):
                          presets.builtin("modern").theme)
 
     def test_the_flip_back_wears_what_it_was_left_in(self) -> None:
-        # The promise the appearance tab's blurb makes, end to end.
         s = self._brutalist()
         w = self._window(s)
         QTest.qWait(20)
@@ -764,8 +707,8 @@ class SettingsRepickTest(_RouteCase):
         self.assertIsNone(getattr(w, "_settings_before_dialog", None))
 
     def test_cancel_after_a_flip_does_not_undo_it(self) -> None:
-        # A flip is a commit. Cancel reverts PREVIEWS, and after the
-        # re-base there are none to revert.
+        # a flip is a commit; cancel reverts previews, and post-re-base
+        # there are none
         s = self._brutalist()
         w = self._window(s)
         QTest.qWait(20)
@@ -822,9 +765,8 @@ class SettingsRepickTest(_RouteCase):
         self.assertEqual(theming.manager().current().slug, "gruvbox")
 
     def test_preset_never_rides_the_dialog_diff(self) -> None:
-        # The personality is not a descriptor on purpose: a generic
-        # setattr would move settings.preset without stashing, restoring
-        # or applying anything.
+        # preset is not a descriptor: a generic setattr would move it
+        # without stashing, restoring or applying anything
         from tide.ui import settings_schema
         self.assertNotIn("preset", settings_schema.by_key())
         self.assertIn("preset", settings_schema.INTERNAL_FIELDS)

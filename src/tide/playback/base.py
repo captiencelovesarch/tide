@@ -24,10 +24,9 @@ class PlaybackBackend(QObject):
 
     slug: str = ""
 
-    # Whether ``set_speed`` is actually honored. Backends whose audio is
-    # rendered outside our pipeline (librespot streams server-decoded PCM)
-    # can't do variable speed — they flip this to False so the UI can grey
-    # the speed control honestly instead of no-opping in silence.
+    # Whether ``set_speed`` is honored. Backends rendering audio outside
+    # our pipeline (librespot streams server-decoded PCM) flip this to
+    # False so the UI greys the speed control instead of no-opping silently.
     supports_speed: bool = True
 
     @abstractmethod

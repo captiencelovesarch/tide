@@ -1,25 +1,11 @@
-"""v2.0 phase 2 — the settings ENGINE: the dialog generated from
-settings_schema.REGISTRY plus MainWindow's live-apply chain.
-
-Pinned here:
-- generation: every registry descriptor builds a widget of its kind,
-  choice rows are byte-identical to the schema's resolved choices, the
-  legacy attribute names survive, rows owned by other surfaces
-  (mini_pin, slot pickers, keymap, glyphs) are gone;
-- diff-apply: accept writes ONLY the changed fields (save_fields), an
-  untouched accept writes nothing, the dialog edits the LIVE settings
-  object (no deepcopy-replace), report_plays stamping semantics;
-- previews never commit: theme/case/thumbnail previews revert on cancel
-  with zero persistence;
-- the live-apply chain: LIVE_APPLY_ORDER encodes scale→theme,
-  corner→csd (with the corner-only extra trigger) and pitch-last as
-  data; appliers run in list order, each once; a theme+font+size+case
-  accept costs exactly ONE theming.apply_bundle call and ONE queued
-  app restyle.
-
-Window-building tests suppress real app-wide QSS pushes (the
-test_preset_flip spy pattern) and tear down with deleteLater + drain —
-leaked windows turn restyle-heavy files quadratic.
+"""v2.0 phase 2 — the settings engine: the dialog generated from
+settings_schema.REGISTRY plus MainWindow's live-apply chain. Accept
+writes only the changed fields (save_fields) against the LIVE settings
+object; previews revert on cancel with zero persistence; and
+LIVE_APPLY_ORDER encodes scale→theme, corner→csd (with the corner-only
+extra trigger) and pitch-last as data — appliers run in list order,
+each once, and a theme+font+size+case accept costs exactly one
+apply_bundle and one queued restyle.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -49,9 +35,7 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication(sys.argv[:1])
 
 
-# ---------------------------------------------------------------------------
-# dialog-side cases
-# ---------------------------------------------------------------------------
+# ---------- dialog-side cases ----------
 
 class _DialogCase(unittest.TestCase):
     """Every settings write stubbed (dialog tests must never be able to
@@ -103,9 +87,8 @@ class GenerationTests(_DialogCase):
                     self.assertIsInstance(w, kind_types[desc.kind])
 
     def test_legacy_attribute_names_cover_the_registry(self) -> None:
-        # dlg.theme_picker, dlg.csd_toggle etc. must keep working — and
-        # every descriptor must have a named attribute, so no option can
-        # ship an anonymous widget.
+        # legacy names (dlg.theme_picker etc.) must keep working, and
+        # every descriptor needs a named attribute — no anonymous widgets
         from tide.ui.settings import _WIDGET_ATTRS
         self.assertEqual(set(_WIDGET_ATTRS), {d.key for d in schema.REGISTRY})
         dlg = self._dialog()
@@ -124,9 +107,8 @@ class GenerationTests(_DialogCase):
                 self.assertEqual(rows, list(schema.resolve_choices(desc)))
 
     def test_rows_owned_elsewhere_are_gone(self) -> None:
-        # INTERNAL_FIELDS with their own GUI surface must not get a row
-        # here: the mini's menu owns pinning, the strip builder owns slot
-        # overrides, the keymap/glyph editors own theirs.
+        # fields with their own GUI surface get no row here (mini menu,
+        # strip builder, keymap/glyph editors own them)
         dlg = self._dialog()
         for key in ("mini_pin", "fullscreen_pane", "federated_search",
                     "layout_overrides", "keymap", "glyph_overrides"):
@@ -138,8 +120,6 @@ class GenerationTests(_DialogCase):
         dlg = self._dialog()
         expected = {d.key for d in schema.REGISTRY if d.per_preset}
         self.assertEqual(set(dlg._preset_markers), expected)
-        # …and per_preset itself is honest against the stash (the schema
-        # test pins this too; here we pin the rendered markers).
         self.assertEqual(
             expected,
             set(presets.STASH_FIELDS) & {d.key for d in schema.REGISTRY},
@@ -192,7 +172,6 @@ class DiffApplyTests(_DialogCase):
         self.assertEqual(set(dlg.changed_keys()), {"csd_titlebar", "motion"})
         self.assertFalse(s.csd_titlebar)
         self.assertEqual(s.motion, "off")
-        # An untouched field kept its value and was NOT named in the save.
         self.assertTrue(s.local_auto_index)
 
     def test_untouched_accept_saves_nothing(self) -> None:
@@ -203,8 +182,8 @@ class DiffApplyTests(_DialogCase):
         self.assertEqual(dlg.changed_keys(), ())
 
     def test_dialog_edits_the_live_object(self) -> None:
-        # v1 deep-copied and re-saved the WHOLE object — the write-race
-        # this phase kills. The dialog must hold the caller's object.
+        # v1 deep-copied and re-saved the whole object — the write-race
+        # this phase kills; the dialog must hold the caller's object
         s = Settings()
         dlg = self._dialog(s)
         self.assertIs(dlg._settings, s)
@@ -291,10 +270,9 @@ class PreviewTests(_DialogCase):
         self.assertEqual(s.show_thumbnails, "theme")
 
     def test_esc_reverts_previews_like_cancel(self) -> None:
-        # QDialog's built-in Esc handling calls reject() directly — it
-        # never touches the cancel button. The revert must live on
-        # reject() itself or every preview leaks past a keyboard cancel
-        # (the phase-1 browse-flip bug class, rule 8).
+        # QDialog's Esc calls reject() directly, never the cancel button —
+        # the revert must live on reject() or previews leak past a
+        # keyboard cancel (rule 8)
         from PySide6.QtCore import Qt as _Qt
         s = Settings()          # theme = brutalist-mono
         dlg = self._dialog(s)
@@ -311,8 +289,8 @@ class PreviewTests(_DialogCase):
         self.assertEqual(self.saved_field_calls, [])
 
     def test_bare_reject_reverts_previews(self) -> None:
-        # The window-manager close button routes through closeEvent →
-        # reject(); a direct reject() therefore stands in for close-X.
+        # the WM close button routes through closeEvent → reject(), so a
+        # direct reject() stands in for close-X
         s = Settings()
         dlg = self._dialog(s)
         idx = dlg.case_picker.findData("upper")
@@ -325,9 +303,8 @@ class PreviewTests(_DialogCase):
         self.assertEqual(s.text_case_override, "")
 
     def test_revert_runs_once_across_cancel_paths(self) -> None:
-        # Button-cancel then the dialog's teardown reject must not
-        # revert twice (idempotence guard) — a second apply of the
-        # opening theme would be a pointless extra restyle.
+        # button-cancel then teardown reject must not revert twice — a
+        # second apply would be a pointless extra restyle
         s = Settings()
         dlg = self._dialog(s)
         idx = dlg.theme_picker.findData("gruvbox")
@@ -340,8 +317,8 @@ class PreviewTests(_DialogCase):
                              "the revert must run exactly once")
 
     def test_reject_after_accept_does_not_revert(self) -> None:
-        # Accept commits the previewed theme; a stray reject afterwards
-        # (teardown paths) must not un-apply committed state.
+        # accept commits the previewed theme; a stray reject afterwards
+        # (teardown paths) must not un-apply committed state
         s = Settings()
         dlg = self._dialog(s)
         idx = dlg.theme_picker.findData("gruvbox")
@@ -353,8 +330,6 @@ class PreviewTests(_DialogCase):
                          "reject after accept reverted committed state")
 
     def test_populate_does_not_fire_previews(self) -> None:
-        # Loading a saved non-default theme must not apply anything —
-        # side effects happen on explicit user change only.
         theming.manager().apply("brutalist-mono")
         QTest.qWait(20)
         s = Settings()
@@ -364,9 +339,7 @@ class PreviewTests(_DialogCase):
                          "construction previewed the stored theme")
 
 
-# ---------------------------------------------------------------------------
-# the live-apply chain (window side)
-# ---------------------------------------------------------------------------
+# ---------- the live-apply chain (window side) ----------
 
 class ChainStructureTests(unittest.TestCase):
     def test_every_live_name_is_a_real_method_in_the_chain(self) -> None:
@@ -388,25 +361,21 @@ class ChainStructureTests(unittest.TestCase):
         from tide.ui.window import LIVE_APPLY_EXTRA_TRIGGERS, LIVE_APPLY_ORDER
         i = LIVE_APPLY_ORDER.index
         # scale→theme: a scale change re-applies the theme, so the final
-        # theme bundle must come after it.
+        # theme bundle must come after it
         self.assertLess(i("apply_ui_scale_setting"),
                         i("apply_theme_bundle_setting"))
-        # corner→csd→translucency: the translucency re-check inside the
-        # csd applier must see the final corner radius AND run on a
-        # corner-only change.
+        # corner→csd: the translucency re-check in the csd applier must
+        # see the final corner radius AND run on a corner-only change
         self.assertLess(i("apply_corner_setting"), i("apply_csd_setting"))
         self.assertEqual(LIVE_APPLY_EXTRA_TRIGGERS["apply_csd_setting"],
                          ("corner_style",))
         # pitch→speed: pitch correction re-applies the filter chain the
-        # current speed rides on — it runs last.
+        # current speed rides on — it runs last
         self.assertEqual(LIVE_APPLY_ORDER[-1], "apply_pitch_setting")
 
 
 class _WindowCase(unittest.TestCase):
-    """Real-MainWindow cases. Suppresses real app-wide QSS pushes for
-    the whole case (the test_preset_flip spy pattern) and tears windows
-    down with deleteLater + a drain so later files don't inherit a
-    quadratic restyle storm."""
+    """Real-MainWindow cases (the test_preset_flip harness pattern)."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -506,14 +475,12 @@ class LiveApplyRunTests(_WindowCase):
         self.assertEqual(calls, [])
 
     def test_theme_bundle_accept_is_one_apply_bundle_one_restyle(self) -> None:
-        # The headline guarantee: a theme+font+size+case accept costs
-        # exactly ONE theming.apply_bundle call (not three serial setter
-        # pushes) and exactly ONE queued app restyle.
+        # a theme+font+size+case accept costs exactly ONE apply_bundle
+        # (not three serial setter pushes) and ONE queued restyle
         s = Settings()
         s.first_launch_complete = True
         w = self._make_window(s)
         QTest.qWait(30)   # drain construction-time restyles
-        # The dialog accepted these four edits:
         s.theme = "gruvbox"
         s.font_family_override = "IBM Plex Mono"
         s.font_size_override_pt = 12
@@ -539,10 +506,9 @@ class LiveApplyRunTests(_WindowCase):
         self.assertEqual(mgr.user_font_size(), 12)
 
     def test_layout_preview_reverts_on_esc_too(self) -> None:
-        # Esc goes through QDialog.reject(), not the cancel button — the
-        # main window's strip must still come back (rule 8). This is the
-        # heavyweight leak of the Esc hole: the layout preview rebuilds
-        # the REAL window's strip, not just manager state.
+        # Esc goes through QDialog.reject(), not the cancel button (rule
+        # 8) — and the layout preview rebuilds the REAL window's strip,
+        # not just manager state
         from PySide6.QtCore import Qt as _Qt
         mock.patch.object(settings_module, "save", lambda s: None).start()
         mock.patch.object(settings_module, "save_fields",
@@ -564,8 +530,8 @@ class LiveApplyRunTests(_WindowCase):
         self.assertEqual(s.layout, "classic")
 
     def test_layout_preview_through_parent_reverts_on_cancel(self) -> None:
-        # Rule 8 end-to-end for the layout preview: picking a layout in
-        # the dialog hot-swaps the real window; cancel puts it back.
+        # rule 8 end-to-end: picking a layout hot-swaps the real window;
+        # cancel puts it back
         mock.patch.object(settings_module, "save", lambda s: None).start()
         mock.patch.object(settings_module, "save_fields",
                           lambda s, *names: None).start()
@@ -574,8 +540,7 @@ class LiveApplyRunTests(_WindowCase):
         w = self._make_window(s)
         QTest.qWait(30)
         from tide.ui.settings import SettingsDialog
-        # No explicit cleanup: the dialog is parented to the window and
-        # dies with it in tearDown's deleteLater + drain.
+        # no explicit cleanup: parented to the window, dies with it in teardown
         dlg = SettingsDialog(s, parent=w)
         idx = dlg.layout_picker.findData("focused")
         self.assertGreaterEqual(idx, 0)
@@ -591,12 +556,10 @@ class LiveApplyRunTests(_WindowCase):
 
 
 class ParkedStripOverrideTests(_WindowCase):
-    """A strip-builder pick made while the layout combo is previewing an
-    unaccepted layout is diffed against that preview — committing it
-    immediately would persist overrides for a layout settings doesn't
-    hold (and a later cancel would strand them on disk, skewed). The
-    dialog parks the pick instead: accept commits layout + bar together,
-    cancel drops both."""
+    """A strip-builder pick made while the layout combo previews an
+    unaccepted layout must not commit immediately — that would persist
+    overrides for a layout settings doesn't hold. The dialog parks the
+    pick: accept commits layout + bar together, cancel drops both."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -628,7 +591,6 @@ class ParkedStripOverrideTests(_WindowCase):
                          "touch the settings object")
         self.assertNotIn(("layout_overrides",), self.save_calls,
                          "…and must not persist")
-        # …but the user still SEES their bar on the previewed layout.
         self.assertEqual(w._slot_progress, "dotted")
         self.assertEqual(w._layout_slug, "focused")
 
@@ -656,9 +618,8 @@ class ParkedStripOverrideTests(_WindowCase):
         self.assertIn("layout", dlg.changed_keys())
 
     def test_abandoned_base_drops_the_parked_pick_on_accept(self) -> None:
-        # Park against focused, then move the combo back to classic and
-        # accept: the parked diff describes focused's slots — committing
-        # it against classic is exactly the skew this fixes.
+        # the parked diff describes focused's slots — committing it after
+        # the combo moved back to classic is exactly the skew this fixes
         s, w, dlg = self._previewing_dialog()
         dlg._on_strip_overrides({"progress": "dotted"})
         idx = dlg.layout_picker.findData("classic")
@@ -671,8 +632,8 @@ class ParkedStripOverrideTests(_WindowCase):
         self.assertEqual(w._slot_progress, "blocks")
 
     def test_no_preview_pending_still_commits_immediately(self) -> None:
-        # The v1-shipped immediate-commit path is untouched when the
-        # layout combo sits on the opening value.
+        # the v1 immediate-commit path is untouched when the layout combo
+        # sits on the opening value
         s = Settings()
         s.first_launch_complete = True
         w = self._make_window(s)

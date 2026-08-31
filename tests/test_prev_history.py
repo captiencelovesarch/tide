@@ -95,10 +95,9 @@ class PrevHistoryTest(unittest.TestCase):
         before mpv delivers its next position tick."""
         seeks: list[float] = []
         self.w.player.seek = lambda s: seeks.append(s)
-        # Swap the CLASS property (instances can't shadow a descriptor) and
-        # put the original back after — a bare `del` here removed
-        # PlaybackRouter.duration for the rest of the process and broke the
-        # first later test to read it (window-size memory's slot swap).
+        # Swap the CLASS property (instances can't shadow a descriptor)
+        # and put it back — a bare `del` removed PlaybackRouter.duration
+        # for the rest of the process and broke a later test.
         orig_duration = type(self.w.player).duration
         type(self.w.player).duration = property(lambda _s: 200.0)
         try:

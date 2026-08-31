@@ -1,24 +1,14 @@
 """v2.0 phase 2 — the strip builder: build your player bar.
 
-Pinned here:
-- rows come from the REAL variant registries (byte-identical to
-  variants.all_variant_slugs()), never a hardcoded copy;
-- the miniature preview is built from the real slot factories, carries
-  sample data, and hot-swaps when a combo changes;
-- cancel leaves zero trace: no signal, no settings write, no manager
-  push, the caller's overrides dict untouched;
-- accept emits overrides_chosen with EXACTLY the minimal diff against
-  the base layout (returning to a layout default clears its override —
-  the {} emission), and the dialog still applies/persists NOTHING
-  itself — integration owns update_overrides/apply_layout/save_fields;
-- an untouched accept emits nothing at all (zero-change contract);
-- open_strip_builder defers construction out of the calling turn (the
-  modal-from-click crash rule).
-
-Dialog teardown is deleteLater + a drain — the preview widgets hold
-theme_changed connections, and leaked listeners turn restyle-heavy
-files quadratic (the phase-1 lesson). App-wide QSS pushes are
-suppressed for every case (the test_preset_flip spy pattern).
+Pinned: rows come from the real variant registries, never a hardcoded
+copy; the miniature preview is built from the real slot factories and
+hot-swaps when a combo changes; cancel leaves zero trace; accept emits
+overrides_chosen with EXACTLY the minimal diff against the base layout
+(returning to a layout default clears its override), and the dialog
+itself applies/persists NOTHING — integration owns
+update_overrides/apply_layout/save_fields; an untouched accept emits
+nothing; open_strip_builder defers construction out of the calling turn
+(the modal-from-click crash rule).
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_strip_builder.py
 """
@@ -260,7 +250,6 @@ class ThemeDefaultsTests(_BuilderCase):
             with self.subTest(slot=slot):
                 expected = theme.slots.get(slot) or base[slot]
                 self.assertEqual(dlg.picker_for(slot).currentData(), expected)
-        # The preview followed the reset in the same turn.
         self.assertIsInstance(dlg.preview_widget("progress"),
                               variants.BarProgress)
 

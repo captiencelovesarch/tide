@@ -69,11 +69,10 @@ class SinkInputMatcherTest(unittest.TestCase):
         self.assertEqual(_pick_own_sink_input(entries, {"555"}), 8)
 
     def test_playing_mpv_beats_corked_registered_child(self):
-        # The other direction of the two-own-streams state: librespot's
-        # registered-pid stream idles corked while the pidless in-process
-        # mpv actually plays. Pid-proof must NOT outrank corked here —
-        # both streams are ours, and picking the corked one latches the
-        # bass pulse / visualizer onto silence while music plays.
+        # the other two-own-streams direction: librespot's registered-pid
+        # stream idles corked while the pidless in-process mpv plays.
+        # Pid-proof must NOT outrank corked here — picking the corked
+        # stream latches the pulse/visualizer onto silence.
         entries = [
             _entry(4, corked=True, **{"application.name": "librespot",
                                       "application.process.id": "555"}),

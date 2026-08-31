@@ -1,35 +1,17 @@
-"""The token/color editor — phase 2 power tool #1.
+"""Theme editor: the active theme's colors, typography and radius, live.
 
-Every theme is ~11 ``[tokens]`` colors, a typography table and a corner
-radius. This dialog puts a swatch on each of them: every edit previews
-LIVE through the theming manager's sticky user-override layer (deferred
-restyles — the manager owns the only safe path to a full-app repolish),
-and nothing commits until [save as my theme] writes a real theme
-directory under ``~/.config/tide/themes/``. Cancel snapshots-and-reverts
-— previews never commit (the phase-1 browse-flip bug is the law here).
+Previews ride the theming manager's sticky user-override layer — its
+deferred queue is the only safe path to a full-app restyle, never a
+synchronous QApplication.setStyleSheet. Cancel reverts every preview to
+the open-time snapshot.
 
-What "save as my theme" writes is a first-class theme: ``theme.toml``
-with the edited tokens/typography/radius over a verbatim copy of the
-active theme's remaining tables (layout, slots, [meta] aesthetic — so a
-user theme edited from a brutalist base stays brutalist for the
-personality system), plus the active theme's ``theme.qss`` copied
-verbatim. After the write the manager refreshes, so the new theme is in
-every picker immediately, and the dialog lands the app ON it — wearing
-the user's pre-existing sticky overrides (corner style etc.), exactly as
-a picker pick would.
-
-Deliberately settings-free: this dialog never touches the Settings
-object or settings.toml. Persisting ``settings.theme = <new slug>`` is
-the caller's job (the settings dialog reconciles theme picks on ITS
-accept) — ``theme_saved(slug)`` hands the caller what it needs.
-
-Crash-history compliance:
-- the QColorDialog opens DEFERRED out of the swatch click's signal
-  emission (QTimer.singleShot(0, ...)) — modal-from-click segfaults on
-  PySide6 + py3.14 ([[feedback-pyside-modal]]);
-- app-wide restyles only ever ride the ThemeManager's own deferred
-  queue (set_user_override / apply_bundle) — never a synchronous
-  QApplication.setStyleSheet from here.
+[save as my theme] writes a real theme dir under
+``~/.config/tide/themes/``: theme.toml with the edited values over
+verbatim copies of the base's other tables (layout, slots, [meta]
+aesthetic — a brutalist base stays brutalist) plus its theme.qss, then
+refreshes the manager and lands the app on the new theme wearing the
+pre-open sticky overrides. Persisting ``settings.theme = <slug>`` is
+the caller's job — ``theme_saved(slug)`` hands it over.
 """
 from __future__ import annotations
 
@@ -56,9 +38,7 @@ from .. import config, theming
 from .headings import line_heading
 
 
-# Canonical token order + what each one is, in plain voice. Rows render
-# in this order; tokens a theme declares beyond these append after, so a
-# third-party theme's extra colors are editable too.
+# row order; declared-but-unlisted tokens append after, still editable
 TOKEN_ORDER: tuple[str, ...] = (
     "bg", "bg_alt", "fg", "dim",
     "accent", "accent_alt",
@@ -86,8 +66,7 @@ TOKEN_BLURBS: dict[str, str] = {
     "error": "status · broken",
 }
 
-# Weight rows for the typography combo. A theme declaring an off-list
-# weight gets its own row prepended so the seed is always selectable.
+# an off-list theme weight gets a row prepended so the seed is selectable
 _WEIGHT_ROWS: tuple[tuple[int, str], ...] = (
     (300, "300 · light"),
     (400, "400 · regular"),
@@ -100,8 +79,7 @@ _SAMPLE_TEXT = "waves roll in · waves roll out · 0123456789"
 
 
 def slugify(name: str) -> str:
-    """A theme-dir slug from a display name: lowercase, runs of anything
-    non-alphanumeric collapse to one dash. Empty in → ``my-theme``."""
+    """Display name → theme-dir slug; empty → ``my-theme``."""
     slug = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
     return slug or "my-theme"
 
@@ -133,9 +111,8 @@ def _toml_value(value: object) -> str:
 
 
 def _toml_dump(sections: dict[str, dict], header: str = "") -> str:
-    """A tiny TOML writer for the flat table-of-scalars shape theme.toml
-    uses (stdlib has tomllib but no writer). Round-trips through
-    tomllib.load — the tests pin it."""
+    """Tiny TOML writer (stdlib has none) for theme.toml's flat
+    table-of-scalars shape. Round-trips through tomllib — tests pin it."""
     lines: list[str] = []
     if header:
         lines.extend(f"# {line}" for line in header.splitlines())
@@ -155,16 +132,8 @@ def _dim(label: QLabel) -> QLabel:
 
 
 class ThemeEditorDialog(QDialog):
-    """Edit the active theme's colors, typography and radius, live.
-
-    Reads its base from ``theming.manager().current()`` at construction
-    (plus the sticky user-override layer, so the editor opens showing
-    what's actually on screen — minus per-track adaptive tokens, which
-    are transient and must never get baked into a saved theme).
-
-    Open it DEFERRED (``QTimer.singleShot(0, ...)``) from any click or
-    signal handler — same rule as every modal in tide.
-    """
+    """Open DEFERRED (``QTimer.singleShot(0, ...)``) from any click or
+    signal handler — same rule as every modal in tide."""
 
     theme_saved = Signal(str)   # slug of the newly written user theme
 
@@ -178,7 +147,7 @@ class ThemeEditorDialog(QDialog):
         self._mgr = theming.manager()
         self._base = self._mgr.current()
 
-        # ---- snapshot: what cancel puts back (previews never commit) ----
+        # ---- snapshot: what cancel puts back ----
         self._snap_overrides: dict[str, str] = dict(
             getattr(self._mgr, "_user_overrides", {}) or {})
         self._snap_font: str = self._mgr.user_font()
@@ -195,9 +164,7 @@ class ThemeEditorDialog(QDialog):
         self._populating = True
 
         if self._base is None:
-            # No active theme (never happens in a running app — the
-            # window applies one before any dialog can open). Offer only
-            # a way out instead of crashing.
+            # no active theme (impossible in a running app) — offer a way out
             col = QVBoxLayout(self)
             col.addWidget(_dim(QLabel(
                 "no theme is active — open the editor from settings once "
@@ -215,10 +182,8 @@ class ThemeEditorDialog(QDialog):
     # ---------- seeding ----------
 
     def _seed_state(self) -> None:
-        """What the editor opens showing: the base theme's declared
-        values with the STICKY user layer on top ("edit what I see").
-        Dynamic (adaptive, per-track) overrides are deliberately left
-        out — saving a theme mid-song must not bake a transient accent."""
+        """Base values with the STICKY user layer on top. Adaptive per-track
+        overrides stay out — saving mid-song must not bake a transient accent."""
         base = self._base
         sticky = dict(self._snap_overrides)
         sticky.pop("radius", None)          # the radius spin owns this axis
@@ -294,8 +259,8 @@ class ThemeEditorDialog(QDialog):
         except Exception:
             pass
         self.family_combo.setCurrentText(self._family)
-        # Preview on a real pick or a finished typed edit — not per
-        # keystroke, which would re-apply the theme once per letter.
+        # Preview on a pick or a finished typed edit — not per keystroke,
+        # which would re-apply the theme once per letter.
         self.family_combo.activated.connect(
             lambda _i=0: self._on_family_changed())
         edit = self.family_combo.lineEdit()
@@ -419,9 +384,8 @@ class ThemeEditorDialog(QDialog):
         btn.setText(value)
 
     def _on_swatch_clicked(self, key: str) -> None:
-        # Deferred out of the click emission — opening a modal (the color
-        # dialog) synchronously inside a clicked() handler is the PySide6
-        # + py3.14 segfault pattern ([[feedback-pyside-modal]]).
+        # Deferred — a modal opened inside clicked() is the PySide6 +
+        # py3.14 segfault ([[feedback-pyside-modal]]).
         QTimer.singleShot(0, lambda: self._do_pick_color(key))
 
     def _do_pick_color(self, key: str) -> None:
@@ -431,9 +395,7 @@ class ThemeEditorDialog(QDialog):
             self.set_token(key, color.name())
 
     def set_token(self, key: str, value: str) -> None:
-        """Set one color token and preview it live. The manager's
-        set_user_override queues the app restyle deferred and no-ops on
-        same-value pushes, so this is safe to call from any handler."""
+        """set_user_override queues the restyle deferred and no-ops same-value pushes."""
         value = str(value).strip()
         if key not in self._tokens or not value:
             return
@@ -501,10 +463,8 @@ class ThemeEditorDialog(QDialog):
     # ---------- cancel / revert ----------
 
     def _restore_map(self) -> dict[str, str | None]:
-        """The user-override deltas that undo this session's previews:
-        every touched token (plus radius) back to its pre-open value —
-        or removed if it had none. Untouched pre-existing overrides are
-        the user's sticky state, not ours; they stay."""
+        """Each touched token (and radius) back to its pre-open value, or
+        removed. Untouched pre-existing overrides stay — the user's sticky state."""
         restore: dict[str, str | None] = {}
         for key in self._touched_tokens:
             restore[key] = self._snap_overrides.get(key)
@@ -539,13 +499,10 @@ class ThemeEditorDialog(QDialog):
         except OSError as exc:
             self.status_label.setText(f"couldn't write the theme · {exc}")
             return
-        # Pickers see it immediately — discovery reads the user themes
-        # dir (later wins), so the fresh slug resolves right away.
+        # discovery reads the user dir (later wins) — fresh slug in every picker
         self._mgr.refresh()
-        # Land ON the saved theme in one apply: the preview overrides
-        # come off (the theme itself carries the edits now) and the
-        # pre-open sticky state (corner style, any user font override)
-        # goes back — exactly what picking the new theme would show.
+        # One apply: preview overrides off (the theme carries the edits
+        # now), pre-open sticky state back — what picking it would show.
         self._mgr.apply_bundle(
             slug=slug,
             font_family=self._snap_font,
@@ -559,9 +516,8 @@ class ThemeEditorDialog(QDialog):
         self.accept()
 
     def _unique_slug(self, name: str) -> str:
-        """Slugified name, suffixed past ANY existing theme slug —
-        including bundled ones, so a user theme named "nord" becomes
-        nord-2 instead of silently shadowing the shipped nord."""
+        """Suffixed past ANY existing theme slug, bundled included — a
+        user "nord" becomes nord-2 instead of shadowing the shipped one."""
         taken = set(theming.discover_themes())
         base = slugify(name)
         slug, n = base, 2
@@ -571,10 +527,8 @@ class ThemeEditorDialog(QDialog):
         return slug
 
     def _write_theme(self, name: str) -> str:
-        """Write ``~/.config/tide/themes/<slug>/`` (theme.toml + a
-        verbatim copy of the base theme's theme.qss) and return the slug.
-        Config dir resolved from tide.config at call time — never frozen
-        at import."""
+        """Write the theme dir, return the slug. Config dir read from
+        tide.config at call time — never frozen at import."""
         base = self._base
         slug = self._unique_slug(name)
         dest = config.USER_THEMES_DIR / slug

@@ -1,28 +1,11 @@
-"""v2.0 phase 2 — INTEGRATION: the four power tools wired into the app.
-
-Pinned here (the phase-2 integration contract):
-- boot: app._boot_glyph_overrides pushes saved glyph overrides into the
-  registry BEFORE the window is built (the first frame already wears
-  them), and app._attach_settings rebinds the shortcuts right after the
-  settings attach — construction wires defaults, so a saved custom
-  keymap only lands through that rebind;
-- personality flips carry glyph overrides: glyph_overrides is a stash
-  field and apply_preset_visuals re-applies the incoming set + repaints,
-  so brutalist's custom glyphs never leak into modern (or back);
-- MainWindow.refresh_glyphs re-pushes state to every transport label,
-  quietly — no restyle, no saves, no status spam (the glyph editor
-  calls it on every live keystroke);
-- the strip builder's overrides_chosen payload routes through
-  apply_strip_overrides → update_overrides → apply_layout (the
-  keep-list path) + a field-scoped save, and survives a flip roundtrip;
-- keymap rebinds apply live, and the tooltips/dialog blurbs that
-  advertise keys derive from the live keymap;
-- the settings dialog carries the four launchers, opens every one
-  DEFERRED, and reconciles a theme-editor save through its normal
-  pending-diff path.
-
-Window-building cases use the test_preset_flip harness: app-wide QSS
-pushes suppressed, per-test settings.toml, deleteLater + drain teardown.
+"""v2.0 phase 2 — integration: the four power tools wired into the app.
+Boot pushes saved glyph overrides into the registry BEFORE the window
+is built and rebinds shortcuts right after the settings attach; flips
+carry glyph overrides (a stash field); refresh_glyphs repaints quietly
+(no restyle, no saves — it runs per keystroke); strip-builder overrides
+route through apply_strip_overrides → update_overrides → apply_layout
+plus a field-scoped save; keymap rebinds apply live and tooltips/blurbs
+derive from the live keymap; the dialog opens each launcher DEFERRED.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -61,10 +44,9 @@ def _brutalist_settings() -> Settings:
 
 
 class _IntegrationCase(unittest.TestCase):
-    """Real-MainWindow harness (the test_preset_flip pattern): app-wide
-    QSS pushes suppressed, hermetic settings file, deleteLater + drain
-    teardown — plus glyph-registry hygiene, since the override layer is
-    module-global and later files must inherit a clean one."""
+    """The test_preset_flip harness plus glyph-registry hygiene — the
+    override layer is module-global and later files must inherit a
+    clean one."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -117,15 +99,12 @@ class _IntegrationCase(unittest.TestCase):
         return self.w
 
 
-# ---------------------------------------------------------------------------
-# boot wiring (app.py)
-# ---------------------------------------------------------------------------
+# ---------- boot wiring (app.py) ----------
 
 class BootTests(_IntegrationCase):
     def test_boot_glyphs_land_before_the_window(self) -> None:
-        # The contract: overrides go into the registry BEFORE the window
-        # ctor, so every transport label is BUILT already wearing them —
-        # no post-construction repaint needed for the first frame.
+        # overrides go into the registry BEFORE the window ctor, so every
+        # transport label is built already wearing them
         s = Settings()
         s.first_launch_complete = True
         s.glyph_overrides = {"play": "P", "like_off": "no"}
@@ -164,9 +143,7 @@ class BootTests(_IntegrationCase):
             "_attach_settings must rebind the saved keymap")
 
 
-# ---------------------------------------------------------------------------
-# glyphs × personality flips
-# ---------------------------------------------------------------------------
+# ---------- glyphs × personality flips ----------
 
 class GlyphFlipTests(_IntegrationCase):
     def test_flip_does_not_leak_brutalist_glyphs_into_modern(self) -> None:
@@ -177,8 +154,8 @@ class GlyphFlipTests(_IntegrationCase):
         self.assertEqual(w.play_btn._glyph, "P")
         w.switch_preset("modern")
         QTest.qWait(30)
-        # Modern has never been visited: its glyph set is the Settings
-        # default ({}), and the registry + window must wear it.
+        # modern has never been visited: its glyph set is the default
+        # ({}), and the registry + window must wear it
         self.assertEqual(s.glyph_overrides, {})
         self.assertEqual(glyphs.glyph("play"), "▶")
         self.assertEqual(w.play_btn._glyph, "▶",
@@ -191,7 +168,7 @@ class GlyphFlipTests(_IntegrationCase):
         QTest.qWait(30)
         w.switch_preset("modern")
         QTest.qWait(30)
-        # Modern picks its own swap (what a glyph-editor accept does).
+        # modern picks its own swap (what a glyph-editor accept does)
         s.glyph_overrides = {"play": "M"}
         glyphs.set_overrides({"play": "M"})
         w.switch_preset("brutalist")
@@ -202,14 +179,12 @@ class GlyphFlipTests(_IntegrationCase):
         QTest.qWait(30)
         self.assertEqual(glyphs.glyph("play"), "M")
         self.assertEqual(w.play_btn._glyph, "M")
-        # And each side's stash remembers its own set.
+        # and each side's stash remembers its own set
         self.assertEqual(
             s.preset_state["brutalist"]["glyph_overrides"], {"play": "P"})
 
 
-# ---------------------------------------------------------------------------
-# refresh_glyphs
-# ---------------------------------------------------------------------------
+# ---------- refresh_glyphs ----------
 
 class RefreshGlyphTests(_IntegrationCase):
     def test_refresh_repaints_every_transport_label(self) -> None:
@@ -233,8 +208,8 @@ class RefreshGlyphTests(_IntegrationCase):
         self.assertEqual(w.fullscreen_btn._glyph, "F")
 
     def test_refresh_is_quiet(self) -> None:
-        # The glyph editor calls this per keystroke — it must never cost
-        # a restyle, a save, or a status-bar message.
+        # called per keystroke — it must never cost a restyle, a save,
+        # or a status-bar message
         s = Settings()
         s.first_launch_complete = True
         w = self._make_window(s)
@@ -254,9 +229,7 @@ class RefreshGlyphTests(_IntegrationCase):
         self.assertEqual(w.statusBar().currentMessage(), status_before)
 
 
-# ---------------------------------------------------------------------------
-# strip builder → window
-# ---------------------------------------------------------------------------
+# ---------- strip builder → window ----------
 
 class StripBuilderWiringTests(_IntegrationCase):
     def test_apply_strip_overrides_round_trips(self) -> None:
@@ -303,8 +276,8 @@ class StripBuilderWiringTests(_IntegrationCase):
         self.assertEqual(s.layout_overrides, {"progress": "dotted"})
 
     def test_builder_emission_routes_through_the_dialog(self) -> None:
-        # End-to-end: a real StripBuilder accept → the settings dialog's
-        # on_chosen handler → the window's sanctioned apply/persist path.
+        # a real StripBuilder accept → the dialog's on_chosen handler →
+        # the window's sanctioned apply/persist path
         from tide.ui.settings import SettingsDialog
         from tide.ui.strip_builder import StripBuilder
         s = Settings()
@@ -324,15 +297,13 @@ class StripBuilderWiringTests(_IntegrationCase):
         self.assertEqual(s.layout_overrides, {"progress": "dotted"})
         self.assertEqual(settings_module.load().layout_overrides,
                          {"progress": "dotted"})
-        # The accepted bar is a commit: a later layout-preview cancel in
-        # the dialog must revert onto it, not the opening snapshot.
+        # the accepted bar is a commit: a later layout-preview cancel
+        # must revert onto it, not the opening snapshot
         self.assertEqual(dlg._initial_overrides, {"progress": "dotted"})
         builder.deleteLater()
 
 
-# ---------------------------------------------------------------------------
-# keymap: live rebinds + derived chrome
-# ---------------------------------------------------------------------------
+# ---------- keymap: live rebinds + derived chrome ----------
 
 class KeymapLiveTests(_IntegrationCase):
     def test_rebind_applies_live_and_tooltips_follow(self) -> None:
@@ -364,13 +335,11 @@ class KeymapLiveTests(_IntegrationCase):
         self.assertNotIn("ctrl+8", dlg.fx_blurb.text())
         self.assertIn("f9", dlg.session_blurb.text())
         self.assertNotIn("ctrl+shift+r", dlg.session_blurb.text())
-        # Unbound: the copy drops the key mention instead of lying.
+        # unbound: the copy drops the key mention instead of lying
         self.assertNotIn("ctrl+m", dlg.mini_blurb.text())
 
 
-# ---------------------------------------------------------------------------
-# the dialog's tool launchers
-# ---------------------------------------------------------------------------
+# ---------- the dialog's tool launchers ----------
 
 class _DialogCase(unittest.TestCase):
     """Parentless-dialog cases: every settings write stubbed (dialog
@@ -418,8 +387,8 @@ class DialogToolWiringTests(_DialogCase):
         self.assertIn("ctrl+shift+r", dlg.session_blurb.text())
 
     def test_theme_editor_open_is_deferred(self) -> None:
-        # Ground rule 3: the editor opens on the NEXT event-loop turn,
-        # never inside the click emission.
+        # rule 3: the editor opens on the NEXT event-loop turn, never
+        # inside the click emission
         dlg = self._dialog()
         with mock.patch.object(dlg, "_do_open_theme_editor") as spy:
             dlg.theme_editor_btn.click()
@@ -457,10 +426,9 @@ class DialogToolWiringTests(_DialogCase):
         spy.assert_called_once_with(dlg, dlg._settings)
 
     def test_theme_saved_selects_the_slug_and_stages_the_pick(self) -> None:
-        # After a [save as my theme], the editor has already applied the
-        # new slug; persisting settings.theme rides the dialog's normal
-        # pending-diff path — the reconcile handler repopulates the combo
-        # (registry already refreshed) and selects the slug.
+        # after [save as my theme] the editor has already applied the
+        # slug; persisting settings.theme rides the pending-diff path —
+        # the handler repopulates the combo and selects the slug
         s = Settings()          # theme = brutalist-mono
         dlg = self._dialog(s)
         dlg._on_theme_saved("gruvbox")
@@ -475,9 +443,8 @@ class DialogToolWiringTests(_DialogCase):
                             for call in self.saved_field_calls))
 
     def test_theme_saved_selection_survives_cancel_semantics(self) -> None:
-        # Previews never commit: cancelling the settings dialog after a
-        # theme-editor save reverts the applied theme; the saved theme
-        # dir simply stays available in the pickers.
+        # cancel after a theme-editor save reverts the applied theme; the
+        # saved theme dir stays available in the pickers
         s = Settings()
         dlg = self._dialog(s)
         dlg._on_theme_saved("gruvbox")

@@ -5,17 +5,15 @@ and layout flags. `theme.qss` is a Qt stylesheet using @token placeholders
 that the loader substitutes at apply-time. Optional `fonts/*.ttf` files are
 auto-registered into the Qt font database.
 
-A theme.toml may declare ``uses_base = true`` under ``[meta]``: its final
-stylesheet is then the shared ``themes/_base.qss`` (with ``/*[if
-brutalist]*/`` / ``/*[if modern]*/`` … ``/*[endif]*/`` dialect blocks
-resolved against the theme's aesthetic) followed by the theme's own
-theme.qss as a palette overlay — later rules win, so an overlay can
-override anything structural. Every bundled theme does this with an EMPTY
-overlay: the whole palette lives in ``[tokens]`` (including the ``banner``
-token the base's header comment resolves from). Themes without the flag
-keep shipping a full standalone theme.qss, so third-party and
-theme-editor-saved themes are untouched by the split. Composition happens
-at load time, so ``Theme.qss`` is always the complete stylesheet.
+A theme.toml may declare ``uses_base = true`` under ``[meta]``: its
+stylesheet becomes the shared ``themes/_base.qss`` (``/*[if brutalist]*/``
+/ ``/*[if modern]*/`` … ``/*[endif]*/`` dialect blocks resolved against
+the theme's aesthetic) followed by its own theme.qss as a palette overlay
+— later rules win. Every bundled theme does this with an EMPTY overlay;
+the palette lives in ``[tokens]`` (including the ``banner`` token the
+base's header resolves). Composition happens at load, so ``Theme.qss``
+is always complete; without the flag a theme ships a full standalone
+theme.qss as before.
 
 Themes are discovered from three sources (later wins):
   1. bundled       — src/tide/themes/
@@ -44,26 +42,22 @@ from . import config
 BUNDLED_THEMES_DIR = Path(__file__).parent / "themes"
 SYSTEM_THEMES_DIR = Path("/usr/share/tide/themes")
 
-# The shared structural stylesheet uses_base themes compose over. Always
-# the bundled copy — a palette-only theme in the user dir composes against
-# the structure that ships with the app, never a stray local fork.
+# Always the bundled copy — a palette-only theme in the user dir composes
+# against the structure that ships with the app, not a stray local fork.
 BASE_QSS_PATH = BUNDLED_THEMES_DIR / "_base.qss"
 
-# Dialect markers inside _base.qss. A whole-line `/*[if <name>]*/` keeps
-# the lines up to the matching whole-line `/*[endif]*/` only when <name>
-# equals the theme's aesthetic; marker lines are never emitted. Anchored
-# to the full line so prose that merely MENTIONS the syntax can't trip it.
+# Whole-line `/*[if <name>]*/` … `/*[endif]*/` keeps the block only when
+# <name> equals the theme's aesthetic; marker lines are never emitted.
+# Anchored so prose mentioning the syntax can't trip it.
 _DIALECT_IF_RE = re.compile(r"^\s*/\*\[if ([a-z][a-z0-9_-]*)\]\*/\s*$")
 _DIALECT_ENDIF_RE = re.compile(r"^\s*/\*\[endif\]\*/\s*$")
 
 
 def _select_dialect(text: str, aesthetic: str) -> str:
-    """Resolve _base.qss dialect blocks for one aesthetic.
-
-    Total by design (never raises): unknown block names simply don't
-    match, a missing endif runs its block to EOF, and a stray endif
-    resets to keep — a malformed base degrades to odd styling, not a
-    theme that fails to load.
+    """Resolve _base.qss dialect blocks for one aesthetic. Total by
+    design: unknown names don't match, a missing endif runs to EOF, a
+    stray endif resets to keep — a malformed base degrades to odd
+    styling, not a theme that fails to load.
     """
     out: list[str] = []
     keep = True
@@ -81,9 +75,8 @@ def _select_dialect(text: str, aesthetic: str) -> str:
 
 
 def _compose_with_base(overlay_qss: str, aesthetic: str) -> str:
-    """Base (dialect-resolved) + the theme's palette overlay, in that
-    order — overlay rules follow the base so they win the cascade. A
-    missing/unreadable base degrades to the overlay alone."""
+    """Base (dialect-resolved) + palette overlay, in that order so the
+    overlay wins the cascade. A missing base degrades to the overlay."""
     try:
         base = BASE_QSS_PATH.read_text(encoding="utf-8")
     except OSError:
@@ -106,11 +99,10 @@ class Theme:
     # "brutalist" or "modern" — drives the rule above plus a couple of
     # widget choices (BracketButton's bracket-vs-icon render, etc).
     aesthetic: str = "modern"
-    # Did [meta] aesthetic actually SAY that, or did _read_theme guess it
-    # from typography.mono? Rendering only ever needs the resolved value,
-    # but the v2.0 personality-aware theme picker needs the difference:
-    # a guess is not grounds for hiding somebody's hand-installed theme
-    # from half the app (see settings_schema.theme_choices_for).
+    # did [meta] say the aesthetic, or did _read_theme guess it from
+    # typography.mono? The theme picker needs the difference — a guess is
+    # no grounds for hiding a hand-installed theme from half the app
+    # (see settings_schema.theme_choices_for)
     aesthetic_declared: bool = False
     qss: str = ""
     dark: bool = True
@@ -143,9 +135,9 @@ def _read_theme(path: Path) -> Theme | None:
     qss_text = qss_path.read_text(encoding="utf-8") if qss_path.is_file() else ""
     # Auto-classify aesthetic when [meta] aesthetic is absent: mono font →
     # brutalist, anything else → modern. Keeps backwards compatibility with
-    # third-party themes that pre-date this field. The GUESS is recorded as
-    # a guess (aesthetic_declared) so surfaces that would act against the
-    # user on it — the personality-aware theme picker — can decline to.
+    # third-party themes that pre-date this field. The guess is recorded
+    # as a guess (aesthetic_declared) so the theme picker can decline to
+    # act on it.
     aesthetic = str(meta.get("aesthetic", "")).strip().lower()
     declared = aesthetic in ("brutalist", "modern")
     if not declared:
@@ -259,11 +251,9 @@ _TITLEBAR_QSS = """
 """
 
 
-# Status colors (`status_color` + the @ok/@warn/@error QSS tokens). Themes
-# may declare their own in [tokens]; when they don't, these fallbacks keep
-# status UI legible — the dark set matches the palette source_panel.py
-# hardcoded before tokens existed, the light set is the same hues darkened
-# so they read on paper-ish backgrounds.
+# status_color + @ok/@warn/@error fallbacks when a theme declares none.
+# Dark = the pre-token source_panel.py palette; light = same hues
+# darkened to read on paper-ish backgrounds.
 _STATUS_FALLBACKS_DARK = {"ok": "#5aaf6a", "warn": "#d4b95e", "error": "#a05a5a"}
 _STATUS_FALLBACKS_LIGHT = {"ok": "#3c7d4a", "warn": "#8a6d1e", "error": "#8f4a4a"}
 
@@ -275,8 +265,7 @@ def _substitute(qss: str, theme: Theme) -> str:
     lookups.setdefault("border", f"{int(theme.t('layout', 'border_px', 1))}px")
     lookups.setdefault("radius", f"{int(theme.t('layout', 'radius_px', 0))}px")
     lookups.setdefault("spacing", f"{int(theme.t('layout', 'spacing_px', 8))}px")
-    # status tokens always resolve: theme-declared values ride in via
-    # theme.tokens above, everything else gets the dark/light-aware fallback.
+    # status tokens always resolve; missing ones get the polarity fallback
     for kind, color in (
         _STATUS_FALLBACKS_DARK if theme.dark else _STATUS_FALLBACKS_LIGHT
     ).items():
@@ -328,14 +317,10 @@ def effective_radius_px(theme: "Theme | None") -> int:
 
 
 def status_color(kind: str) -> str:
-    """Resolve a status color ("ok" / "warn" / "error") for the active theme.
-
-    A theme-declared ``[tokens]`` value wins (via the effective theme, so
-    user/dynamic overrides can retint it too); otherwise a dark/light-aware
-    fallback matching the theme's polarity. Unknown kinds get a neutral gray
-    rather than raising — status dots would rather be gray than crash a
-    paintEvent.
-    """
+    """Status color ("ok" / "warn" / "error") for the active theme: a
+    ``[tokens]`` value wins (via the effective theme, so overrides can
+    retint it), else the polarity fallback. Unknown kinds get neutral
+    gray, not a raise — gray beats crashing a paintEvent."""
     theme = manager().current_effective()
     if theme is not None:
         tok = str(theme.token(kind, "")).strip()
@@ -486,24 +471,17 @@ class ThemeManager(QObject):
                      case: str | None = None,
                      user_overrides: dict[str, str | None] | None = None,
                      ) -> Theme | None:
-        """Set several theming axes at once with ONE apply.
+        """Set several theming axes with ONE apply — the single setters
+        would re-apply the whole theme per axis (four repolish queues,
+        four theme_changed emits, half-switched repaints). Writes the
+        same state the setters own.
 
-        The preset switcher flips theme + font + size + case together; going
-        through the single setters would re-apply the whole theme once per
-        axis (four repolish-queues, four theme_changed emits, and widgets
-        repainting against half-switched state in between). This writes the
-        same state the setters own — no duplicate fields — then applies once.
-
-        ``None`` means "leave that axis alone"; the falsy values the setters
-        treat as clears ("" family, 0 size, "" case) stay meaningful here.
-        ``user_overrides`` merges per key, ``None`` value removes (same
-        semantics as :meth:`set_user_override`), and survives theme switches
-        exactly like overrides set one at a time.
-
-        Applies ``slug`` when given, else re-applies the current theme; with
-        neither there is nothing to apply — state is stored for the first
-        real apply and ``None`` returns. Dynamic overrides keep their
-        clear-only-on-slug-change behavior because :meth:`apply` owns that.
+        ``None`` = leave that axis alone; the setters' falsy clears (""
+        family, 0 size, "" case) stay meaningful. ``user_overrides``
+        merges per key, ``None`` value removes. Applies ``slug``, else
+        the current theme; with neither, state is stored and ``None``
+        returns. Dynamic overrides keep clear-only-on-slug-change —
+        :meth:`apply` owns that.
         """
         if font_family is not None:
             self._user_font = (font_family or "").strip()
@@ -775,11 +753,9 @@ def styled_case(text: str, theme: "Theme | None" = None, *,
       - "zalgo"  → text with combining diacritics
 
     ``allow_override=False`` ignores the sticky user override and takes
-    the case from ``theme`` alone — what a PREVIEW of some other theme
-    needs. The chooser's panes each render a personality as it SHIPS, so
-    the live user's casing there would be a lie about the product being
-    previewed (a 1.x upgrader with "upper" on would meet a brutalist
-    pane shouting NOW PLAYING over a bullet promising lowercase mono).
+    the case from ``theme`` alone — for PREVIEWS of another theme. The
+    chooser's panes render a personality as it SHIPS; the live user's
+    "upper" would put NOW PLAYING over a bullet promising lowercase mono.
     """
     if not text:
         return text

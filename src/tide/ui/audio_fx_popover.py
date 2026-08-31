@@ -8,13 +8,10 @@ full rack. Right-clicking the button toggles master enable inline.
 
 Mirrors the SpeedButton / SpeedPopover pattern in ``speed.py``:
 ``Qt.Popup`` so external clicks auto-close, ``show_above(anchor)`` for
-placement, theme-aware repaint. Like the speed popover, it has two faces
-picked at popover build from the window's active personality: bracket
-(this class, behaviorally verbatim — the brutalist personality) and
-``SpringAudioFxPopover`` (modern — the wet/bass/treble sliders become
-magnetic-detent SpringSliders whose release shortens the window's
-debounced filter-chain push). A personality flip mid-session picks the
-new face on the next open; the cached popover is rebuilt.
+placement, theme-aware repaint. Like the speed popover it has two faces,
+picked at build from the window's personality: bracket (this class,
+behaviorally verbatim) and ``SpringAudioFxPopover`` (modern). A
+personality flip rebuilds the cached popover on the next open.
 """
 from __future__ import annotations
 
@@ -52,9 +49,8 @@ def _format_db(value: float) -> str:
 
 
 def _default_fx_panel_key() -> str:
-    """The shipped view_audio_fx binding, for popovers with no main
-    window to ask (tests / standalone). Imported lazily — window.py is
-    heavy and imports THIS module at runtime."""
+    """The shipped view_audio_fx binding, for popovers with no main window
+    (tests). Lazy import — window.py is heavy and imports THIS module."""
     try:
         from .window import ACTIONS
         for action in ACTIONS:
@@ -107,11 +103,7 @@ class AudioFxButton(BracketButton):
         self.setLabel("fx" if self._state.master_enabled else "fx·off")
 
     def _popover_face(self) -> str:
-        """``"spring"`` when the window's active personality is modern,
-        else ``"bracket"``. Read from the window's settings at popover
-        build time (the speed button's exact rule); anything unknown —
-        no settings attached, tests, a third-party preset id — defaults
-        to the bracket face."""
+        """The speed button's exact face rule — see speed.py ``_popover_face``."""
         settings = getattr(self.window(), "_settings", None)
         preset = str(getattr(settings, "preset", "") or "")
         return "spring" if preset == "modern" else "bracket"
@@ -119,9 +111,7 @@ class AudioFxButton(BracketButton):
     def _open_popover(self) -> None:
         face = self._popover_face()
         if self._popover is not None and self._popover_face_built != face:
-            # The personality flipped since this popover was built —
-            # rebuild so the new face shows on this open. Cheap: the
-            # popover carries no state beyond what sync() pushes.
+            # Personality flipped since build — rebuild for this open.
             self._popover.deleteLater()
             self._popover = None
         if self._popover is None:
@@ -180,9 +170,8 @@ class AudioFxPopover(QFrame):
         reverb_row.addWidget(QLabel("reverb"))
         reverb_row.addWidget(self._reverb_combo, stretch=1)
 
-        # reverb wet slider (5% steps) — face-specific construction; the
-        # spring subclass overrides _make_wet_row / _make_shelf /
-        # _wire_sliders / _sync_sliders and nothing else touches them.
+        # reverb wet slider (5% steps) — the spring subclass overrides
+        # _make_wet_row / _make_shelf / _wire_sliders / _sync_sliders.
         wet_row = self._make_wet_row()
 
         # quick fx toggles — just the two that fit the popover's job;
@@ -204,10 +193,8 @@ class AudioFxPopover(QFrame):
         self._treble_slider, treble_row = self._make_shelf("treble", "_treble_read")
         self._wire_sliders()
 
-        # full-panel hint at bottom — the key name derives from the live
-        # keymap (v2.0), not a hardcoded "ctrl+8"; refreshed on every
-        # sync() so a rebind shows up on the next open. Colored by
-        # _apply_theme (the dim token — palette(mid) ignored theming).
+        # full-panel hint: the key derives from the live keymap (refreshed
+        # each sync so a rebind shows); colored by _apply_theme's dim token.
         self._hint = QLabel()
         self._hint.setAlignment(Qt.AlignCenter)
         self._refresh_hint()
@@ -233,14 +220,10 @@ class AudioFxPopover(QFrame):
     # ---------- bind + sync ----------
 
     def _refresh_hint(self) -> None:
-        """Derive the full-panel pointer from the live keymap. The
-        popover is parented to the MainWindow (AudioFxButton passes its
-        window()), whose binding_display knows the current
-        view_audio_fx binding — walked via parent() because the Popup
-        window flag makes self.window() return the popover itself.
-        Standalone (tests, no main window) falls back to the shipped
-        default. An unbound action gets the nav-tab wording instead of
-        advertising a dead key."""
+        """Derive the full-panel pointer from the live keymap — walks
+        parent() to MainWindow.binding_display (Qt.Popup makes
+        self.window() the popover itself); standalone falls back to the
+        shipped default; unbound gets the nav-tab wording, not a dead key."""
         win = self.parent()
         while win is not None and not hasattr(win, "binding_display"):
             win = win.parent()
@@ -421,40 +404,29 @@ class AudioFxPopover(QFrame):
         self.setStyleSheet(
             f"QFrame#AudioFxPopover {{ background: {bg}; border: 1px solid {fg}; }}"
         )
-        # The hint used to hardcode palette(mid), which ignores theming
-        # entirely — route it through the dim token (hex fallback, same
-        # pattern as SpringSlider's paint tokens).
+        # palette(mid) ignored theming — route the hint through the dim
+        # token instead (hex fallback).
         self._hint.setStyleSheet(f"color: {dim};")
 
 
 class SpringAudioFxPopover(AudioFxPopover):
     """The modern face: wet / bass / treble become magnetic-detent
-    SpringSliders (wet magnetized at 50%, the shelves at 0 dB). Same
-    external surface as AudioFxPopover (``state_changed`` / ``sync`` /
-    ``show_above``) so AudioFxButton can't tell the faces apart; the
-    bracket base stays behaviorally verbatim because this class only
-    overrides the four construction/wiring/sync seams plus its own
-    float handlers.
-
-    Debounce discipline: live drag values mutate the shared state and
-    ride ``state_changed`` into the window's ~120 ms push / ~250 ms save
-    debounce exactly like every other rack control — never a direct
-    push. A committed interaction (release / wheel / keys settling)
-    shortens that pending work so the final chain lands promptly
-    instead of waiting out the timer — shortens, never bypasses. The
-    settle itself is motion-gated by SpringSlider's construction
-    (intensity OFF = synchronous snap)."""
+    SpringSliders. Same external surface as AudioFxPopover; the bracket
+    base stays behaviorally verbatim — only the four construction/
+    wiring/sync seams plus the float handlers are overridden. Live drags
+    ride ``state_changed`` into the window's debounce; a commit shortens
+    the pending work, never bypasses it (``_commit_fx_debounce``)."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Rounded corners on a top-level popup need this, or the pixels
-        # outside the radius are unpainted window buffer. The base ctor
-        # already ran _apply_theme (virtual, lands here).
+        # outside the radius are unpainted window buffer. The base ctor's
+        # _apply_theme already landed here (virtual).
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
     def _apply_theme(self, theme) -> None:
-        # The modern face's frame: quiet border, active radius — the
-        # bracket base keeps its hard fg outline.
+        # Modern frame: quiet border + active radius (bracket keeps its
+        # hard fg outline).
         bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
         border = theme.token("border_col", "#2a2a2a") if theme else "#2a2a2a"
         radius = theme.token("radius", "0px") if theme else "0px"
@@ -509,11 +481,8 @@ class SpringAudioFxPopover(AudioFxPopover):
         self._treble_slider.value_committed.connect(self._on_commit)
 
     def _sync_sliders(self, state: AudioFxState) -> None:
-        # Only move a handle when the value really differs — during a
-        # drag the slider itself originated the change, and a set_value
-        # here would snap the display out from under the finger (the
-        # spring speed popover's exact rule). External changes settle
-        # springily while the popover is up; the pre-show sync snaps.
+        # Same don't-yank-the-drag rule as the spring speed popover's
+        # sync: move a handle only when the value differs.
         wet = max(0.0, min(1.0, float(state.reverb_wet)))
         self._wet_read.setText(f"{int(round(wet * 100))}%")
         if abs(self._wet_slider.value() - wet) > 1e-9:
@@ -552,8 +521,6 @@ class SpringAudioFxPopover(AudioFxPopover):
         self._emit()
 
     def _on_commit(self, _value: float) -> None:
-        # The settle landed — shorten the window's pending debounced
-        # push/save (never an inline push: with motion off every wheel
-        # notch commits). The popover is a Qt.Popup (its own window()),
-        # so the helper walks parent()s to find the MainWindow.
+        # Settle landed — shorten the pending debounced push/save (never
+        # inline: with motion off every wheel notch commits).
         _commit_fx_debounce(self)

@@ -1,14 +1,10 @@
-"""apply_bundle + status tokens (tide 2.0 preset plumbing).
-
-The preset switcher flips theme/font/size/case as one unit. Done through the
-single setters that's four full re-applies — four queued repolishes, four
-theme_changed emits, and widgets repainting against half-switched state in
-between. apply_bundle must write the SAME state fields the setters own and
-land the whole bundle in exactly one apply: one queued restyle, one emit.
-
-Also covers the new status tokens: themes may declare [tokens] ok/warn/error,
-status_color() and the @ok/@warn/@error QSS tokens resolve them with
-dark/light-aware fallbacks when absent.
+"""apply_bundle + status tokens (tide 2.0 preset plumbing). The preset
+switcher flips theme/font/size/case as one unit; through the single
+setters that's four full re-applies, with widgets repainting against
+half-switched state between them. apply_bundle must write the SAME
+state fields the setters own and land the bundle in exactly one apply:
+one queued restyle, one emit. Also the new [tokens] ok/warn/error
+status tokens, with dark/light-aware fallbacks when absent.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -86,7 +82,6 @@ class ApplyBundleTest(BundleTestBase):
         self._pump()
         self.assertEqual(self.spy.call_count, 1,
                          "a full bundle must cost exactly one repolish")
-        # All axes actually landed on the setter-owned state.
         self.assertEqual(self.mgr.user_font(), "Bundle Test Face")
         self.assertEqual(self.mgr.user_font_size(), 13)
         self.assertEqual(theming._CASE_OVERRIDE, "upper")

@@ -91,8 +91,7 @@ class LibrespotBackend(PlaybackBackend):
     slug = "librespot"
 
     # librespot renders Spotify's audio itself — set_speed stays the base
-    # no-op, and this flag lets the UI grey the speed control instead of
-    # pretending the nudges did something.
+    # no-op, and the UI greys the speed control
     supports_speed = False
 
     # Name we register the librespot device under. Suffix avoids colliding

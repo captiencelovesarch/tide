@@ -21,13 +21,10 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication(sys.argv[:1])
 
 
-# ---------------------------------------------------------------------------
-# glyphs
-# ---------------------------------------------------------------------------
+# ---------- glyphs ----------
 
 # The shipped vocabulary, spelled as escapes so a lookalike codepoint
-# sneaking into the registry (⏸ for ▮▮, ▹ for ▸ …) can't pass by looking
-# right in a diff.
+# (⏸ for ▮▮, ▹ for ▸ …) can't pass by looking right in a diff.
 SHIPPED_GLYPHS = {
     "play": "\u25b6",                       # ▶
     "pause": "\u25ae\u25ae",               # ▮▮ — NOT U+23F8, baseline war story
@@ -61,7 +58,6 @@ class GlyphRegistryTest(unittest.TestCase):
 
     def test_keys_cover_the_contract_vocabulary(self) -> None:
         self.assertEqual(set(glyphs.KEYS), set(SHIPPED_GLYPHS))
-        # Ordered tuple, no dupes.
         self.assertEqual(len(glyphs.KEYS), len(set(glyphs.KEYS)))
 
     def test_every_registered_pack_is_complete(self) -> None:
@@ -117,9 +113,7 @@ class GlyphRegistryTest(unittest.TestCase):
             glyphs.glyph("warp_ten")
 
 
-# ---------------------------------------------------------------------------
-# backdrops
-# ---------------------------------------------------------------------------
+# ---------- backdrops ----------
 
 
 class BackdropRegistryTest(unittest.TestCase):
@@ -180,9 +174,7 @@ class BackdropRegistryTest(unittest.TestCase):
         self.assertNotIn(backdrops.OFF, backdrops.SLUGS)
 
 
-# ---------------------------------------------------------------------------
-# speed law
-# ---------------------------------------------------------------------------
+# ---------- speed law ----------
 
 
 def _old_clamp(value: float) -> float:
@@ -225,7 +217,6 @@ class SpeedLawTest(unittest.TestCase):
     def test_engine_clamp(self) -> None:
         self.assertEqual(speed_law.engine_clamp(0.1), 0.25)
         self.assertEqual(speed_law.engine_clamp(10.0), 4.0)
-        # No quantization inside the range.
         self.assertEqual(speed_law.engine_clamp(1.37), 1.37)
         self.assertEqual(speed_law.engine_clamp(0.25), 0.25)
         self.assertEqual(speed_law.engine_clamp(4.0), 4.0)

@@ -47,10 +47,8 @@ from .visualizer import _Canvas
 from .widgets import AlbumArt, BracketButton, _color
 
 
-# (label, slug) rows for the mini/fullscreen context menus, built from the
-# backdrop registry. The menus keep only the name half of the registry's
-# "name · description" labels — a QMenu column that wide reads terrible —
-# and wrap the styles in the menu-short sentinel labels.
+# (label, slug) context-menu rows from the backdrop registry — only the
+# name half of its "name · description" labels fits a QMenu column.
 _BACKDROP_CHOICES = (
     [("follow main", backdrops.FOLLOW)]
     + [(label.split(" · ")[0], slug) for slug, label in backdrops.choices()]
@@ -273,7 +271,6 @@ class MiniPlayer(QWidget):
         self.ticker_lbl.setWordWrap(True)
         self.ticker_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.ticker_lbl.setProperty("class", "dim")
-        # In-flight motion.value_lerp handle (or None) — see _set_ticker_height.
         self._ticker_h_anim = None
         fg.addWidget(self.title_lbl)
         fg.addWidget(self.artist_lbl)
@@ -343,8 +340,6 @@ class MiniPlayer(QWidget):
         self._zen_eff = QGraphicsOpacityEffect(self._fade_group)
         self._zen_eff.setOpacity(1.0)
         self._fade_group.setGraphicsEffect(self._zen_eff)
-        # In-flight motion.value_lerp handles (or None) — zen's opacity
-        # fade and the collapse-to-art-card height glide.
         self._zen_anim = None
         self._zen_h_anim = None
         self._zen_timer = QTimer(self)
@@ -401,15 +396,12 @@ class MiniPlayer(QWidget):
         self._tracker.start_wire()
         self._tracker.lyric_changed.connect(self._on_ticker_line)
 
-        # Escape is a fixed exit affordance on every companion window —
-        # deliberately NOT rebindable.
+        # Escape is a fixed exit affordance — deliberately NOT rebindable.
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._request_exit)
         # The rest mirror rebindable ACTIONS ids. QShortcut context is
-        # per-window, so the main window's shortcuts can't fire here —
-        # these are built from the SAME effective keymap (and re-keyed
-        # by MainWindow.rebind_shortcuts' companion walk), so a rebind
-        # follows the user into the mini instead of the shipped
-        # defaults living on in it.
+        # per-window (the main window's can't fire here); these are built
+        # from the same effective keymap and re-keyed by
+        # MainWindow.rebind_shortcuts' companion walk.
         self._keymap_handlers = {
             "mini_mode": self._request_exit,
             "play_pause": window._on_play_clicked,
@@ -429,10 +421,8 @@ class MiniPlayer(QWidget):
         self._install_wake_filters()
 
     def rebind_shortcuts(self) -> None:
-        """Re-key the transport shortcuts from the effective keymap.
-        Runs at construction and from MainWindow.rebind_shortcuts (the
-        keymap editor's accept path) via the _companions walk. An
-        unbound action ("" sequence) leaves an inert QShortcut."""
+        """Re-key from the effective keymap — at construction and from
+        MainWindow.rebind_shortcuts' companion walk. Unbound ("") = inert."""
         from .window import effective_keymap
         km = effective_keymap(getattr(self._window, "_settings", None))
         for action_id, sc in self._keymap_shortcuts.items():
@@ -463,8 +453,8 @@ class MiniPlayer(QWidget):
         self.apply_settings()
 
     def resolved_backdrop_style(self) -> str:
-        # backdrops.resolve owns the follow semantics (and documents why
-        # the mini keeps its gradient even when the main backdrop is off).
+        # backdrops.resolve owns follow (and why the mini keeps its
+        # gradient when the main backdrop is off).
         s = self._settings()
         return backdrops.resolve(
             s.mini_backdrop_style,
@@ -564,12 +554,9 @@ class MiniPlayer(QWidget):
     # ---------- data slots (queue / player / theme) ----------
 
     def refresh_glyphs(self) -> None:
-        """Re-derive the construction-time static glyphs from the
-        registry. Play/like/repeat re-resolve on every state refresh
-        already; these four are set once in __init__ — without this, a
-        personality flip's glyph overrides (window.refresh_glyphs →
-        sync_now) would never reach the mini's shuffle/prev/next/expand
-        buttons. Cheap and idempotent, same contract as the window's."""
+        """Re-derive the construction-time static glyphs (shuffle/prev/
+        next/expand are set once in __init__) so a personality flip's
+        glyph overrides reach them; play/like/repeat re-resolve anyway."""
         _g = glyphs.glyph
         # Glyph-only button: the glyph doubles as the bracket label.
         self.shuffle_btn.setLabel(_g("shuffle"))
@@ -895,8 +882,7 @@ class MiniPlayer(QWidget):
             if not want:
                 panel.hide()
         else:
-            # owner+kind: a rapid re-toggle cancels the prior glide
-            # instead of two anims fighting over the panel height.
+            # owner+kind: a rapid re-toggle cancels the prior glide.
             self._lyrics_anim = motion_module.value_lerp(
                 float(start), float(target),
                 on_update=self._on_lyrics_anim_value,
@@ -941,9 +927,8 @@ class MiniPlayer(QWidget):
         return super().eventFilter(obj, event)
 
     def _animate_zen(self, to: float) -> None:
-        # value_lerp cancels the prior in-flight fade (same owner+kind)
-        # and snaps synchronously at intensity OFF — brutalist zero-anim.
-        # Opacity: the profile's plain "out" ease, never the spring.
+        # value_lerp cancels the prior fade (same owner+kind) and snaps
+        # at intensity OFF. Opacity: plain "out", never the spring.
         self._zen_anim = motion_module.value_lerp(
             float(self._zen_eff.opacity()), float(to),
             on_update=self._zen_eff.setOpacity,
@@ -972,9 +957,8 @@ class MiniPlayer(QWidget):
 
     def _animate_group_height(self, end: int, on_done=None) -> None:
         self._stop_zen_h_anim()
-        # Deliberately linear (in both profiles) — the collapse should
-        # read as one steady mechanical motion, in step with the opacity
-        # fade. A spring here would bounce the window geometry itself.
+        # Deliberately linear in both profiles — the collapse reads as one
+        # steady motion; a spring would bounce the window geometry itself.
         self._zen_h_anim = motion_module.value_lerp(
             float(self._fade_group.height()), float(end),
             on_update=self._on_zen_h_value,

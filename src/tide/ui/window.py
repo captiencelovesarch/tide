@@ -354,14 +354,11 @@ class _InstrumentalSearchWorker(QObject):
 
 @dataclass(frozen=True)
 class ShortcutAction:
-    """One rebindable keyboard action.
-
-    ``run`` takes the MainWindow and resolves its targets at fire time
-    (attribute access, never captured widgets) so a strip rebuild can't
-    strand a binding on a dead button. ``default`` is the shipped key
-    sequence in Qt portable form; settings.keymap overrides it per
-    action id (missing id = default, empty string = unbound).
-    """
+    """One rebindable keyboard action. ``run`` resolves its targets at
+    fire time (attribute access, never captured widgets) so a strip
+    rebuild can't strand a binding on a dead button. ``default`` is
+    the shipped Qt-portable sequence; settings.keymap overrides per
+    action id (missing id = default, "" = unbound)."""
     id: str
     label: str
     default: str
@@ -376,16 +373,13 @@ def _nudge_speed(w: "MainWindow", direction: int) -> None:
     w.speed_btn.set_speed(w.speed_btn.speed() + direction * SPEED_STEP)
 
 
-# The single source of truth for every keyboard shortcut — v1 hand-wired
-# these as ~30 literal QShortcut lines. The keymap editor renders this
-# table, _wire_shortcuts builds from it, and every tooltip that
-# advertises a key derives from it (binding_display), so a rebind can't
-# leave stale key names in the chrome.
+# The single source of truth for every keyboard shortcut: the keymap
+# editor renders this table, _wire_shortcuts builds from it, and every
+# tooltip that advertises a key derives from it (binding_display), so a
+# rebind can't leave stale key names in the chrome.
 ACTIONS: tuple[ShortcutAction, ...] = (
     # -- navigation. Ctrl+digits mirror the rail's tab order exactly,
-    # [settings] included (Ctrl+6 was a ghost duplicate of home once —
-    # the explore→home merge; the digits must never skip a number
-    # relative to the rail again).
+    # [settings] included — never skip a number relative to the rail.
     ShortcutAction("search", "focus search", "Ctrl+L", "navigation",
                    lambda w: w.search.setFocus()),
     ShortcutAction("search_alt", "focus search ·alt·", "Ctrl+F", "navigation",
@@ -445,9 +439,8 @@ ACTIONS: tuple[ShortcutAction, ...] = (
     ShortcutAction("mini_mode", "mini player", "Ctrl+M", "windows",
                    lambda w: w.toggle_mini_mode()),
     # -- session.
-    # Manual YT session refresh — same path as settings → sources →
-    # [refresh session], no dialog needed. Ctrl+R is taken by repeat;
-    # Shift makes it "the other refresh".
+    # Same path as settings → sources → [refresh session]. Ctrl+R is
+    # taken by repeat.
     ShortcutAction("refresh_session", "refresh yt session", "Ctrl+Shift+R",
                    "session", lambda w: w.refresh_session_manual()),
 )
@@ -459,12 +452,10 @@ def default_keymap() -> dict[str, str]:
 
 
 def effective_keymap(settings) -> dict[str, str]:
-    """The defaults with settings.keymap overrides riding on top.
-
-    Unknown ids in the stored keymap (a binding for an action a later
-    version removed) are ignored rather than raised — a stale config
-    must never break shortcut wiring. ``settings`` may be None (window
-    construction happens before app.py attaches it)."""
+    """The defaults with settings.keymap overrides on top. Unknown
+    stored ids are ignored — a stale config must never break shortcut
+    wiring. ``settings`` may be None (the window is constructed before
+    app.py attaches it)."""
     km = default_keymap()
     overrides = getattr(settings, "keymap", None) or {}
     for action_id, seq in overrides.items():
@@ -518,11 +509,10 @@ class MainWindow(QMainWindow):
         current_theme = theming.manager().current()
         if current_theme is not None:
             self._apply_window_translucency(current_theme)
-        # Window size: the active layout's remembered size (persisted per
-        # layout slug in settings.window_sizes) beats its declared default.
-        # Settings aren't attached yet — app.py binds them after the ctor —
-        # so this one read comes straight from disk; bare test windows see
-        # the sandboxed (empty) config and land on the plain default.
+        # The layout's remembered size (settings.window_sizes, per slug)
+        # beats its declared default. Settings aren't attached yet —
+        # app.py binds after the ctor — so this one read comes straight
+        # from disk; bare test windows see the sandboxed (empty) config.
         self._layout_slug = layout_module.manager().current().slug
         self.resize(*self._initial_window_size())
         self.api = api_obj
@@ -1068,9 +1058,8 @@ class MainWindow(QMainWindow):
         self.play_btn.setEnabled(False)
         self.like_btn.setEnabled(False)
         # Shuffle/repeat stay enabled — they're modes, not track actions.
-        # Tooltip key names derive from the keymap (v2.0) instead of
-        # hardcoding "ctrl+s"; _refresh_shortcut_tooltips re-derives them
-        # after a rebind.
+        # Tooltip key names derive from the keymap;
+        # _refresh_shortcut_tooltips re-derives them after a rebind.
         self.shuffle_btn.setToolTip(self._shortcut_tip("shuffle", "shuffle"))
         self.repeat_btn.setToolTip(
             self._shortcut_tip("repeat: off / all / one", "repeat"))
@@ -1714,8 +1703,7 @@ class MainWindow(QMainWindow):
     def _persist_settings(self) -> None:
         """Persist hook for the source panel's settings_changed signal —
         field-scoped to exactly what the panel can change, so it can't
-        revert whatever another saver (mini, preset flip) wrote since this
-        window's Settings object was last refreshed."""
+        revert another saver's (mini, preset flip) work."""
         if not hasattr(self, "_settings") or self._settings is None:
             return
         try:
@@ -1751,10 +1739,9 @@ class MainWindow(QMainWindow):
             return
         from . import motion as motion_module
         try:
-            # dur() is profile-aware (mechanical vs springy); overshoot is
-            # the springy dialect's snapshot lift on view switches — gated
-            # by construction inside crossfade_stack, so mechanical and
-            # OFF get exactly the old behavior.
+            # dur() is profile-aware; overshoot is the springy
+            # dialect's snapshot lift, gated inside crossfade_stack —
+            # mechanical and OFF keep exactly the old behavior.
             motion_module.crossfade_stack(
                 self.stack, target, dur=motion_module.dur("short"),
                 overshoot=True,
@@ -3402,32 +3389,19 @@ class MainWindow(QMainWindow):
             pass
 
     def _maybe_apply_theme_slot_prefs(self, new_theme, prior_theme) -> None:
-        """A theme pick just landed (settings-dialog preview, chooser).
-        v2.0 semantics — this NEVER wipes layout_overrides anymore:
+        """A theme pick just landed (settings preview, chooser). NEVER
+        wipes layout_overrides — the old wipe made theme browsing lossy.
 
-        - programmatic preset flip in progress → nothing; the stash being
-          restored owns theme, slots and overrides (guard flag below).
-        - settings dialog open → nothing; its combo previews every
-          selection through manager().apply, and routing a cross-aesthetic
-          slug into a flip from here turned arrow-key browsing into
-          persisted personality flips mid-dialog (preview became commit,
-          and _on_save then wrote the outgoing personality's widget state
-          over the flip). The dialog's accept path reconciles the final
-          pick instead (_reconcile_preset_after_dialog).
-        - same-personality pick → the theme is already applied by the
-          caller; the user's slot picks stay exactly as they are. (The old
-          code reset layout_overrides to the theme's [slots] on every
-          aesthetic flip — destructive, and what made theme browsing lossy.)
-        - cross-personality pick → the pick means "take me to the other
-          tide": file the picked theme into the target personality's stash,
-          then route through switch_preset so the flip lands ON that theme
-          instead of the personality's remembered one. DEFERRED out of
-          this theme_changed emission: switch_preset re-applies a theme,
-          and a nested apply would resume THIS emission afterwards,
-          delivering the stale pre-flip theme to every subscriber
-          connected after MainWindow (nearly all of them) — mis-themed
-          until an emission that may never come. Same pattern as the
-          deferred translucency remap above.
+        - programmatic flip in progress → nothing; the stash owns it.
+        - settings dialog open → nothing: flipping from here turned
+          arrow-key browsing into persisted flips. The accept path
+          reconciles instead.
+        - same-personality pick → already applied; slot picks stay.
+        - cross-personality pick → file the theme into the target's
+          stash, then switch_preset — DEFERRED out of this
+          theme_changed emission: a nested apply would resume THIS
+          emission after, delivering the stale pre-flip theme to every
+          subscriber connected after MainWindow.
         """
         if getattr(self, "_switching_preset", False):
             return
@@ -3464,12 +3438,10 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _seed_cross_pick(settings, target: str, new_slug: str, new_theme) -> None:
-        """File a picked theme into ``target``'s stash so the flip lands
-        ON that theme instead of the personality's remembered one. First
-        visit seeds the theme's [slots] prefs as overrides too (restore()
-        backfills the rest from builtin defaults) — the one good part of
-        the old aesthetic-flip wipe, kept. An existing stash keeps every
-        remembered tweak; only its theme updates."""
+        """File a picked theme into ``target``'s stash so the flip
+        lands ON it. First visit also seeds the theme's [slots] prefs
+        as overrides (restore() backfills the rest); an existing stash
+        keeps every remembered tweak — only its theme updates."""
         stashed = settings.preset_state.get(target)
         if stashed is None:
             settings.preset_state[target] = {
@@ -3483,17 +3455,13 @@ class MainWindow(QMainWindow):
     # ---------- personality flip (v2.0) ----------
 
     def switch_preset(self, preset_id: str) -> None:
-        """Mid-session personality flip. presets.apply_preset stashes the
-        outgoing personality, restores the incoming one, and pushes the
-        managers (theme+font+size+case through ONE apply_bundle → one
-        queued restyle); this method then lands the effective layout on
-        the window in ONE apply_layout pass.
-
-        Reentry-guarded: apply_bundle's theme_changed emission re-enters
-        _on_theme_changed while this runs, and without the flag the
-        slot-prefs handler would clobber the overrides the stash just
-        restored (and cost a second apply_layout).
-        """
+        """Mid-session personality flip: presets.apply_preset stashes
+        the outgoing side, restores the incoming, and pushes the
+        managers (ONE apply_bundle → one queued restyle); then one
+        apply_layout pass lands the effective layout. Reentry-guarded:
+        apply_bundle's theme_changed emission re-enters
+        _on_theme_changed, and without the flag the slot-prefs handler
+        would clobber the overrides the stash just restored."""
         if getattr(self, "_switching_preset", False):
             return
         settings = getattr(self, "_settings", None)
@@ -3502,13 +3470,12 @@ class MainWindow(QMainWindow):
         from .. import presets
         if (preset_id != settings.preset
                 and preset_id not in settings.preset_state):
-            # First visit via a direct flip (chooser): seed the incoming
-            # builtin theme's [slots] prefs as overrides — no window code
-            # observes theme slot prefs during a programmatic flip (guard
-            # above), so without this a first visit to modern would wear
-            # brutalist slot variants and stash them that way forever.
-            # Same seeding the wizard handoff and the cross-personality
-            # theme pick do.
+            # First visit via a direct flip: seed the incoming builtin
+            # theme's [slots] as overrides — slot prefs aren't observed
+            # during a programmatic flip (guard above), so without this
+            # modern's first visit would wear brutalist slot variants
+            # and stash them forever. Same seeding as the wizard handoff
+            # and the cross-personality pick.
             try:
                 theme_slug = presets.builtin(preset_id).theme
                 for t in theming.manager().list_themes():
@@ -3530,11 +3497,10 @@ class MainWindow(QMainWindow):
 
     def apply_preset_visuals(self) -> None:
         """Push every preset-owned visual from self._settings onto the
-        live widgets and drivers. Mirrors the settings-dialog apply block
-        (same helpers, no new signal paths). Called by presets.apply_preset
-        when handed a window, and once at startup from app.py — which runs
-        BEFORE ui_sounds exists, hence the getattr guards throughout.
-        """
+        live widgets and drivers — mirrors the settings-dialog apply
+        block. Called by presets.apply_preset when handed a window, and
+        at startup from app.py, which runs BEFORE ui_sounds exists —
+        hence the getattr guards throughout."""
         s = getattr(self, "_settings", None)
         if s is None:
             return
@@ -3565,8 +3531,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self.apply_nav_icons(s.nav_icon_set or "off")
-        # Thumbnails are preset-owned (brutalist keeps them ON — art is
-        # content, not chrome).
+        # Thumbnails are preset-owned (brutalist keeps them ON).
         from .track_row import set_thumbnail_override
         set_thumbnail_override(s.show_thumbnails or "theme")
         # UI-sounds master toggle + pack. Not built yet at the startup
@@ -3575,24 +3540,19 @@ class MainWindow(QMainWindow):
         if ui_sounds is not None:
             ui_sounds.set_enabled(bool(s.ui_sounds_enabled))
         self._apply_sound_pack()
-        # Per-glyph overrides are a STASH_FIELD — glyphs are chrome, and
-        # chrome is personality. Re-push the incoming set into the
-        # registry and repaint every transport label so a brutalist ▶
-        # swap can't leak into modern (and vice versa).
+        # Per-glyph overrides are a STASH_FIELD: re-push the incoming
+        # set and repaint every transport label so a brutalist ▶ swap
+        # can't leak into modern.
         glyphs.set_overrides(dict(s.glyph_overrides or {}))
         self.refresh_glyphs()
 
     def _apply_sound_pack(self) -> None:
         """Point the UI-sound player at the active personality's pack.
 
-        The pack is preset-owned data straight off the builtin def —
-        modern wears the watery "modern" blips, brutalist the default
-        clicks. Deliberately NOT a Settings/STASH field: there is no GUI
-        knob for it, and deriving it from the preset id keeps a flip
-        atomic (nothing extra to stash or migrate). Unknown/pre-adoption
-        preset ids wear the default pack — lenient like the loader.
-        No-op when app.py hasn't bound ui_sounds yet; set_pack itself is
-        cheap (re-stats six files) and skipped when nothing changed."""
+        Deliberately NOT a Settings/STASH field: no GUI knob, and
+        deriving it from the preset id keeps a flip atomic.
+        Unknown/pre-adoption ids wear the default pack. No-op until
+        app.py binds ui_sounds; set_pack skips when nothing changed."""
         ui_sounds = getattr(self, "ui_sounds", None)
         if ui_sounds is None:
             return
@@ -3607,12 +3567,9 @@ class MainWindow(QMainWindow):
 
     def refresh_glyphs(self) -> None:
         """Re-push current state to every transport label so a changed
-        glyph (glyph-editor live edit, personality flip, boot-time
-        overrides) shows immediately.
-
-        Cheap and idempotent by contract — the glyph editor calls this
-        on EVERY live keystroke and on cancel-revert: existing refresh
-        paths only, no restyle, no status messages, no saves."""
+        glyph shows immediately. Cheap and idempotent by contract — the
+        glyph editor calls this on EVERY keystroke and on cancel-revert:
+        existing refresh paths only, no restyle, no saves."""
         # Static glyphs the controls bundle / strip set at construction.
         for attr, key in (("shuffle_btn", "shuffle"),
                           ("prev_btn", "prev"),
@@ -3655,52 +3612,29 @@ class MainWindow(QMainWindow):
 
     def rebase_settings_snapshot(self, settings) -> None:
         """The open settings dialog just COMMITTED a personality flip
-        (v2.0 route b3: the appearance tab's picker, or its [choose your
-        tide] button). Re-base the pre-dialog snapshot _do_open_settings
-        is holding for the accept-time reconcile.
-
-        The dialog re-bases every snapshot IT holds for the same reason
-        (SettingsDialog._rebase_after_personality_flip); this is the
-        window's half, and without it the two disagree. The reconcile's
-        cross-personality branch hands ``before.theme`` back to the
-        outgoing personality — and before phase 4 the personality could
-        not move while the dialog was up, so "the personality the dialog
-        opened on" and "the outgoing personality" were the same thing.
-        They aren't any more: flip brutalist→modern in the dialog, tick
-        "show all themes", pick a brutalist theme, accept, and the stale
-        snapshot files the BRUTALIST slug as modern's remembered theme.
-
-        A flip is a commit, so the post-flip values are the new baseline.
-        No-op when no dialog is open (nothing to re-base).
-        """
+        (route b3): re-base the pre-dialog snapshot the accept-time
+        reconcile reads (the dialog re-bases its own half). Without
+        it: flip brutalist→modern, tick "show all themes", pick a
+        brutalist theme, accept — the reconcile files the BRUTALIST
+        slug as modern's remembered theme. A flip is a commit, so
+        post-flip values are the new baseline. No-op when no dialog is
+        open."""
         if getattr(self, "_settings_before_dialog", None) is None:
             return
         import copy as _copy
         self._settings_before_dialog = _copy.copy(settings)
 
     def _reconcile_preset_after_dialog(self, before, new) -> None:
-        """Preset bookkeeping for an ACCEPTED settings dialog. Cross-
-        personality previews are suppressed while the dialog is open
-        (_maybe_apply_theme_slot_prefs), so the final accepted state is
-        reconciled here, on our own event-loop turn:
-
-        - same-personality accept → refresh the active preset's stash so
-          the next flip round-trips the dialog's tweaks instead of
-          reverting them (the dialog full-saves the live fields but
-          never touches preset_state);
-        - accepted theme belongs to the OTHER personality → the exact
-          flip a live cross-personality pick performs: the accepted
-          widget edits stay with the outgoing personality (they were
-          made looking at its values — including its theme, which a
-          browse-away pick doesn't change), and the flip lands ON the
-          picked theme with the target's remembered state (or builtin
-          defaults on a first visit). Never adopt the accepted widget
-          bundle as the target's state wholesale — that persists a
-          preset wearing the other personality's look and clobbers the
-          target's remembered tweaks.
-
-        ``before`` must describe the personality the dialog CLOSED on,
-        not merely the one it opened on — see rebase_settings_snapshot.
+        """Preset bookkeeping for an ACCEPTED settings dialog
+        (cross-personality previews are suppressed while it's open).
+        Same-personality accept: refresh the active stash so the next
+        flip round-trips the dialog's tweaks. Theme from the OTHER
+        personality: the same flip a live cross-pick performs — widget
+        edits stay with the outgoing personality, the flip lands ON the
+        picked theme with the target's remembered state. Never adopt
+        the accepted bundle as the target's state wholesale — that
+        clobbers the target's tweaks. ``before`` must describe the
+        personality the dialog CLOSED on (see rebase_settings_snapshot).
         """
         from .. import presets
         if new is None or not getattr(new, "preset", ""):
@@ -3717,10 +3651,9 @@ class MainWindow(QMainWindow):
             target = ""
         if target in presets.BUILTINS and target != new.preset:
             self._seed_cross_pick(new, target, new.theme, picked)
-            # The picked theme rides to the target; the outgoing
-            # personality keeps the theme it wore when the dialog opened
-            # (switch_preset stashes the live fields as the outgoing
-            # state, and _on_save already wrote the pick onto new.theme).
+            # The pick rides to the target; the outgoing personality
+            # keeps the theme it wore when the dialog opened (_on_save
+            # already wrote the pick onto new.theme).
             if before is not None:
                 new.theme = before.theme
             self.switch_preset(target)
@@ -3736,13 +3669,11 @@ class MainWindow(QMainWindow):
         return str(self._theme.t("layout", "list_marker", "> ")) if self._theme else "> "
 
     def _wire_shortcuts(self) -> None:
-        """Build one QShortcut per ShortcutAction from the effective
-        keymap (module-level ACTIONS table + settings.keymap overrides).
-        Kept on self._shortcuts so rebind_shortcuts can re-key them live.
-
-        Runs at construction, which is BEFORE app.py attaches
-        window._settings — so a saved custom keymap needs a
-        rebind_shortcuts() call after the attach (app boot does this)."""
+        """Build one QShortcut per ShortcutAction, kept on
+        self._shortcuts so rebind_shortcuts can re-key them live. Runs
+        at construction, BEFORE app.py attaches window._settings — a
+        saved custom keymap needs the rebind_shortcuts() call app boot
+        makes after the attach."""
         old = getattr(self, "_shortcuts", None)
         if old:
             # Defensive idempotence: a rewire must not leave the previous
@@ -3760,12 +3691,10 @@ class MainWindow(QMainWindow):
         self._refresh_shortcut_tooltips()
 
     def rebind_shortcuts(self) -> None:
-        """Apply the current settings.keymap to the live QShortcuts — no
-        restart. Called by the keymap editor's accept path and by app
-        boot right after settings attach. Also refreshes every tooltip
-        that advertises a binding, and re-keys the companion windows
-        (mini/fullscreen) — their QShortcuts have per-window context, so
-        re-keying ours alone would leave the old defaults live there."""
+        """Apply settings.keymap to the live QShortcuts — no restart.
+        Also refreshes the binding tooltips and re-keys the companion
+        windows: their QShortcuts have per-window context, so re-keying
+        ours alone would leave the old defaults live there."""
         shortcuts = getattr(self, "_shortcuts", None)
         if not shortcuts:
             return
@@ -3798,10 +3727,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_shortcut_tooltips(self) -> None:
         """Re-derive every tooltip that advertises a key binding.
-        hasattr-guarded: runs from __init__ (right after _build_ui) and
-        from rebind_shortcuts; the strip rebuild's keep-list copies
-        tooltips onto replacement buttons, so the current attributes are
-        always the live ones."""
+        hasattr-guarded — runs from __init__ and rebind_shortcuts; the
+        strip rebuild copies tooltips onto replacement buttons."""
         pairs = (
             ("shuffle_btn", "shuffle", "shuffle"),
             ("repeat_btn", "repeat: off / all / one", "repeat"),
@@ -3846,24 +3773,21 @@ class MainWindow(QMainWindow):
         self.player.set_volume(value)
 
     def _refresh_speed_support(self) -> None:
-        """Grey the speed button whenever the active backend can't do
-        variable speed (librespot no-ops set_speed — pretending the
-        nudges work would be a lie). The active backend flips inside
-        player.load_ref, so this re-runs after every track load and on
-        an active-source switch. A plain Player (tests, back-compat) has
-        no probe and counts as supporting."""
+        """Grey the speed button when the active backend can't do
+        variable speed (librespot no-ops set_speed). The backend flips
+        inside player.load_ref, so this re-runs after every track load
+        and source switch; a plain Player (tests) has no probe and
+        counts as supporting."""
         probe = getattr(self.player, "active_supports_speed", None)
         supported = True if probe is None else bool(probe())
         self.speed_btn.set_backend_supported(supported)
 
     def _on_speed_changed(self, value: float) -> None:
-        # Push to the playback router → mpv. Backends that don't support
-        # variable speed (Librespot / future MusicKit) no-op; the button
-        # greys via _refresh_speed_support when one of those is active.
+        # Non-supporting backends no-op set_speed; the button greys via
+        # _refresh_speed_support.
         self.player.set_speed(value)
         # Persist debounced, same shared timer as volume — a held [ or ]
-        # key repeats fast enough to matter. Gracefully skipped if settings
-        # hasn't been attached yet (e.g. mid-startup).
+        # key repeats fast enough to matter. Skipped until settings attach.
         current = getattr(self, "_settings", None)
         if current is None:
             return
@@ -3873,12 +3797,11 @@ class MainWindow(QMainWindow):
         self._schedule_settings_save("playback_speed")
 
     def _schedule_settings_save(self, *names: str) -> None:
-        """Trailing-edge debounce for high-frequency settings fields
-        (volume wheel, speed nudges) — same shape as the FX debounce
-        below. One shared timer + a pending name-set; the flush writes
-        only those fields via save_fields so a stale in-memory Settings
-        can't revert what another saver wrote meanwhile. closeEvent
-        flushes so the last tick before quit is never lost."""
+        """Trailing-edge debounce for high-frequency fields (volume
+        wheel, speed nudges). One shared timer + a pending name-set;
+        the flush writes only those fields via save_fields, so a stale
+        in-memory Settings can't revert another saver's work.
+        closeEvent flushes so the last tick before quit isn't lost."""
         from PySide6.QtCore import QTimer as _QT
         timer = getattr(self, "_settings_save_timer", None)
         if timer is None:
@@ -4287,11 +4210,10 @@ class MainWindow(QMainWindow):
         — compact triggers mini-mode style hiding; stage is currently treated
         like classic (TODO: side-by-side art + lyrics).
         """
-        # Remember the outgoing layout's window size FIRST, before any
-        # slot swap or the resize below moves anything. Keyed by the slug
-        # this window is currently showing — the layout manager may
-        # already point at the incoming layout (the settings dialog
-        # applies there before calling here).
+        # Remember the outgoing layout's window size FIRST, keyed by
+        # the slug this window is currently showing — the layout
+        # manager may already point at the incoming layout (the
+        # settings dialog applies there before calling here).
         self._remember_window_size()
         # Slot swap — rebuild whichever widgets changed.
         new_progress = layout.slots.get("progress", "blocks")
@@ -4336,10 +4258,10 @@ class MainWindow(QMainWindow):
             # also call set_mini_mode, which now opens a separate window —
             # and whose old behavior was redundant here anyway.)
             self._rebuild_strip("compact" if new_mode == "compact" else "classic")
-        # Remembered size for the incoming layout wins over its declared
-        # default — a layout (or personality) switch shouldn't stomp a
-        # window the user already sized. Also un-breaks the old snap-back:
-        # a same-layout slot tweak used to force window_default every time.
+        # Remembered size wins over the declared default — a layout (or
+        # personality) switch shouldn't stomp a window the user already
+        # sized. (The old code forced window_default on every same-
+        # layout slot tweak.)
         settings = getattr(self, "_settings", None)
         remembered = ((settings.window_sizes or {}).get(layout.slug)
                       if settings is not None else None)
@@ -4351,13 +4273,12 @@ class MainWindow(QMainWindow):
         )
 
     def apply_strip_overrides(self, overrides: dict) -> None:
-        """The strip builder's accept path — the ONE sanctioned route for
-        its ``overrides_chosen`` payload (the dialog itself never applies
-        or persists). Adopts the chosen per-slot overrides wholesale: an
-        empty dict deliberately CLEARS back to the layout's defaults
-        (update_overrides replaces, never merges). The rebuild rides
-        apply_layout, where the _rebuild_strip keep-list rules live; the
-        save is field-scoped so it can't clobber a satellite saver."""
+        """The strip builder's accept path — the ONE sanctioned route
+        for its payload (the dialog never applies or persists). Adopts
+        the overrides wholesale: an empty dict deliberately CLEARS to
+        the layout's defaults (update_overrides replaces, never
+        merges). The rebuild rides apply_layout; the save is
+        field-scoped so it can't clobber a satellite saver."""
         payload = {str(k): str(v) for k, v in dict(overrides or {}).items()}
         settings = getattr(self, "_settings", None)
         if settings is not None:
@@ -4695,24 +4616,21 @@ class MainWindow(QMainWindow):
 
     # ---------- the live-apply chain (v2.0 settings engine) ----------
     #
-    # One named applier per settings axis. Every applier is NILADIC and
-    # reads self._settings — the accept path writes the accepted values
-    # onto the settings object first, then run_live_appliers runs the
-    # appliers whose descriptor keys changed, each once, in THIS order.
-    # The tuple encodes the ordering that was hand-sequenced in the v1
-    # _do_open_settings block, as data:
+    # One NILADIC applier per settings axis, each reading
+    # self._settings. The accept path writes the accepted values first;
+    # run_live_appliers then runs the appliers whose descriptor keys
+    # changed, each once, in THIS order:
     #
     #   · apply_ui_scale_setting BEFORE apply_theme_bundle_setting — a
-    #     scale change re-applies the active theme at the new factor and
-    #     the final theme bundle must land after it (scale→theme);
+    #     scale change re-applies the theme, and the final bundle must
+    #     land after it (scale→theme);
     #   · apply_corner_setting BEFORE apply_csd_setting, and the csd
-    #     applier ALSO runs when only corner_style changed
-    #     (LIVE_APPLY_EXTRA_TRIGGERS) — corners decide whether the
-    #     window needs an alpha channel, and the translucency re-check
-    #     must see the final frameless flag (CSD→translucency);
-    #   · apply_pitch_setting LAST — set_pitch_correction re-applies the
-    #     scaletempo filter chain the current speed rides on
-    #     (pitch→speed).
+    #     applier ALSO runs on a corner-only change (extra trigger) —
+    #     corners decide whether the window needs an alpha channel, and
+    #     the translucency re-check must see the final frameless flag
+    #     (CSD→translucency);
+    #   · apply_pitch_setting LAST — set_pitch_correction re-applies
+    #     the scaletempo chain the current speed rides on (pitch→speed).
     LIVE_APPLY_ORDER: tuple[str, ...] = (
         "apply_ui_scale_setting",
         "apply_theme_bundle_setting",
@@ -4762,11 +4680,10 @@ class MainWindow(QMainWindow):
                 getattr(self, name)()
 
     def apply_ui_scale_setting(self) -> None:
-        """UI scale preset. Re-applies the active theme so the
-        QApplication font + QSS pick up the new size_pt and every
-        theme_changed listener (track row delegate, AlbumArt,
-        MonoProgress, …) re-derives its scaled pixel sizes in the same
-        beat. Must run BEFORE apply_theme_bundle_setting (scale→theme)."""
+        """UI scale preset. Re-applies the active theme so the app font
+        + QSS pick up the new size_pt and theme_changed listeners
+        re-derive their scaled pixel sizes. Must run BEFORE
+        apply_theme_bundle_setting (scale→theme)."""
         from . import scale as scale_module
         s = self._settings
         if scale_module.current().value != (s.ui_scale or "normal"):
@@ -4836,11 +4753,10 @@ class MainWindow(QMainWindow):
         )
 
     def apply_csd_setting(self) -> None:
-        """Titlebar mode (tide-drawn vs system decoration), THEN the
-        window-translucency re-check — csd→translucency ordering
-        contract: the re-check must read the final frameless flag. Also
-        runs when only corner_style changed (rounded corners on a CSD
-        window need an alpha channel)."""
+        """Titlebar mode, THEN the window-translucency re-check —
+        csd→translucency: the re-check must read the final frameless
+        flag. Also runs on a corner-only change (rounded corners on a
+        CSD window need an alpha channel)."""
         self.set_csd_titlebar(bool(self._settings.csd_titlebar))
         self._apply_window_translucency(self._theme)
 
@@ -4848,12 +4764,10 @@ class MainWindow(QMainWindow):
         self.apply_nav_icons(self._settings.nav_icon_set or "off")
 
     def apply_motion_setting(self) -> None:
-        """Motion intensity — helpers consult the cached value every
-        call, so animations queued after this point pick up the level.
-
-        Re-binds the dialect from the active personality too: intensity is
-        an independent setting, so a brutalist user raising motion to full
-        must get more mechanical motion, never the modern bounce."""
+        """Motion intensity — helpers consult the cached value per
+        call. Also re-binds the dialect from the active personality:
+        intensity is independent, so brutalist at full gets more
+        mechanical motion, never the modern bounce."""
         from . import motion as motion_module
         motion_module.set_intensity(self._settings.motion or "lite")
         motion_module.bind_preset(getattr(self._settings, "preset", "") or "")
@@ -4941,19 +4855,17 @@ class MainWindow(QMainWindow):
     # ---------- settings dialog ----------
 
     def open_settings(self) -> None:
-        # Defer the modal past the click handler — opening a QDialog directly
-        # inside the button's clicked emission segfaults on PySide6 + py3.14
-        # (see [[feedback-pyside-modal]]). singleShot(0) with self as receiver
-        # marshals onto this (GUI) thread's event loop.
+        # Defer the modal past the click handler — a QDialog opened
+        # directly inside the clicked emission segfaults on PySide6 +
+        # py3.14 ([[feedback-pyside-modal]]).
         QTimer.singleShot(0, self._do_open_settings)
 
     def _do_open_settings(self) -> None:
         """Open the generated settings dialog; on accept, run the
-        live-apply chain for the keys that actually changed.
-
-        The dialog edits the live Settings object in place and saves the
-        field-diff itself (settings.save_fields) — no deepcopy-replace,
-        so the object every satellite saver holds stays the truth."""
+        live-apply chain for the keys that changed. The dialog edits
+        the live Settings in place and saves the field-diff itself — no
+        deepcopy-replace, so the object every satellite saver holds
+        stays the truth."""
         import copy as _copy
         from .settings import SettingsDialog
         current = getattr(self, "_settings", None)
@@ -4961,21 +4873,18 @@ class MainWindow(QMainWindow):
             # Settings injection from app.py hasn't happened (e.g. tests).
             from .. import settings as settings_module
             current = settings_module.load()
-        # Pre-dialog values for the preset reconcile (shallow copy: it
-        # only reads scalar fields like .theme). Parked on the window,
-        # not just in this frame: route (b3) lets the user flip the
-        # personality from INSIDE the dialog, and the dialog re-bases
-        # this snapshot when that happens (rebase_settings_snapshot) so
-        # the reconcile below describes the personality the dialog
-        # closed on rather than the one it opened on.
+        # Pre-dialog values for the preset reconcile (shallow copy — it
+        # only reads scalars). Parked on the window: route b3 can flip
+        # the personality from INSIDE the dialog, and
+        # rebase_settings_snapshot updates this so the reconcile
+        # describes the personality the dialog CLOSED on.
         before = _copy.copy(current)
         self._settings_before_dialog = before
         dlg = SettingsDialog(current, parent=self)
         self._ui_sound("modal_open")
-        # While the dialog is up, its pickers preview through the live
-        # managers; the flag keeps _maybe_apply_theme_slot_prefs from
-        # turning a theme preview into a personality flip. The accept
-        # path below reconciles the final pick instead.
+        # The flag keeps _maybe_apply_theme_slot_prefs from turning a
+        # theme preview into a personality flip; the accept path below
+        # reconciles the final pick instead.
         self._settings_dialog_open = True
         try:
             result = dlg.exec()

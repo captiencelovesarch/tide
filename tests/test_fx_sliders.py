@@ -1,30 +1,17 @@
 """Phase 3 E2 — the fx rack's modern face + the debounce discipline.
 
-What's pinned here:
-- face pick: the rack view lands the spring face on show when the
-  window's personality is modern (construction is always bracket — the
-  view is built before app.py attaches window._settings); brutalist /
-  no preset / no settings keeps the bracket face with zero SpringSliders
-  in the tree; a mid-session flip swaps faces on the next show and
-  carries values over. Same rule for the strip popover, at popover
-  build (the speed button's pattern).
-- the debounce discipline (the reverb-tail rule): a drag NEVER pushes
-  the filter chain per tick — live changes ride state_changed into the
-  window's existing trailing-edge debounce (~120 ms push / ~250 ms
-  save), counted against a mocked player; a committed interaction
-  SHORTENS that debounce (never flushes inline) so a burst of commits —
-  wheel notches, key auto-repeat, which is what motion OFF produces
-  since there's no settle to coalesce against — still costs exactly one
-  push and one save.
-- brutalist face untouched: bracket controls are the verbatim
-  _ShelfSlider/QSlider originals, emit no commits, and keep today's
-  trailing-debounce timing (no flush-on-release).
-- the EQ bands stay QSliders under both faces (vertical vs the
-  horizontal-only SpringSlider) but join the commit discipline under
-  modern: drag release commits; under brutalist it doesn't.
-- the popover hint color routes through the dim token, not palette(mid).
-- motion gating: intensity OFF commits inside the release stack; FULL
-  settles first and commits once when it lands.
+Face pick: construction is always bracket (the view is built before
+app.py attaches window._settings); modern lands spring on show; a flip
+swaps faces on the next show, carrying values. Same rule for the popover.
+
+Debounce: a drag never pushes the filter chain per tick — live changes
+ride state_changed into the window's trailing debounce (~120 ms push /
+~250 ms save). A committed interaction SHORTENS that debounce, never
+flushes inline, so a burst of commits (wheel notches, key auto-repeat —
+what motion OFF produces) costs exactly one push and one save. The
+brutalist face is verbatim v1: no commits, today's timing. EQ bands
+stay QSliders under both faces but join the commit discipline under
+modern only. OFF commits inside the release stack; FULL settles first.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_fx_sliders.py
 """
@@ -112,9 +99,7 @@ class _Case(unittest.TestCase):
         motion.set_intensity(motion.Intensity.OFF)
 
 
-# ---------------------------------------------------------------------------
-# view face pick
-# ---------------------------------------------------------------------------
+# ---------- view face pick ----------
 
 
 class ViewFacePickTests(_Case):
@@ -133,8 +118,6 @@ class ViewFacePickTests(_Case):
         QTest.qWait(30)
 
     def test_construction_is_always_bracket(self) -> None:
-        # Built before any show — bracket even under a modern host,
-        # because the real app builds the view before _settings exists.
         self.assertEqual(self.view.face(), "bracket")
         for ctrl in self.view._fx_controls():
             self.assertEqual(ctrl.face(), "bracket")
@@ -147,7 +130,6 @@ class ViewFacePickTests(_Case):
         for ctrl in self.view._fx_controls():
             self.assertEqual(ctrl.face(), "spring")
             self.assertIsInstance(ctrl._inner, _SpringShelfSlider)
-        # One SpringSlider per continuous control, no more.
         self.assertEqual(len(self.view.findChildren(SpringSlider)), 7)
 
     def test_show_event_lands_the_face(self) -> None:
@@ -193,16 +175,13 @@ class ViewFacePickTests(_Case):
         self.assertIs(self.view._bass_slider._inner, inner)
 
     def test_eq_bands_stay_qsliders_under_both_faces(self) -> None:
-        # Vertical bands vs the horizontal-only SpringSlider — the bands
-        # keep their QSlider face in both personalities by design.
+        # the vertical bands keep QSlider (SpringSlider is horizontal-only)
         self.view._ensure_face()
         for band in self.view._eq_bands:
             self.assertIsInstance(band._slider, QSlider)
 
 
-# ---------------------------------------------------------------------------
-# spring face behavior in the view
-# ---------------------------------------------------------------------------
+# ---------- spring face behavior in the view ----------
 
 
 class SpringViewBehaviorTests(_Case):
@@ -232,7 +211,6 @@ class SpringViewBehaviorTests(_Case):
     def test_drag_updates_state_live_and_commits_once(self) -> None:
         s = self._slider(self.view._reverb_wet)
         s.mousePressEvent(_MouseEv(s._x_for_value(0.2)))
-        # Live: the state already moved, before any release.
         self.assertAlmostEqual(self.view.state().reverb_wet, 0.2)
         self.assertGreaterEqual(len(self.spy), 1)
         self.assertEqual(self.flush.call_count, 0)
@@ -240,7 +218,6 @@ class SpringViewBehaviorTests(_Case):
         self.assertAlmostEqual(self.view.state().reverb_wet, 0.75)
         self.assertEqual(self.flush.call_count, 0)
         s.mouseReleaseEvent(_MouseEv(s._x_for_value(0.75)))
-        # Commit landed inside the release stack (motion OFF) → one flush.
         self.assertEqual(self.flush.call_count, 1)
         self.assertEqual(
             self.view._reverb_wet._inner._readout.text(), "75%")
@@ -254,9 +231,8 @@ class SpringViewBehaviorTests(_Case):
         self.assertIs(ev.accepted, True)
 
     def test_dead_wheel_notch_falls_through_to_the_scroll_area(self) -> None:
-        # The rack lives in a QScrollArea and the modern face fills it
-        # with these sliders — a notch at the rail end must let the page
-        # scroll instead of freezing under the pointer.
+        # the rack lives in a QScrollArea — a notch at the rail end must
+        # let the page scroll instead of freezing under the pointer
         s = self._slider(self.view._reverb_wet)
         s.set_value(1.0)                # reverb wet is 0..1
         ev = _WheelEv(120)
@@ -329,9 +305,7 @@ class BracketViewBehaviorTests(_Case):
         self.assertEqual(self.view.findChildren(SpringSlider), [])
 
 
-# ---------------------------------------------------------------------------
-# the commit helper
-# ---------------------------------------------------------------------------
+# ---------- the commit helper ----------
 
 
 class _FakeDebounceWindow(QWidget):
@@ -374,9 +348,8 @@ class CommitHelperTests(_Case):
         self.win._audio_fx_save_timer.start()
         child = QWidget(self.win)
         _commit_fx_debounce(child)
-        # NOT inline: commits arrive per wheel notch / key repeat once
-        # motion is off, and each inline flush is a 34-62 ms mpv rebuild
-        # plus a TOML write.
+        # not inline: with motion off commits arrive per notch/repeat, and
+        # each inline flush is a 34-62 ms mpv rebuild plus a TOML write
         self.assertEqual(self.win.pushes, 0)
         self.assertEqual(self.win.saves, 0)
         self._drain()
@@ -386,18 +359,13 @@ class CommitHelperTests(_Case):
         self.assertFalse(self.win._audio_fx_save_timer.isActive())
 
     def test_it_still_beats_the_untouched_debounce(self) -> None:
-        # The point of committing at all: the value lands sooner than the
-        # trailing edge would have delivered it.
         self.assertLess(fx_view_module.COMMIT_DRAIN_MS,
                         self.win._audio_fx_push_timer.interval())
 
     def test_a_burst_of_commits_drains_once(self) -> None:
-        # The regression: 6 wheel notches with motion OFF used to mean 6
-        # synchronous filter-chain rebuilds and 6 TOML writes.
+        # 6 notches used to mean 6 synchronous rebuilds and 6 TOML writes
         child = QWidget(self.win)
         for _ in range(6):
-            # Every notch re-schedules the debounce (a value change) and
-            # then commits.
             self.win._audio_fx_push_timer.start()
             self.win._audio_fx_save_timer.start()
             _commit_fx_debounce(child)
@@ -408,8 +376,8 @@ class CommitHelperTests(_Case):
         self.assertEqual(self.win.saves, 1)
 
     def test_idle_timers_mean_nothing_pending(self) -> None:
-        # No active timer → nothing to cut short → nothing scheduled (a
-        # flush then would just re-write the same TOML).
+        # no active timer → nothing to cut short → nothing scheduled (a
+        # flush would just re-write the same TOML)
         _commit_fx_debounce(QWidget(self.win))
         self.assertIsNone(getattr(self.win, "_audio_fx_commit_timer", None),
                           "an idle rack must not arm a timer")
@@ -426,7 +394,7 @@ class CommitHelperTests(_Case):
 
     def test_popup_popover_walks_parents_to_the_window(self) -> None:
         # Qt.Popup makes the popover its own window() — the helper must
-        # walk parent()s (the _refresh_hint pattern).
+        # walk parent()s (the _refresh_hint pattern)
         pop = SpringAudioFxPopover(self.win)
         self.win._audio_fx_push_timer.start()
         _commit_fx_debounce(pop)
@@ -452,9 +420,7 @@ class CommitHelperTests(_Case):
             loner.deleteLater()
 
 
-# ---------------------------------------------------------------------------
-# popover face pick
-# ---------------------------------------------------------------------------
+# ---------- popover face pick ----------
 
 
 class _ButtonCase(_Case):
@@ -521,9 +487,7 @@ class ButtonFacePickTests(_ButtonCase):
         self.assertEqual(pop._bass_read.text(), "+3 dB")
 
 
-# ---------------------------------------------------------------------------
-# spring popover behavior
-# ---------------------------------------------------------------------------
+# ---------- spring popover behavior ----------
 
 
 class SpringPopoverTests(_ButtonCase):
@@ -582,7 +546,7 @@ class SpringPopoverTests(_ButtonCase):
         s.mousePressEvent(_MouseEv(s._x_for_value(0.2)))
         x = s._x_for_value(0.42)
         s.mouseMoveEvent(_MouseEv(x))
-        # Off-grid finger: display follows raw, logic quantizes.
+        # off-grid finger: display follows raw, logic quantizes
         self.assertAlmostEqual(self.btn.state().reverb_wet, 0.4)
         self.assertAlmostEqual(s._display, 0.42, places=2)
         self.btn.set_state(self.btn._state)   # external sync mid-drag
@@ -617,19 +581,17 @@ class PopoverHintTokenTests(_Case):
         self._check(SpringAudioFxPopover(None))
 
 
-# ---------------------------------------------------------------------------
-# the debounce, counted end-to-end through MainWindow
-# ---------------------------------------------------------------------------
+# ---------- the debounce, counted end-to-end through MainWindow ----------
 
 
 class WindowDebounceTests(unittest.TestCase):
-    """The centerpiece: a real MainWindow, a mocked player, and counted
-    pushes. One fx push costs 34-62 ms GUI-thread and cuts the reverb
-    tail, so the counts ARE the contract."""
+    """A real MainWindow, a mocked player, and counted pushes. One fx
+    push costs 34-62 ms GUI-thread and cuts the reverb tail, so the
+    counts ARE the contract."""
 
     def setUp(self) -> None:
         self.app = _app()
-        # Suppress real app-wide QSS pushes (test_preset_flip's pattern).
+        # suppress real app-wide QSS pushes (test_preset_flip's pattern)
         mock.patch.object(self.app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
         self._prev_intensity = motion._user_intensity
@@ -680,30 +642,25 @@ class WindowDebounceTests(unittest.TestCase):
         s.resize(400, 30)
         s.mousePressEvent(_MouseEv(s._x_for_value(-6)))
         for db in (-4, -2, 2, 5):
-            # Real time passes mid-drag; every tick restarts the 120 ms
-            # trailing timer, so nothing may fire in between.
+            # real time passes mid-drag; every tick restarts the 120 ms
+            # trailing timer, so nothing may fire in between
             QTest.qWait(40)
             s.mouseMoveEvent(_MouseEv(s._x_for_value(db)))
         self.assertEqual(self.push.call_count, 0)
         self.assertEqual(self.save.call_count, 0)
         s.mouseReleaseEvent(_MouseEv(s._x_for_value(5)))
-        # The commit shortens the debounce rather than pushing inline.
+        # the commit shortens the debounce rather than pushing inline
         self.assertEqual(self.push.call_count, 0)
         self._drain()
-        # Exactly one push carrying the final value, one save.
         self.assertEqual(self.push.call_count, 1)
         self.assertIn("bass=g=5", self.push.call_args[0][0])
         self.assertEqual(self.save.call_count, 1)
-        # The trailing timers were stopped — no second landing.
         QTest.qWait(500)
         self.assertEqual(self.push.call_count, 1)
         self.assertEqual(self.save.call_count, 1)
 
     def test_wheel_burst_at_motion_off_pushes_once(self) -> None:
-        # The reachable configuration that used to hurt: modern face +
-        # motion off means no settle window, so every notch commits.
-        # Six notches must still cost ONE filter-chain rebuild and ONE
-        # settings write, not six of each.
+        # modern face + motion off = no settle window, every notch commits
         view = self._go_modern()
         s = view._bass_slider._inner._slider
         s.resize(400, 30)
@@ -718,7 +675,6 @@ class WindowDebounceTests(unittest.TestCase):
         self.assertIn("bass=g=3", self.push.call_args[0][0])
 
     def test_key_repeat_burst_at_motion_off_pushes_once(self) -> None:
-        # Arrow-key auto-repeat is the worse case — ~30 commits a second.
         view = self._go_modern()
         s = view._bass_slider._inner._slider
         s.resize(400, 30)
@@ -737,7 +693,6 @@ class WindowDebounceTests(unittest.TestCase):
         x = s._x_for_value(0.0) + 3   # magnet: press lands the current 0.0
         s.mousePressEvent(_MouseEv(x))
         s.mouseReleaseEvent(_MouseEv(x))
-        # No value change → nothing scheduled → nothing flushed.
         self.assertEqual(self.push.call_count, 0)
         self.assertEqual(self.save.call_count, 0)
 
@@ -749,8 +704,6 @@ class WindowDebounceTests(unittest.TestCase):
             qs.setValue(raw)
         self.assertEqual(self.push.call_count, 0)
         QTest.qWait(500)
-        # One trailing push with the final value, one trailing save —
-        # today's brutalist timing, byte for byte.
         self.assertEqual(self.push.call_count, 1)
         self.assertIn("bass=g=4", self.push.call_args[0][0])
         self.assertEqual(self.save.call_count, 1)
@@ -768,8 +721,8 @@ class WindowDebounceTests(unittest.TestCase):
         self.assertEqual(self.push.call_count, 1)
         band._slider.sliderReleased.emit()
         self._drain()
-        # modern: release shortens the debounce, so the second push lands
-        # long before the 120 ms trailing edge would have delivered it.
+        # modern: release shortens the debounce; the second push lands
+        # before the trailing edge would deliver it
         self.assertEqual(self.push.call_count, 2)
 
     def test_popover_commit_flushes_through_the_parent_walk(self) -> None:
@@ -792,9 +745,7 @@ class WindowDebounceTests(unittest.TestCase):
             pop.hide()
 
 
-# ---------------------------------------------------------------------------
-# motion gating
-# ---------------------------------------------------------------------------
+# ---------- motion gating ----------
 
 
 class MotionGateTests(unittest.TestCase):
@@ -831,7 +782,6 @@ class MotionGateTests(unittest.TestCase):
             _MouseEv(self.slider._x_for_value(6.0)))
         self.slider.mouseReleaseEvent(
             _MouseEv(self.slider._x_for_value(6.0)))
-        # The settle is in flight — the commit hasn't landed yet.
         self.assertEqual(self.commits, [])
         QTest.qWait(700)
         self.assertEqual(self.commits, [6.0])

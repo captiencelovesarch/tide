@@ -1,43 +1,23 @@
-"""SpringSlider — the modern personality's signature value control.
+"""SpringSlider: a slider with magnetic detents and a springy settle —
+the handle tracks the pointer unquantized, sticks to detents, and
+springs to the committed value on release.
 
-A horizontal slider with magnetic detents and a springy settle. The
-handle follows the pointer during a drag (unquantized, so it feels
-connected to the finger), sticks to detents when it gets close, and on
-release springs to the committed value. Click-jumps and keyboard/wheel
-nudges settle the same way. The whole thing degrades correctly for the
-brutalist personality: at motion OFF every settle is a synchronous snap
-— no animation object is ever created.
-
-Contracts kept here:
-  * Two signals. ``value_changed(float)`` fires live during interaction
-    whenever the logical value changes; ``value_committed(float)`` fires
-    once when the interaction lands (release / keyboard / wheel settle
-    completing). While there IS a settle (motion LITE/FULL) rapid
-    re-nudges retarget it, so a burst of wheel ticks coalesces into ONE
-    commit with the final value — but at motion OFF the settle window
-    doesn't exist and every notch commits. A consumer whose commit
-    handler is expensive must therefore carry its own rate limit and
-    never assume coalescing (the fx rack does: audio_fx_view's
-    ``_commit_fx_debounce`` shortens the debounce instead of pushing).
-    ``value_committed`` always fires on release even if the drag ended
-    where it began — consumers use it to flush pending debounce.
+Contracts:
+  * ``value_changed(float)`` fires live; ``value_committed(float)`` when
+    the interaction lands. A settle (motion LITE/FULL) coalesces a wheel
+    burst into ONE commit; at OFF EVERY notch commits, so an expensive
+    commit handler must rate-limit itself (audio_fx_view's
+    ``_commit_fx_debounce`` does). Release always commits, even where
+    the drag began — consumers flush debounce on it.
   * Programmatic ``set_value`` never emits; only the user does.
-  * Painting is pure QPainter reading theming tokens AT PAINT TIME from
-    ``theming.manager().current_effective()`` with hex fallbacks — no
-    QSS, no cached palette going stale under the adaptive driver. The
-    per-frame path is ``update()`` only (never tokens/QSS: theme_changed
-    is a bus, not a frame clock).
-  * All pixel sizes route through ``ui.scale.px`` and are recomputed per
-    paint, so a scale flip lands on the next repaint.
-  * The settle animation is a child of the widget (dies with it — no
-    timer outlives destruction) and the finish handler is guarded
-    against superseding retargets and mid-teardown delivery.
-
-Motion integration: the settle rides ``motion.spring_settle`` — the
-profile system picks the character (mechanical: decisive, no bounce;
-springy: OutBack overshoot at intensity FULL) and OFF is handled by
-construction: the helper snaps synchronously and never creates an
-animation object.
+  * Pure-QPainter painting, tokens read at paint time
+    (``current_effective()``) — no QSS, no cached palette to go stale
+    under the adaptive driver; per-frame path is ``update()`` only.
+    Pixel sizes go through ``ui.scale.px`` per paint.
+  * The settle rides ``motion.spring_settle`` (profile picks the curve;
+    OFF snaps — no animation object), is a child of the widget, and its
+    finish handler is guarded against superseding retargets and
+    mid-teardown delivery.
 """
 from __future__ import annotations
 
@@ -57,9 +37,7 @@ from .. import theming
 from . import motion, scale
 
 
-# Magnet reach around each detent, in (unscaled) pixels along the groove.
-# Converted to value-space per interaction so it stays ~6 physical px no
-# matter the range or widget width.
+# Magnet reach — converted to value-space so it stays ~6 physical px.
 DETENT_SNAP_PX = 6
 
 
@@ -70,8 +48,6 @@ def _tok(theme, key: str, default: str) -> QColor:
 
 
 class SpringSlider(QWidget):
-    """Horizontal slider: magnetic detents, spring settle, motion-gated."""
-
     value_changed = Signal(float)     # live during drag / nudge
     value_committed = Signal(float)   # interaction landed
 
@@ -91,9 +67,8 @@ class SpringSlider(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
-        # No setMinimumSize: minimumSizeHint carries the floor, so a host
-        # that wants a wider groove (the speed popover's setMinimumWidth)
-        # isn't clobbered the next time the theme ticks.
+        # No setMinimumSize: minimumSizeHint carries the floor, so a
+        # host's setMinimumWidth (the speed popover) survives theme ticks.
         self._metrics = self._metrics_key()
         theming.manager().theme_changed.connect(self._on_theme)
 
@@ -134,8 +109,7 @@ class SpringSlider(QWidget):
         self.update()
 
     def _set_display(self, v: float) -> None:
-        """Per-frame target for the settle animation — local repaint only
-        (rule 7: animations never touch tokens/QSS)."""
+        """Per-frame settle target — repaint only, never tokens/QSS."""
         self._display = float(v)
         self.update()
 
@@ -150,8 +124,7 @@ class SpringSlider(QWidget):
         self._drag = True
         v, _disp = self._pos_for_x(ev.position().x())
         self._apply_value(v)
-        # Click-jump: spring the handle toward the press point. A drag
-        # takes over direct tracking on the first move.
+        # Click-jump: spring toward the press; a drag takes over on move.
         self._settle_to(v, commit=False)
 
     def mouseMoveEvent(self, ev) -> None:
@@ -175,11 +148,8 @@ class SpringSlider(QWidget):
         self._settle_to(self._value, commit=True)
 
     def wheelEvent(self, ev) -> None:
-        # Only swallow the notch when it actually moved the value. These
-        # sliders live inside the fx rack's QScrollArea; accepting a
-        # dead notch (sub-notch delta, or the handle already at the rail
-        # end) would trap the page's scroll under the pointer — QSlider
-        # ignores those too.
+        # Swallow a notch only if it moved the value — a dead notch would
+        # trap the fx rack's QScrollArea scroll under the pointer.
         self._wheel_accum += ev.angleDelta().y()
         steps = int(self._wheel_accum / 120)
         if steps == 0:
@@ -215,9 +185,8 @@ class SpringSlider(QWidget):
         return self._interact_to(self._value + steps * step)
 
     def _interact_to(self, target: float) -> bool:
-        """Keyboard / wheel path: quantize, emit live change, settle with
-        commit. A no-op nudge (already at the bound) emits nothing and
-        reports False, so the wheel can hand the event back."""
+        """Keyboard / wheel path: quantize, emit live, settle with commit.
+        A no-op nudge reports False so the wheel can hand the event back."""
         q = self._quantize(target)
         if not self._apply_value(q):
             return False
@@ -236,9 +205,8 @@ class SpringSlider(QWidget):
     # ------------------------------------------------------------ settle
 
     def _cancel_settle(self) -> None:
-        """Drop any in-flight settle WITHOUT its commit — the finger (or a
-        programmatic snap) has taken over. Token first, then stop: even if
-        Qt emitted finished from the stop, the stale on_done stands down."""
+        """Drop an in-flight settle WITHOUT its commit. Token first, then
+        stop: if the stop emits finished, the stale on_done stands down."""
         self._settle_token = object()
         anim, self._settle = self._settle, None
         if anim is not None:
@@ -248,11 +216,8 @@ class SpringSlider(QWidget):
                 pass
 
     def _settle_to(self, target: float, *, commit: bool) -> None:
-        """Spring the handle to ``target`` (value-space) via
-        ``motion.spring_settle`` — the profile picks the curve (mechanical
-        vs springy overshoot), OFF snaps synchronously by construction.
-        The commit (if any) fires when the settle lands; a newer settle
-        supersedes an older one and takes its commit with it."""
+        """Settle to ``target``; the commit (if any) fires on landing. A
+        newer settle supersedes an older one and takes its commit with it."""
         target = float(target)
         self._settle_token = token = object()
 
@@ -269,8 +234,7 @@ class SpringSlider(QWidget):
                 pass     # widget torn down mid-delivery
 
         if abs(self._display - target) < 1e-6:
-            # Zero-length trip (release right on a magnet) — nothing to
-            # animate; land synchronously so the commit isn't delayed.
+            # Released on a magnet: land now so the commit isn't delayed.
             self._cancel_settle()
             self._settle_token = token
             _land()
@@ -306,15 +270,9 @@ class SpringSlider(QWidget):
         return scale.px(4)
 
     def _groove_cy(self) -> float:
-        """Vertical centre of the groove.
-
-        The handle disc and the detent ticks own the bottom band and the
-        bubble floats above them, so the groove sits exactly one bubble +
-        gap + radius down from the top when the host gives us the height
-        we asked for (``sizeHint``). Hosts that pin us shorter (the 26px
-        volume seat) push the groove as low as the disc allows and simply
-        don't get a bubble — see ``_bubble_rect``. Anything is better than
-        painting the readout over the ticks it's meant to annotate."""
+        """Groove centre: one bubble + gap + radius down from the top at
+        our own sizeHint. A host that pins us shorter (the 26px volume
+        seat) pushes the groove low and gets no bubble (_bubble_rect)."""
         hr = float(self._handle_r())
         roomy = float(self._bubble_h() + self._bubble_gap()) + hr
         cramped = max(hr, float(self.height()) - hr - float(scale.px(2)))
@@ -337,8 +295,7 @@ class SpringSlider(QWidget):
         return self._lo + min(1.0, max(0.0, frac)) * self._span()
 
     def _magnet(self, raw: float) -> float | None:
-        """Nearest in-range detent within the snap radius, else None. The
-        radius is DETENT_SNAP_PX physical px converted to value-space."""
+        """Nearest in-range detent within the snap radius, else None."""
         g = self._groove_rect()
         if g.width() <= 0:
             return None
@@ -353,9 +310,8 @@ class SpringSlider(QWidget):
         return best
 
     def _pos_for_x(self, x: float) -> tuple[float, float]:
-        """(logical value, display position) for a pointer x. A magnet hit
-        returns the detent for both — the handle visibly sticks. Otherwise
-        the value is step-quantized while the display follows the finger."""
+        """(logical value, display pos): a magnet hit returns the detent
+        for both; else the value quantizes, the display follows the finger."""
         raw = self._value_at_x(x)
         d = self._magnet(raw)
         if d is not None:
@@ -371,11 +327,8 @@ class SpringSlider(QWidget):
             return f"{self._value:g}"
 
     def _bubble_rect(self, text: str) -> QRectF | None:
-        """Where the value bubble goes, or None when this widget is too
-        short to float one clear of the handle and ticks. Never clamped
-        into the handle band: a readout that covers what it annotates is
-        worse than no readout (the volume seat is 26px and relies on
-        this)."""
+        """Bubble rect, or None when too short to float it clear of the
+        handle and ticks (the 26px volume seat relies on this)."""
         fm = QFontMetrics(self.font())
         bw = float(fm.horizontalAdvance(text) + scale.px(10))
         bh = float(self._bubble_h())
@@ -405,7 +358,6 @@ class SpringSlider(QWidget):
         hy = g.center().y()
         hr = float(self._handle_r())
 
-        # track + fill up to the handle
         p.setPen(Qt.NoPen)
         p.setBrush(track)
         p.drawRoundedRect(g, radius, radius)
@@ -415,8 +367,6 @@ class SpringSlider(QWidget):
             p.drawRoundedRect(
                 QRectF(g.left(), g.top(), fill_w, g.height()), radius, radius)
 
-        # detent ticks — subtle marks so the magnets are visible; the one
-        # the value is sitting on picks up the accent.
         tick_h = float(scale.px(4, minimum=3))
         for d in self._detents:
             if d < self._lo - 1e-9 or d > self._hi + 1e-9:
@@ -432,7 +382,6 @@ class SpringSlider(QWidget):
         p.setBrush(accent)
         p.drawEllipse(QPointF(hx, hy), hr, hr)
 
-        # value bubble while the user is interacting / the settle is live
         if (self._drag or self._settle is not None) and self.isEnabled():
             text = self._bubble_text()
             bubble = self._bubble_rect(text)
@@ -446,19 +395,14 @@ class SpringSlider(QWidget):
     # ------------------------------------------------------------ plumbing
 
     def _metrics_key(self) -> tuple:
-        """The inputs sizeHint is derived from. Cheap to compare, so a
-        theme tick can tell "same size, just repaint" from a real
-        scale/font flip."""
+        """sizeHint's inputs — tells "just repaint" from a scale/font flip."""
         return (scale.px(100), QFontMetrics(self.font()).height())
 
     def _on_theme(self, _theme) -> None:
-        # Tokens are re-read at paint time, so a theme tick is JUST a
-        # repaint. theme_changed is a ~10 Hz bus under the adaptive
-        # driver and updateGeometry() invalidates the whole parent layout
-        # chain — with a rack full of these that was ~80 layout
-        # invalidations a second while the art palette glided. Geometry
-        # re-derives only when the metrics behind sizeHint really moved
-        # (a scale flip or a font swap).
+        # Tokens are re-read at paint, so a theme tick is JUST a repaint.
+        # theme_changed ticks ~10 Hz under the adaptive driver, and
+        # updateGeometry() invalidates the parent layout chain (~80/s
+        # across a rack) — re-derive geometry only when metrics moved.
         key = self._metrics_key()
         if key != self._metrics:
             self._metrics = key
@@ -466,9 +410,8 @@ class SpringSlider(QWidget):
         self.update()
 
     def _preferred_h(self) -> int:
-        # Tall enough for the value bubble to clear the handle disc and
-        # the tick band — the bubble is the control's signature readout,
-        # and _bubble_rect drops it entirely rather than overlap.
+        # Tall enough for the bubble to clear the disc and tick band —
+        # _bubble_rect drops the bubble entirely rather than overlap.
         return max(
             scale.px(34),
             self._bubble_h() + self._bubble_gap() + 2 * self._handle_r()

@@ -1,22 +1,17 @@
-"""Keymap editor — every keyboard shortcut, rebindable, all GUI.
+"""Keymap editor over the window module's ACTIONS table.
 
-v1 hand-wired ~30 literal QShortcut lines nobody could change without
-editing source. The window module now carries them as an ACTIONS table
-(id · label · default · handler); this dialog renders that table as
-rows — label · current binding · capture box · [reset] — with a live
-conflict highlight when two actions land on the same key, and a [save]
-that REFUSES a conflicted map (an ambiguous key fires neither action,
-so saving one would silently deaden both shortcuts).
+One row per action — label · current binding · capture box · [reset] —
+with a live conflict highlight. [save] REFUSES a conflicted map: two
+QShortcuts on one key make Qt emit activatedAmbiguously, which nothing
+connects, so both actions would silently go dead.
 
-Persistence model: settings.keymap stores ONLY deviations from the
-shipped defaults (missing id = default, empty string = deliberately
-unbound), written via settings.save_fields(s, "keymap") on accept ONLY.
-Cancel is zero-trace: nothing applies live while the dialog is open, so
-there is nothing to revert. On accept the editor also calls the main
-window's rebind_shortcuts() so the new map lands without a restart.
+settings.keymap stores ONLY deviations from the shipped defaults —
+missing id = default, empty string = deliberately unbound. Writes land
+on accept (then rebind_shortcuts(), no restart needed); nothing applies
+while the dialog is open, so cancel has nothing to revert.
 
-The keymap is global on purpose — muscle memory doesn't flip with the
-personality preset, so this is NOT a preset stash field.
+Global on purpose: muscle memory doesn't flip with the personality, so
+the keymap is NOT a preset stash field.
 """
 from __future__ import annotations
 
@@ -38,10 +33,7 @@ from .. import settings as settings_module, theming
 from .headings import line_heading
 
 
-# The blurb row doubles as the save-refusal line: a conflicted map must
-# NOT save, because two QShortcuts on one key make Qt emit
-# activatedAmbiguously — which nothing connects — so BOTH actions go
-# silently dead, with no hint anywhere once the dialog closes.
+# The blurb row doubles as the save-refusal line.
 _BLURB_DEFAULT = ("click a box, press the new key. empty = unbound. "
                   "changes land on [save] — cancel forgets everything.")
 _BLURB_CONFLICT = ("can't save while two actions share a key — an "
@@ -65,9 +57,6 @@ def _portable(seq: QKeySequence) -> str:
 
 
 class KeymapEditor(QDialog):
-    """Reads the live Settings object; writes it (keymap field only) on
-    accept. Never applies anything while open — the capture boxes are
-    plain pending state, so cancel needs no revert path."""
 
     def __init__(self, current_settings: settings_module.Settings,
                  parent=None) -> None:
@@ -77,9 +66,8 @@ class KeymapEditor(QDialog):
         self.setMinimumWidth(560)
         self.resize(600, 680)
 
-        # Lazy import: window.py is heavy, and keeping it out of this
-        # module's import time lets the settings dialog import us
-        # without dragging the whole main-window module along.
+        # Lazy: window.py is heavy — keep it out of import time so the
+        # settings dialog can import us cheaply.
         from .window import ACTIONS, default_keymap, effective_keymap
         self._actions = ACTIONS
         self._defaults = {
@@ -184,9 +172,8 @@ class KeymapEditor(QDialog):
         return _portable(self._edits[action_id].keySequence())
 
     def pending_overrides(self) -> dict[str, str]:
-        """What accept would store: only deviations from the defaults.
-        An action captured back onto its default drops out of the map
-        entirely — "missing = default" stays true on disk."""
+        """Only deviations from the defaults. A capture back onto the
+        default drops out — "missing = default" stays true on disk."""
         out: dict[str, str] = {}
         for action in self._actions:
             seq = self._seq_text(action.id)
@@ -195,8 +182,7 @@ class KeymapEditor(QDialog):
         return out
 
     def conflicted_ids(self) -> set[str]:
-        """Action ids whose pending (non-empty) key is shared with at
-        least one other action."""
+        """Ids whose pending non-empty key is shared with another action."""
         by_seq: dict[str, list[str]] = {}
         for action in self._actions:
             seq = self._seq_text(action.id)
@@ -210,8 +196,7 @@ class KeymapEditor(QDialog):
         self._refresh_conflicts()
 
     def _refresh_conflicts(self) -> None:
-        """Live conflict highlight: rows sharing a key go status-error
-        colored. Per-widget styling only — never an app-wide QSS push."""
+        """Per-widget styling only — never an app-wide QSS push."""
         bad = self.conflicted_ids()
         error = theming.status_color("error")
         for action in self._actions:
@@ -223,8 +208,7 @@ class KeymapEditor(QDialog):
                 label.setStyleSheet("")
                 label.setToolTip("")
         if not bad and self.blurb.text() != _BLURB_DEFAULT:
-            # The clash a refused save complained about is gone —
-            # put the plain instructions back.
+            # the refused-save clash is gone — plain instructions back
             self.blurb.setStyleSheet("")
             self.blurb.setText(_BLURB_DEFAULT)
 
@@ -244,11 +228,7 @@ class KeymapEditor(QDialog):
 
     def _on_save(self) -> None:
         if self.conflicted_ids():
-            # Refuse: persisting a conflict silently deadens BOTH
-            # colliding shortcuts (Qt's ambiguous-activation behavior),
-            # and after the dialog closes nothing in the app could
-            # explain why two keys stopped working. The rows are
-            # already highlighted; the blurb says what to do.
+            # refuse — rows are already highlighted; the blurb explains
             error = theming.status_color("error")
             self.blurb.setStyleSheet(f"color: {error};")
             self.blurb.setText(_BLURB_CONFLICT)
@@ -262,10 +242,8 @@ class KeymapEditor(QDialog):
 
 
 def open_keymap_editor(parent, current_settings: settings_module.Settings) -> None:
-    """Open the editor DEFERRED out of the calling signal emission —
-    exec'ing a dialog synchronously inside a click handler is the
-    PySide6 + py3.14 segfault pattern. The settings dialog's [keymap]
-    button wires here."""
+    """Deferred out of the calling emission — exec'ing a dialog inside
+    a click handler is the PySide6 + py3.14 segfault pattern."""
     def _do_open() -> None:
         dlg = KeymapEditor(current_settings, parent)
         dlg.exec()

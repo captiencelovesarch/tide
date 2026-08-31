@@ -1,46 +1,19 @@
-"""The chooser — "choose your tide".
+"""The "choose your tide" chooser: two panes, each a live preview built
+from that personality's real theme tokens. ``PersonalityPane`` is shared
+with the wizard's aesthetic step — do not fork it.
 
-The full-screen moment where tide 2.0 sells two products at a glance:
-one library, two completely different players. Two side-by-side panes,
-each a LIVE preview built from that personality's real theme — the same
-``theme.toml`` tokens and typography the app itself would wear — so what
-the user picks is literally what they get. No screenshots, no hardcoded
-palette, no "artist's impression".
-
-Three hosts share the same pane widget:
-  * this dialog (the update-into-2.0 route and the settings re-pick),
-  * the first-launch wizard's aesthetic step (phase 4B reuses
-    ``PersonalityPane`` directly — do not fork the design).
-
-Contracts kept here:
-  * **The chooser never writes settings.** It resolves to a preset id
-    (``chosen``/``choice()``) or to nothing, and the caller persists.
-    Tools emit, callers persist.
-  * **Panes wear their own theme, not the app's.** Every color, font and
-    corner radius comes from ``theming.discover_themes()`` → the preset's
-    theme slug. Nothing here reads the live theme except the dialog's own
-    backdrop (which *should* blend with whatever is on screen). A pane is
-    therefore immune to an ambient theme change: its styling is set once
-    from its own tokens and per-widget stylesheets outrank the app sheet.
-  * **No live user layer reaches a pane.** The same rule applied to text:
-    glyph overrides and the sticky text-case override are both
-    per-personality user state, so the mock reads ``glyphs.DEFAULT_PACK``
-    (``_demo_glyph``) and the "now playing" rule is built with the pane's
-    own theme (``headings.line_heading(theme=…)``). Otherwise one side's
-    customizations would dress the other side's pitch.
-  * **Brutalist is still. Always.** The animated backdrop is gated on the
-    *personality's own* motion intensity (brutalist's builtin is ``off``),
-    not on the ambient one — each pane previews its archetype, and the
-    zero-animation promise is part of the brutalist product. A system
-    reduced-motion signal stills the modern pane too.
-  * **Per-frame work never touches tokens or QSS.** The modern backdrop
-    ticks a float and calls ``update()``; that's the whole frame path.
-    ≤24fps by construction.
-  * **No timer outlives its widget.** The backdrop timer is a child of
-    the pane (dies with it) and is stopped on hide/close.
-  * **Nothing blocking, nothing remote.** No audio, no network, no art
-    fetch — the covers are generated pixmaps. Constructing this offscreen
-    with no screen at all is a supported case.
+Design contract:
+  * Never writes settings — resolves to a preset id
+    (``chosen``/``choice()``) or to nothing; the caller persists.
+  * Panes wear their OWN theme via per-widget sheets (which outrank the
+    app sheet), so ambient theme changes can't bleed in. No live user
+    layer either — glyph/text-case overrides are per-personality state.
+  * Backdrops animate on the PERSONALITY's motion intensity, never the
+    app's; system reduced-motion stills the modern pane too.
+  * Per-frame work never touches tokens or QSS: tick a float, call
+    ``update()``. ≤24fps. The timer is a child of the pane.
+  * Nothing blocking, nothing remote — covers are generated pixmaps;
+    constructing offscreen with no screen is a supported case.
 """
 from __future__ import annotations
 
@@ -73,26 +46,20 @@ from .headings import line_heading
 from .spring_slider import SpringSlider
 
 
-# Left-to-right order of the panes. Also the keyboard order.
+# Left-to-right pane order; also the keyboard order.
 PANE_ORDER: tuple[str, ...] = ("brutalist", "modern")
 
-# The animated backdrop's frame cap. 24fps is plenty for a slow gradient
-# drift and keeps the chooser cheap on an integrated GPU.
 BACKDROP_FPS = 24
 BACKDROP_INTERVAL_MS = max(1, round(1000 / BACKDROP_FPS))
 
-# How far the gradient's blobs travel per frame, in radians. A full orbit
-# takes ~20s — movement you notice only if you look for it.
+# Blob travel per frame, radians. A full orbit takes ~20s.
 _PHASE_STEP = 0.013
 
-# Size the dialog falls back to when there is no screen to measure
-# (headless / offscreen edge cases).
+# For headless / offscreen, where there is no screen to measure.
 FALLBACK_SIZE: tuple[int, int] = (1100, 720)
 
 
-# The fake track every pane pretends to be playing. Deliberately not a
-# real artist: this is a mock, and it should read as one on close
-# inspection while still feeling like music from across the room.
+# The mock's fake track — deliberately not a real artist.
 DEMO_TITLE = "long way from the shore"
 DEMO_ARTIST = "the undertow"
 DEMO_ELAPSED = "1:04"
@@ -120,13 +87,8 @@ TRAITS: dict[str, tuple[str, ...]] = {
 
 
 def pane_theme(preset_id: str):
-    """The ``Theme`` a pane for ``preset_id`` should wear.
-
-    Resolution order: the personality's builtin theme slug, then any
-    discovered theme whose ``[meta] aesthetic`` matches, then ``None``
-    (every reader falls back to a hex default, so a stripped install
-    still draws something honest rather than crashing).
-    """
+    """The builtin's theme slug, else any theme whose ``[meta] aesthetic``
+    matches, else ``None`` (readers fall back to hex defaults)."""
     try:
         themes = theming.discover_themes()
     except Exception:
@@ -162,8 +124,7 @@ def _layout_int(theme, key: str, default: int) -> int:
 
 
 def _mix(a: QColor, b: QColor, t: float) -> QColor:
-    """Linear blend of two colors. Used for derived shades so the panes
-    never introduce a color the theme didn't declare."""
+    """Linear blend, so derived shades stay inside the theme's palette."""
     t = max(0.0, min(1.0, float(t)))
     return QColor(
         int(round(a.red() + (b.red() - a.red()) * t)),
@@ -176,19 +137,9 @@ def _mix(a: QColor, b: QColor, t: float) -> QColor:
 
 
 def _demo_glyph(key: str) -> str:
-    """A glyph for the mock, straight off the shipped pack (transport
-    faces, and the ``heading_dash`` the brutalist rule is drawn with).
-
-    ``glyphs.DEFAULT_PACK`` rather than ``glyphs.glyph()`` on purpose:
-    the override layer is per-personality (a STASH_FIELD), so the live
-    resolver would dress BOTH panes in whatever the user last swapped on
-    the side they happen to be wearing — a modern preview showing the
-    brutalist ▶ they typed last week. The chooser sells the products as
-    they ship. Reading the registry rather than retyping the characters
-    keeps one vocabulary: if ▮▮-style precision work ever moves a glyph
-    (see glyphs.py's docstring for why these were chosen the hard way),
-    the preview moves with the app instead of quietly drifting.
-    """
+    """``DEFAULT_PACK``, not ``glyphs.glyph()``: overrides are
+    per-personality (a STASH_FIELD), so the live resolver would dress
+    BOTH panes in the user's swaps."""
     return glyphs.DEFAULT_PACK[key]
 
 
@@ -196,11 +147,8 @@ def _demo_glyph(key: str) -> str:
 
 
 def placeholder_art(size: int, theme, *, radius: int = 0) -> QPixmap:
-    """A generated cover tile. The chooser fetches nothing — no network,
-    no cache, no disk — so the art is drawn from the pane's own tokens:
-    a soft accent wash on a modern tile, a flat framed square with a mono
-    slash on a brutalist one. Art shows in BOTH personalities; only its
-    frame changes."""
+    """A generated cover tile from the pane's own tokens — the chooser
+    fetches nothing."""
     size = max(8, int(size))
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -231,11 +179,8 @@ def placeholder_art(size: int, theme, *, radius: int = 0) -> QPixmap:
             p.setPen(QPen(fg, 1.0))
             p.setBrush(Qt.NoBrush)
             p.drawRect(rect)
-            # A mono record mark. Crossed hairlines read as "broken
-            # image" — directly under the pane's "album art still shows"
-            # bullet, the placeholder has to read as art that IS there,
-            # just monochrome. Curves are fine here: it's content, not
-            # chrome. AA on for the circles only.
+            # A record mark, not crossed hairlines — those read as a
+            # broken image. AA for the circles only.
             p.setRenderHint(QPainter.Antialiasing, True)
             c = QPointF(size / 2.0, size / 2.0)
             p.setPen(QPen(dim, 1.0))
@@ -258,8 +203,7 @@ def placeholder_art(size: int, theme, *, radius: int = 0) -> QPixmap:
 
 
 def play_disc(size: int, theme) -> QPixmap:
-    """The modern pane's transport hero: an accent disc with a cut-out
-    triangle. Brutalist gets ``[▶]`` text instead — that's the point."""
+    """Modern's play control: an accent disc with a cut-out triangle."""
     size = max(8, int(size))
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -291,24 +235,17 @@ def play_disc(size: int, theme) -> QPixmap:
 
 
 class _PreviewSpring(SpringSlider):
-    """A real SpringSlider that paints in the PANE's theme.
-
-    SpringSlider reads its tokens from the live theme manager at paint
-    time — deliberately, so the adaptive driver can retint it mid-track.
-    The chooser needs it wearing modern's palette while the app is still
-    dressed in whatever the user has on (possibly a light brutalist
-    theme), and the widget is out of this phase's scope to change. So the
-    manager's effective-theme accessor is shadowed for the duration of
-    ONE synchronous paint and restored in a ``finally``. Nothing else can
-    observe it: paint is GUI-thread, non-reentrant, and the swap spans a
-    single ``super().paintEvent`` call.
+    """A real SpringSlider painting in the PANE's theme. SpringSlider
+    reads tokens from the live theme manager at paint time, so the
+    manager's effective-theme accessor is shadowed for one synchronous
+    paint and restored in a ``finally`` — safe because paint is
+    GUI-thread and non-reentrant.
     """
 
     def __init__(self, theme, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._preview_theme = theme
-        # The dialog owns the arrow keys (left/right compares the panes),
-        # so the slider stays a mouse-only flourish.
+        # The dialog owns the arrow keys — the slider stays mouse-only.
         self.setFocusPolicy(Qt.NoFocus)
 
     def paintEvent(self, ev) -> None:
@@ -328,20 +265,11 @@ class _PreviewSpring(SpringSlider):
 
 
 class _PaneButton(QPushButton):
-    """The pane's commit control, styled from the PANE's tokens.
-
-    Not ``BracketButton``: that one binds itself to the app-wide theme
-    (its label shape comes from the live theme's ``control_style``), so
-    both panes would render identically and would restyle out from under
-    the preview on any ambient theme tick. Here the brutalist pane always
-    gets a ``[bracketed]`` label with the inverted hover, and the modern
-    pane always gets a soft accent pill — because that difference IS the
-    pitch.
-
-    The word inside comes from the HOST, because what the button does
-    depends on the host: in the standalone dialog it commits, so it says
-    "choose"; in the wizard it only selects, so a button that said
-    "choose" and then did nothing visible would read as broken.
+    """The pane's commit control, styled from the PANE's tokens. Not
+    ``BracketButton`` — that binds to the app-wide theme, so both panes
+    would render identically and restyle under the preview. The label
+    comes from the host: the dialog's button commits, the wizard's only
+    selects.
     """
 
     def __init__(self, theme, *, bracket: bool, label: str = "choose",
@@ -361,7 +289,6 @@ class _PaneButton(QPushButton):
         self._apply(theme)
 
     def set_label(self, label: str) -> None:
-        """Set the word, keeping the pane's own bracket shape."""
         word = str(label or "choose")
         self.setText(f"[{word}]" if self._bracket else word)
 
@@ -372,9 +299,7 @@ class _PaneButton(QPushButton):
         sel_bg = _hex(theme, "sel_bg", fg)
         sel_fg = _hex(theme, "sel_fg", bg)
         radius = _layout_int(theme, "radius_px", 0)
-        # Same reason the labels carry their font in QSS: the theme base
-        # sheet's universal rule would otherwise dress this button in the
-        # APP's typeface.
+        # Font must be QSS, or the base sheet's universal font rule wins.
         font = ""
         if self._font_family:
             font += f' font-family: "{self._font_family}";'
@@ -400,34 +325,16 @@ class _PaneButton(QPushButton):
 
 
 class PersonalityPane(QWidget):
-    """One side of the chooser: a live, self-contained preview of one
+    """One side of the chooser: a self-contained preview of one
     personality, built from that personality's real theme.
 
-    Reusable on purpose — the first-launch wizard's aesthetic step hosts
-    the same widget so there is exactly one implementation of the pitch.
-
-    Hosts decide what a click means. The pane only reports:
-      * ``clicked(preset_id)`` — the body or the [choose] button was hit.
-        The standalone dialog treats that as a commit; the wizard treats
-        it as a selection and commits on [next].
-      * ``set_selected(bool)`` draws the highlight ring.
-
-    The pane starts/stops its own backdrop timer on show/hide, so a host
-    that forgets can't leak one; ``start_animation``/``stop_animation``
-    are there for hosts that swap panes in a stack without hiding them.
-
-    ``compact`` tightens everything that can be tightened (margins, the
-    name size, the art tile, one fewer trait) for hosts with a fixed,
-    smaller canvas — the onboarding wizard is 720×600, where the full
-    pane's ~480px minimum height would not fit. Same widget, same tokens,
-    same pitch: only the breathing room changes.
-
-    ``choose_label`` / ``selected_label`` are the other half of "hosts
-    decide what a click means": the button says what it will DO here.
-    The dialog keeps the default "choose" because there the button
-    commits; the wizard, where a click only moves the selection ring,
-    passes its own wording and a second word for the selected state so
-    the click visibly lands.
+    ``clicked(preset_id)`` fires on the body or the button; the host
+    decides what a click means. ``set_selected`` draws the highlight
+    ring. The backdrop timer starts/stops on show/hide;
+    ``start_animation``/``stop_animation`` are for hosts that swap panes
+    in a stack without hiding them. ``compact`` tightens margins/sizes
+    for the 720×600 wizard; ``choose_label``/``selected_label`` re-word
+    the button so a select-only click visibly lands.
     """
 
     clicked = Signal(str)
@@ -445,8 +352,8 @@ class PersonalityPane(QWidget):
         self._selected = False
         self._phase = 0.0
         self._pressed = False
-        # Bundled IBM Plex Mono / Sans — the panes name theme families
-        # directly, so make sure they're in the font database first.
+        # Panes name theme font families directly — make sure the
+        # bundled fonts are in the database first.
         try:
             theming.register_bundled_fonts()
         except Exception:
@@ -456,13 +363,11 @@ class PersonalityPane(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # A floor, not the real minimum — the layout's own minimum (the
-        # wrapped copy plus the mock) is larger and wins.
+        # A floor — the layout's own minimum is larger and wins.
         self.setMinimumSize(scale.px(240), scale.px(280))
         self._style_children()
         self._build()
 
-        # Child timer: dies with the pane, no matter what the host does.
         self._timer = QTimer(self)
         self._timer.setInterval(BACKDROP_INTERVAL_MS)
         self._timer.timeout.connect(self._tick)
@@ -475,18 +380,12 @@ class PersonalityPane(QWidget):
 
     @property
     def theme(self):
-        """The ``Theme`` this pane is wearing (may be ``None`` on an
-        install with no themes on disk)."""
+        """This pane's ``Theme`` (``None`` with no themes on disk)."""
         return self._theme
 
     def animates(self) -> bool:
-        """Whether this pane's backdrop moves.
-
-        Gated on the PERSONALITY's own motion intensity, not the app's:
-        each pane previews its archetype, and brutalist's builtin is
-        ``off`` — zero animation is the product, not a preference. A
-        system reduced-motion signal stills the modern pane too.
-        """
+        """The personality's own motion intensity, clamped by
+        reduced-motion (see module contract)."""
         if motion.Intensity.parse(self._def.motion) is motion.Intensity.OFF:
             return False
         return not motion.reduced_motion()
@@ -503,10 +402,7 @@ class PersonalityPane(QWidget):
         self.update()
 
     def _sync_button_label(self) -> None:
-        """Only hosts that asked for a selected wording get one — the
-        standalone dialog's "selected" is keyboard focus, not a decision,
-        and a button that renamed itself on every arrow key would be
-        claiming a commit that hasn't happened."""
+        # Only hosts that asked for a selected wording get one.
         if not self._selected_label:
             return
         button = getattr(self, "_button", None)
@@ -529,26 +425,15 @@ class PersonalityPane(QWidget):
         return family, base
 
     def _style_children(self) -> None:
-        """One per-widget stylesheet for the whole subtree, built from
-        this pane's own tokens and typography.
-
-        Fonts have to live here, not in ``setFont``: every theme's base
-        QSS carries a universal ``* { font-family; font-size }`` rule,
-        and a stylesheet font beats a programmatic one. Routing size and
-        family through this sheet is what actually makes the brutalist
-        pane mono and the modern pane sans while the app wears neither.
-
-        Set once, on the widget: a widget-level sheet outranks the app
-        sheet, so an ambient theme change can never bleed into a preview
-        (and never costs this pane a restyle either).
+        """One per-widget stylesheet for the whole subtree, from this
+        pane's own tokens. Fonts must live here, not in ``setFont`` —
+        every base QSS carries a universal font rule, and a stylesheet
+        font beats a programmatic one.
         """
         fg = _hex(self._theme, "fg", "#e6e6e6")
         dim = _hex(self._theme, "dim", "#6f6f6f")
         accent = _hex(self._theme, "accent", "#d4b95e")
-        # The pitch and the trait list are the chooser's own copy, not
-        # mock chrome — lifted off pure @dim (which some themes set very
-        # low) so they're readable, still derived from the theme's own
-        # two text tokens.
+        # Copy text lifted off pure @dim (some themes set it very low).
         soft = _mix(QColor(dim), QColor(fg), 0.45).name()
         softer = _mix(QColor(dim), QColor(fg), 0.30).name()
         family, base = self._typography()
@@ -558,8 +443,6 @@ class PersonalityPane(QWidget):
         trait = scale.round_pt(base + (0 if self._compact else 1))
         name = scale.round_pt(base + (6 if self._compact else 10))
         glyph = scale.round_pt(base + 4)
-        # The modern pane can afford a bigger track title; the brutalist
-        # one wants the whole mock on one type size, like a terminal.
         track = scale.round_pt(
             base + (2 if self._preset_id == "modern" else 0))
         self.setStyleSheet(
@@ -572,9 +455,8 @@ class PersonalityPane(QWidget):
             f"QLabel#paneAccent {{ color: {accent}; }}"
             f"QLabel#paneTrack {{ font-weight: bold; font-size: {track}pt; }}"
             f"QLabel#paneGlyph {{ color: {dim}; font-size: {glyph}pt; }}"
-            # The mock's container is a bare QWidget, which every theme's
-            # base QSS paints with the APP's bg. Transparent, or the
-            # ambient theme punches a flat hole in the preview.
+            # Transparent, or base QSS gives the mock the APP's bg and
+            # the ambient theme punches a hole in the preview.
             f"QWidget#paneMock {{ background: transparent; }}"
         )
 
@@ -584,8 +466,7 @@ class PersonalityPane(QWidget):
         if kind:
             lab.setObjectName(kind)
         lab.setWordWrap(wrap)
-        # Labels must stay click-transparent so the whole pane is one
-        # target — QLabel ignores mouse events by default, keep it there.
+        # Click-transparent, so the whole pane stays one target.
         lab.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         return lab
 
@@ -627,8 +508,7 @@ class PersonalityPane(QWidget):
         self._button = _PaneButton(
             self._theme,
             bracket=self._preset_id != "modern",
-            # Nothing is selected at build time; set_selected re-labels.
-            label=self._choose_label,
+            label=self._choose_label,   # set_selected re-labels later
             font_family=family,
             font_pt=scale.round_pt(base + 1),
         )
@@ -655,12 +535,8 @@ class PersonalityPane(QWidget):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(scale.px(6))
 
-        # The pane's own theme + the shipped dash, never the live ones:
-        # theming's case override and the glyph pack's heading_dash are
-        # both per-personality user state, so the default builder would
-        # render this rule in whichever personality the user happens to
-        # be wearing — the other pane's customizations, in the one screen
-        # whose entire job is showing each product as it ships.
+        # Pane theme + shipped dash — case/dash overrides are
+        # per-personality user state (see _demo_glyph).
         box.addWidget(self._label(
             line_heading("now playing", 34, theme=self._theme,
                          dash=_demo_glyph("heading_dash")),
@@ -725,7 +601,6 @@ class PersonalityPane(QWidget):
         top.addLayout(text, 1)
         box.addLayout(top)
 
-        # The signature control, for real — magnetic detents and all.
         total_s = 222.0
         self._slider = _PreviewSpring(self._theme, self)
         self._slider.set_range(0.0, total_s, 1.0)
@@ -756,9 +631,7 @@ class PersonalityPane(QWidget):
     # ------------------------------------------------------------ motion
 
     def _tick(self) -> None:
-        """The entire per-frame path: advance a float, ask for a repaint.
-        No tokens, no QSS, no layout — theme_changed is a bus, not a
-        frame clock."""
+        # The whole per-frame path: advance a float, request a repaint.
         self._phase += _PHASE_STEP
         if self._phase > math.tau:
             self._phase -= math.tau
@@ -790,9 +663,8 @@ class PersonalityPane(QWidget):
     # ------------------------------------------------------------ paint
 
     def _card_radius(self) -> float:
-        """0 for brutalist (its theme declares radius 0 — sharp is the
-        point), a generous multiple of the theme's own radius for modern
-        so the card reads soft at card scale."""
+        """0 for brutalist (its theme declares radius 0); 2× the theme
+        radius for modern so the card reads soft at card scale."""
         return float(scale.px(_layout_int(self._theme, "radius_px", 0) * 2,
                               minimum=0))
 
@@ -810,11 +682,9 @@ class PersonalityPane(QWidget):
         rect = QRectF(self.rect()).adjusted(
             width / 2.0, width / 2.0, -width / 2.0, -width / 2.0)
 
-        # Whether this pane has a backdrop at all is the PERSONALITY's
-        # call, not the theme's: brutalist declares adaptive_background
-        # False and never gets a gradient, however round its theme is.
-        # When motion is off (reduced-motion, or a host that stopped us)
-        # the same gradient still paints — it just doesn't drift.
+        # Backdrop presence is the PERSONALITY's call (brutalist declares
+        # adaptive_background False). With motion off the gradient still
+        # paints — it just doesn't drift.
         if radius > 0.0 or self._def.adaptive_background:
             p.setRenderHint(QPainter.Antialiasing, True)
             path = QPainterPath()
@@ -829,8 +699,7 @@ class PersonalityPane(QWidget):
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
         else:
-            # Brutalist: no antialiasing, no gradient, no rounding. The
-            # flatness is the feature.
+            # Brutalist: no antialiasing, no gradient, no rounding.
             p.fillRect(self.rect(), bg)
             p.setPen(QPen(border_col, width))
             p.setBrush(Qt.NoBrush)
@@ -838,9 +707,8 @@ class PersonalityPane(QWidget):
 
     def _paint_backdrop(self, p: QPainter, rect: QRectF, bg: QColor,
                         fg: QColor, accent: QColor) -> None:
-        """Two slowly orbiting accent blobs over the theme's own bg.
-        Every color is derived from the pane's tokens — nothing is
-        invented, nothing is pushed anywhere."""
+        """Two slowly orbiting accent blobs, colors from the pane's own
+        tokens."""
         w = rect.width()
         h = rect.height()
         ph = self._phase
@@ -866,8 +734,8 @@ class PersonalityPane(QWidget):
         self.clicked.emit(self._preset_id)
 
     def mousePressEvent(self, ev) -> None:
-        # Accept, or Qt routes the whole press→release sequence to the
-        # parent and the pane stops being one big target.
+        # Accept, or Qt routes the press→release sequence to the parent
+        # and the pane stops being one big target.
         if ev.button() == Qt.LeftButton:
             self._pressed = True
             ev.accept()
@@ -888,18 +756,12 @@ class PersonalityPane(QWidget):
 
 
 class ChooserDialog(QDialog):
-    """"choose your tide" — the full-screen two-pane moment.
-
-    Resolves to a preset id or to nothing. It NEVER writes settings: the
-    caller reads ``choice()`` (or connects ``chosen``) and applies. Esc /
-    close-X / the window manager killing it all resolve to no choice, and
-    the caller decides what a dismissal means.
-
-    The commit is deferred one event-loop turn (``QTimer`` child, not a
-    bare singleShot) so nothing tears the dialog down from inside a click
-    handler — the modal-from-click crash class this codebase has been
-    bitten by. Consumers must therefore let the loop turn once (or use
-    ``exec()``, which does) before reading the outcome.
+    """The full-screen two-pane dialog. NEVER writes settings — the
+    caller reads ``choice()`` (or connects ``chosen``) and applies.
+    Esc / close-X resolve to no choice. The commit is deferred one loop
+    turn via a child ``QTimer`` so nothing tears the dialog down inside
+    a click handler — the modal-from-click crash class. Let the loop
+    turn once (or use ``exec()``) before reading the outcome.
     """
 
     chosen = Signal(str)
@@ -922,7 +784,6 @@ class ChooserDialog(QDialog):
         self._sync_selection()
         self._size_to_screen()
 
-        # Parented, single-shot: it cannot outlive the dialog.
         self._commit_timer = QTimer(self)
         self._commit_timer.setSingleShot(True)
         self._commit_timer.timeout.connect(self._finish)
@@ -940,11 +801,8 @@ class ChooserDialog(QDialog):
                 base = float(theme.t("typography", "size_pt", 10))
             except (TypeError, ValueError):
                 base = 10.0
-        # The dialog's own chrome wears the LIVE theme on purpose — it is
-        # the frame around the two products, not one of them (family is
-        # inherited from the app sheet for the same reason; only the
-        # sizes need saying). Set once: the chooser lives for seconds and
-        # nothing restyles under it.
+        # Dialog chrome wears the LIVE theme on purpose — it frames the
+        # two products without being either.
         self.setStyleSheet(
             f"QLabel#chooserTitle {{ color: {fg}; background: transparent;"
             f" font-size: {scale.round_pt(base + 12)}pt; font-weight: bold; }}"
@@ -984,11 +842,9 @@ class ChooserDialog(QDialog):
 
         content = QWidget(self)
         content.setObjectName("chooserContent")
-        # Cap the block and centre it. Uncapped, a 1440p screen turns the
-        # panes into two 580×1200 slivers with a void in each; a FIXED cap
-        # leaves a 1500×900 island in 2560×1440 of black. So the cap
-        # scales: ~72% of the screen, never below the fixed floor that
-        # keeps small screens uncapped.
+        # Cap the block and centre it. Uncapped, 1440p turns the panes
+        # into slivers; a fixed cap leaves an island in a black screen —
+        # so the cap scales (~72%), floored so small screens stay uncapped.
         geo = _available_geometry()
         cap_w = int(geo.width() * 0.72) if geo is not None else 0
         cap_h = int(geo.height() * 0.75) if geo is not None else 0
@@ -1005,8 +861,7 @@ class ChooserDialog(QDialog):
         inner.addSpacing(scale.px(18))
         inner.addWidget(footer)
 
-        # Content wins every pixel it's allowed (its maximums are the real
-        # limits); the stretches exist only to centre what's left over.
+        # Stretches only centre the leftover; content's maximums limit.
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.addStretch(1)
@@ -1029,8 +884,8 @@ class ChooserDialog(QDialog):
     # ------------------------------------------------------------ facts
 
     def choice(self) -> str:
-        """The chosen preset id, or "" while undecided / after dismissal.
-        Set synchronously at click time, before the deferred close."""
+        """The chosen preset id, or "" while undecided / after
+        dismissal. Set at click time, before the deferred close."""
         return self._choice
 
     def panes(self) -> dict[str, PersonalityPane]:
@@ -1061,8 +916,7 @@ class ChooserDialog(QDialog):
             self._focus_index = PANE_ORDER.index(preset_id)
             self._sync_selection()
         self._stop_animations()
-        # Off the click handler's stack before anything closes this
-        # dialog or the caller opens the next window.
+        # Off the click handler's stack before anything closes this.
         self._commit_timer.start(0)
 
     def _finish(self) -> None:
@@ -1096,8 +950,7 @@ class ChooserDialog(QDialog):
 
     def showEvent(self, ev) -> None:
         super().showEvent(ev)
-        # Keep the keys on the dialog: every child is NoFocus so left /
-        # right / enter always land here.
+        # Every child is NoFocus, so arrows / enter always land here.
         self.setFocus(Qt.OtherFocusReason)
 
     def hideEvent(self, ev) -> None:
@@ -1111,8 +964,7 @@ class ChooserDialog(QDialog):
     # ------------------------------------------------------------ paint
 
     def paintEvent(self, _ev) -> None:
-        # Read at paint time, never cached: the shell should sit on the
-        # user's current backdrop color, whatever it happens to be.
+        # Read at paint time, not cached — track the live theme's bg.
         theme = theming.manager().current_effective()
         bg = _col(theme, "bg", "#0b0b0b")
         p = QPainter(self)
@@ -1120,9 +972,7 @@ class ChooserDialog(QDialog):
 
 
 def _available_geometry():
-    """The primary screen's usable rect, or ``None`` when there's no
-    screen to ask (headless runs, odd offscreen setups). Factored out so
-    the no-screen path is testable."""
+    """The primary screen's usable rect, or ``None`` with no screen."""
     try:
         screen = QGuiApplication.primaryScreen()
     except Exception:

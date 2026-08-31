@@ -1,19 +1,14 @@
 """The QSS structural/palette split must not change a single byte.
 
 ``tests/fixtures/qss_parity.json`` records ``_substitute(theme.qss,
-theme)``'s FULL output for all 16 bundled themes, captured at commit
-3e04a70 — BEFORE themes/_base.qss existed, when every theme shipped a
-monolithic theme.qss. The refactor (shared ``_base.qss`` + ``uses_base``
-composition + ``@banner`` token) must reproduce those strings
-byte-for-byte: no whitespace normalization, no intentional diffs. If a
-FUTURE change means to alter bundled styling, recapture on purpose:
+theme)``'s full output for all 16 bundled themes, captured at 3e04a70 —
+before themes/_base.qss existed. The composed output must reproduce it
+byte-for-byte. To change bundled styling on purpose, recapture and say
+so in the commit:
 
     for each dir in theming.BUNDLED_THEMES_DIR:
         theme = theming._read_theme(dir)
         fixture[theme.slug] = theming._substitute(theme.qss, theme)
-
-…and say so in the commit. The point of the fixture is that styling
-changes are always a decision, never a refactor side effect.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_qss_split.py
 """

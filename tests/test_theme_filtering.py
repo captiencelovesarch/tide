@@ -1,29 +1,12 @@
-"""v2.0 phase 4 — personality-aware theme picking.
-
-Sixteen themes is a lot of list for someone who just chose a side. The
-appearance tab now shows only the themes built for the personality
-you're wearing (5 brutalist / 11 modern today), with one visible escape:
-"show all themes", remembered in ``Settings.theme_picker_show_all``.
-
-Pinned here:
-- the schema layer keeps the WHOLE catalog (``theme_choices``) — it is
-  what the coverage/default-pickable meta-tests read — and the narrowing
-  is a second, argument-taking function (``theme_choices_for``) the
-  dialog calls with the live personality;
-- the new Settings field carries a descriptor, so the P2 coverage
-  meta-test stays green, and is NOT a stash field (it's a preference
-  about the picker, not part of either look);
-- the filtered picker always lists the theme it is holding, whatever
-  that theme's aesthetic — a picker that can't show its own value would
-  re-write the setting on the next accept;
-- toggling the escape reshapes the list only: no theme preview, no
-  write, no personality flip;
-- picking across the line with show-all on still routes through the
-  EXISTING cross-personality handling (the dialog never flips anything
-  itself; window._reconcile_preset_after_dialog → switch_preset does).
-
-Window-building cases use the test_preset_flip harness: app-wide QSS
-pushes suppressed, per-test settings.toml, deleteLater + drain teardown.
+"""v2.0 phase 4 — personality-aware theme picking. The appearance tab
+lists only the current personality's themes (5 brutalist / 11 modern
+today) with a persisted "show all themes" escape. The schema keeps the
+whole catalog in ``theme_choices`` (what the meta-tests read);
+narrowing is ``theme_choices_for``. The filtered picker always lists
+the theme it is holding — one that can't show its own value rewrites
+the setting on the next accept — and a cross-personality pick with
+show-all on routes through the existing reconcile → switch_preset path;
+the dialog never flips anything itself.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -57,13 +40,10 @@ def _slugs(rows) -> list[str]:
 
 
 def _by_aesthetic(aesthetic: str) -> list[str]:
-    """Catalog slugs one personality's picker should list, in the
-    picker's (by display name) order — the expectation computed
-    independently of the code under test.
-
-    A theme that never DECLARED an aesthetic belongs to both sides: tide
-    guesses a dialect from typography.mono, and a guess is no grounds
-    for hiding somebody's hand-installed theme from half the app."""
+    """Catalog slugs one personality's picker should list, in display-name
+    order — computed independently of the code under test. A theme that
+    never declared an aesthetic belongs to both sides (the mono guess is
+    not a claim)."""
     themes = _catalog()
     return [
         slug for slug, theme in sorted(themes.items(), key=lambda kv: kv[1].name)
@@ -92,24 +72,20 @@ def _install_theme(case, slug: str, *, aesthetic: str = "",
     return root
 
 
-# ---------------------------------------------------------------------------
-# the schema layer
-# ---------------------------------------------------------------------------
+# ---------- the schema layer ----------
 
 class SchemaFilterTests(unittest.TestCase):
     def test_the_provider_is_still_the_whole_catalog(self) -> None:
-        # resolve_choices() is the layer the schema meta-tests read (every
-        # Settings default must be a pickable row, and brutalist-mono is
-        # the default while "modern" is a legal personality). Narrowing it
-        # in place would make that guarantee unrepresentable.
+        # resolve_choices() is what the schema meta-tests read; narrowing
+        # it in place would make every-default-pickable unrepresentable
         rows = schema.theme_choices()
         self.assertEqual(sorted(_slugs(rows)), sorted(_catalog()))
         self.assertEqual(
             rows, schema.resolve_choices(schema.by_key()["theme"]))
 
     def test_bundled_catalog_is_five_brutalist_and_eleven_modern(self) -> None:
-        # The shipped split, pinned. Scoped to the bundled dir so a system
-        # or user theme on the machine running the suite can't flake it.
+        # the shipped split, pinned; scoped to the bundled dir so a local
+        # user theme can't flake it
         bundled = [
             t for t in _catalog().values()
             if theming.BUNDLED_THEMES_DIR in t.path.parents
@@ -133,7 +109,7 @@ class SchemaFilterTests(unittest.TestCase):
     def test_the_two_halves_cover_the_catalog(self) -> None:
         brutalist = set(_slugs(schema.theme_choices_for("brutalist")))
         modern = set(_slugs(schema.theme_choices_for("modern")))
-        # Only the themes that claimed neither side are on both lists.
+        # only themes that claimed neither side are on both lists
         unclaimed = {slug for slug, t in _catalog().items()
                      if not t.aesthetic_declared}
         self.assertEqual(brutalist & modern, unclaimed)
@@ -146,8 +122,7 @@ class SchemaFilterTests(unittest.TestCase):
         )
 
     def test_no_personality_means_no_filter(self) -> None:
-        # A pre-2.0 config that was never adopted has nothing to filter
-        # by, so it sees everything rather than an arbitrary half.
+        # an unadopted pre-2.0 config has nothing to filter by; show everything
         for preset_id in ("", "haunted"):
             with self.subTest(preset=preset_id):
                 self.assertEqual(schema.theme_choices_for(preset_id),
@@ -175,17 +150,13 @@ class SchemaFilterTests(unittest.TestCase):
             self.assertEqual(label, catalog[slug], slug)
 
 
-# ---------------------------------------------------------------------------
-# third-party themes that predate [meta] aesthetic
-# ---------------------------------------------------------------------------
+# ---------- third-party themes that predate [meta] aesthetic ----------
 
 class UndeclaredAestheticTests(unittest.TestCase):
-    """``[meta] aesthetic`` is new in 2.0 and hand-installed themes long
-    predate it. tide still GUESSES one from typography.mono so the QSS
-    dialect and the widget shapes have something to go on — but the
-    picker must not act on a guess, or a brutalist power user's own
-    themes look deleted (a plain v1.x regression, aimed at exactly the
-    audience brutalist exists for)."""
+    """Hand-installed themes predate ``[meta] aesthetic``. tide guesses a
+    dialect from typography.mono so QSS has something to go on, but the
+    picker must not act on a guess — a power user's own themes would
+    look deleted."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -203,8 +174,8 @@ class UndeclaredAestheticTests(unittest.TestCase):
                     "a theme that claimed neither side was hidden")
 
     def test_an_undeclared_mono_theme_is_still_offered_to_both(self) -> None:
-        # The mono guess makes it render brutalist. It still isn't a
-        # claim, so a modern user keeps seeing their own theme.
+        # the mono guess renders it brutalist but is not a claim — a
+        # modern user keeps seeing their theme
         _install_theme(self, "handrolled", mono=True)
         self.assertEqual(_catalog()["handrolled"].aesthetic, "brutalist")
         self.assertFalse(_catalog()["handrolled"].aesthetic_declared)
@@ -221,9 +192,9 @@ class UndeclaredAestheticTests(unittest.TestCase):
                          _slugs(schema.theme_choices_for("brutalist")))
 
     def test_the_flag_survives_the_manager_override_copy(self) -> None:
-        # _with_overrides rebuilds the Theme field by field, and it is
-        # what current_effective() hands out — a flag dropped there would
-        # silently reclassify a live theme as modern.
+        # _with_overrides rebuilds Theme field by field and feeds
+        # current_effective() — a dropped flag silently reclassifies a
+        # live theme as modern
         _install_theme(self, "handrolled")
         theme = _catalog()["handrolled"]
         self.assertFalse(theme.aesthetic_declared)
@@ -240,17 +211,15 @@ class UndeclaredAestheticTests(unittest.TestCase):
             QTest.qWait(20)
 
 
-# ---------------------------------------------------------------------------
-# the new Settings field vs the P2 guarantees
-# ---------------------------------------------------------------------------
+# ---------- the new Settings field vs the P2 guarantees ----------
 
 class EscapeHatchFieldTests(unittest.TestCase):
     def test_field_exists_and_defaults_off(self) -> None:
         self.assertFalse(Settings().theme_picker_show_all)
 
     def test_coverage_meta_test_still_holds(self) -> None:
-        # The sacred one: a new Settings field without a descriptor (or a
-        # written internal reason) fails the build by design.
+        # a Settings field without a descriptor or written internal
+        # reason fails by design
         missing, orphaned = schema.coverage_report()
         self.assertEqual(missing, [])
         self.assertEqual(orphaned, [])
@@ -266,8 +235,8 @@ class EscapeHatchFieldTests(unittest.TestCase):
         self.assertEqual(keys[keys.index("theme") + 1], "theme_picker_show_all")
 
     def test_it_is_not_a_personality_stash_field(self) -> None:
-        # A preference about the PICKER, not part of either look — so it
-        # must not round-trip on a flip, and per_preset must say so.
+        # a picker preference, not part of either look — it must not ride
+        # the flip, and per_preset must say so
         self.assertNotIn("theme_picker_show_all", presets.STASH_FIELDS)
         self.assertFalse(schema.by_key()["theme_picker_show_all"].per_preset)
         self.assertEqual(schema.stash_membership_consistent(), [])
@@ -295,7 +264,7 @@ class EscapeHatchFieldTests(unittest.TestCase):
             config.SETTINGS_FILE = real
 
     def test_old_config_files_load_with_it_off(self) -> None:
-        # Migration invariant: an upgrader's file has no such key.
+        # migration invariant: an upgrader's file has no such key
         known = {f.name for f in fields(Settings)}
         self.assertIn("theme_picker_show_all", known)
         tmp = tempfile.TemporaryDirectory(prefix="tide-themefilter-")
@@ -313,22 +282,13 @@ class EscapeHatchFieldTests(unittest.TestCase):
             config.SETTINGS_FILE = real
 
 
-# ---------------------------------------------------------------------------
-# the picker itself
-# ---------------------------------------------------------------------------
+# ---------- the picker itself ----------
 
 class _DialogCase(unittest.TestCase):
-    """Every settings write stubbed (dialog tests must never be able to
-    clobber a config file); theme manager state restored after.
-
-    App-wide QSS pushes are suppressed and the dialogs are closed and
-    drained, the same as _WindowCase below — these tests pin combo rows,
-    the pending diff and the manager's own slug, none of which need a
-    real restyle, and by the time this file runs the process is holding
-    tens of thousands of widgets leaked by earlier files. Two REAL
-    apply() restyles per test (setUp + tearDown) then repolish all of
-    them, which is what made this file the second-slowest in the suite.
-    """
+    """Settings writes stubbed (dialog tests must never clobber a config
+    file), theme manager state restored, QSS pushes suppressed, dialogs
+    closed + drained — the two real apply() restyles per test once made
+    this file the second-slowest in the suite."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -346,10 +306,9 @@ class _DialogCase(unittest.TestCase):
         QTest.qWait(20)
 
     def tearDown(self) -> None:
-        # Before the theme is put back, and here rather than in a
-        # cleanup: cleanups run AFTER tearDown, so a dialog registered
-        # with addCleanup would outlive the drain below and still be
-        # standing (and repolished) during the next test.
+        # here rather than addCleanup: cleanups run AFTER tearDown, so a
+        # dialog registered there would outlive the drain below and still
+        # be repolished during the next test
         for dlg in self._dialogs:
             try:
                 dlg.close()
@@ -395,9 +354,8 @@ class PickerFilterTests(_DialogCase):
         self.assertEqual(dlg.theme_picker.currentData(), "adaptive")
 
     def test_an_unadopted_config_still_sees_the_whole_catalog(self) -> None:
-        # preset == "" (a 1.x file that was never adopted). Nothing to
-        # filter by — and this is also what keeps the generated-dialog
-        # meta-test's "combo rows == schema rows" honest.
+        # unadopted 1.x file: nothing to filter by — also keeps the
+        # generated-dialog meta-test's combo-rows == schema-rows honest
         dlg = self._dialog(Settings())
         combo = dlg.theme_picker
         rows = [(combo.itemData(i), combo.itemText(i))
@@ -429,9 +387,8 @@ class PickerFilterTests(_DialogCase):
         self.assertEqual(dlg.theme_picker.currentData(), "adaptive")
 
     def test_a_cross_pick_survives_unticking(self) -> None:
-        # Browse to the other side with show-all, then untick: the theme
-        # the combo is HOLDING stays listed and selected. Otherwise the
-        # next accept would silently write a different theme.
+        # the held theme must survive the untick, or the next accept
+        # silently writes a different theme
         s = _settings_for("brutalist", "brutalist-mono")
         dlg = self._dialog(s)
         dlg.theme_show_all_toggle.setChecked(True)
@@ -441,13 +398,12 @@ class PickerFilterTests(_DialogCase):
         dlg.theme_show_all_toggle.setChecked(False)
         self.assertIn("nord", self._rows(dlg))
         self.assertEqual(dlg.theme_picker.currentData(), "nord")
-        # …and the brutalist half is back around it.
+        # …and the brutalist half is back around it
         self.assertEqual([r for r in self._rows(dlg) if r != "nord"],
                          _by_aesthetic("brutalist"))
 
     def test_a_stray_current_theme_is_always_listed(self) -> None:
-        # Hand-edited / legacy state: personality says modern, theme is a
-        # brutalist one. The picker must be able to show it.
+        # hand-edited state: modern personality, brutalist theme
         s = _settings_for("modern", "gruvbox")
         dlg = self._dialog(s)
         self.assertIn("gruvbox", self._rows(dlg))
@@ -497,11 +453,8 @@ class PickerFilterTests(_DialogCase):
         self.assertEqual(self.saved_field_calls, [])
 
     def test_a_rebase_onto_the_other_personality_drops_the_old_theme(self) -> None:
-        # The contract the mid-dialog personality flip relies on: a flip
-        # re-bases the dialog's snapshot and clears the pending diff,
-        # THEN asks for a rebuild. The outgoing personality's theme is
-        # neither of those two any more, so it must not linger as a
-        # sixteenth-and-a-bit row in the incoming personality's list.
+        # the flip's contract: re-base the snapshot and clear the pending
+        # diff, THEN rebuild — the outgoing theme must not linger
         s = _settings_for("brutalist", "brutalist-mono")
         dlg = self._dialog(s)
         self.assertEqual(self._rows(dlg), _by_aesthetic("brutalist"))
@@ -514,9 +467,8 @@ class PickerFilterTests(_DialogCase):
         self.assertEqual(dlg.theme_picker.currentData(), "adaptive")
 
     def test_the_kept_slug_is_the_pending_pick_not_the_raw_combo(self) -> None:
-        # The list keeps what the dialog is HOLDING (opening theme +
-        # unaccepted pick), read from the pending diff — the one place
-        # that survives a re-base honestly.
+        # the kept slug is read from the pending diff — the one place
+        # that survives a re-base honestly
         s = _settings_for("brutalist", "brutalist-mono")
         dlg = self._dialog(s)
         dlg.theme_show_all_toggle.setChecked(True)
@@ -527,8 +479,8 @@ class PickerFilterTests(_DialogCase):
         self.assertIn("nord", self._rows(dlg))
 
     def test_a_saved_theme_joins_the_list_even_cross_aesthetic(self) -> None:
-        # The theme editor's reconcile: the slug it just wrote must be
-        # listed and staged whichever side of the filter it landed on.
+        # the theme editor's reconcile: the slug it just wrote must be
+        # listed and staged whichever side of the filter it landed on
         s = _settings_for("brutalist", "brutalist-mono")
         dlg = self._dialog(s)
         dlg._on_theme_saved("nord")
@@ -545,14 +497,10 @@ class PickerFilterTests(_DialogCase):
         self.assertNotIn("theme", dlg._pending)
 
 
-# ---------------------------------------------------------------------------
-# cross-personality picks still route through the EXISTING path
-# ---------------------------------------------------------------------------
+# ---------- cross-personality picks route through the existing path ----------
 
 class _WindowCase(unittest.TestCase):
-    """Real-MainWindow harness (the test_preset_flip pattern): app-wide
-    QSS pushes suppressed, hermetic settings file, deleteLater + drain
-    teardown — leaked windows once made restyle-heavy files quadratic."""
+    """Real-MainWindow harness (the test_preset_flip pattern)."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -621,8 +569,8 @@ class CrossPersonalityPickTests(_WindowCase):
                 return dlg.result()
             dlg.theme_picker.setCurrentIndex(idx)
             dlg._on_save()
-            # The dialog itself must never flip the personality — the
-            # window's reconcile owns that (do not duplicate the logic).
+            # the dialog itself must never flip the personality — the
+            # window's reconcile owns that (do not duplicate the logic)
             seen["preset_at_accept"] = dlg._settings.preset
             return dlg.result()
 
@@ -664,7 +612,7 @@ class CrossPersonalityPickTests(_WindowCase):
         self.assertEqual(s.preset, "modern")
         self.assertEqual(s.theme, "nord")
         self.assertEqual(theming.manager().current().slug, "nord")
-        # The outgoing personality kept the theme it wore.
+        # the outgoing personality kept the theme it wore
         self.assertEqual(s.preset_state["brutalist"]["theme"],
                          "brutalist-mono")
 
@@ -684,9 +632,9 @@ class CrossPersonalityPickTests(_WindowCase):
         self.assertEqual(s.theme, "gruvbox")
 
     def test_the_live_cross_theme_route_is_untouched(self) -> None:
-        # No dialog involved: applying a modern theme while wearing
-        # brutalist still means "take me to the other tide", via
-        # _on_theme_changed → _maybe_apply_theme_slot_prefs (deferred).
+        # no dialog: applying a modern theme while wearing brutalist still
+        # flips, via _on_theme_changed → _maybe_apply_theme_slot_prefs
+        # (deferred)
         mock.patch.object(settings_module, "save", lambda s: None).start()
         mock.patch.object(settings_module, "save_fields",
                           lambda s, *names: None).start()

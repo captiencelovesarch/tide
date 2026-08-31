@@ -1,24 +1,11 @@
 """Phase 3 E1 — the speed control's modern face + backend honesty + the
-spring volume variant.
-
-What's pinned here:
-- popover face pick: modern preset → SpringSpeedPopover, anything else
-  (brutalist, no preset, no settings) → the untouched bracket
-  SpeedPopover; a mid-session personality flip swaps the face on the
-  NEXT open (the cached popover is rebuilt), and a same-face reopen
-  reuses the cached one;
-- slider → speed_changed mapping: live during the drag, quantized to
-  the 0.05 grid, preset detents land exactly, the readout follows, and
-  the button→popover sync never yanks the handle out from under an
-  in-progress drag;
-- ±0.05 nudge chips at the ends, edge disabling, reset;
-- backend honesty: PlaybackBackend.supports_speed defaults True,
-  LibrespotBackend declares False, PlaybackRouter.active_supports_speed()
-  follows the active backend, and the window wiring greys the SpeedButton
-  when a track lands on a speed-less backend (and restores it after);
-- the "spring" volume variant: registration in make_volume /
-  VOLUME_VARIANTS plus the shared volume surface (setVolume / volume /
-  volume_changed, emit=False silence, ±5 wheel).
+spring volume variant. Modern builds SpringSpeedPopover, anything else
+the untouched bracket SpeedPopover; a flip swaps the face on the NEXT
+open. The slider maps to speed_changed live, quantized to the 0.05
+grid, and the button→popover sync never yanks an in-progress drag.
+Backend honesty: supports_speed defaults True, LibrespotBackend says
+False, the router follows the active backend, and the window greys the
+SpeedButton on a speed-less backend and restores it after.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_speed_slider.py
 """
@@ -125,9 +112,7 @@ class _FakeBackend(PlaybackBackend):
         return 0.0
 
 
-# ---------------------------------------------------------------------------
-# popover face pick
-# ---------------------------------------------------------------------------
+# ---------- popover face pick ----------
 
 
 class _HostCase(unittest.TestCase):
@@ -216,9 +201,7 @@ class FacePickTests(_HostCase):
         self.assertEqual(pop._display.text(), "1.5×")
 
 
-# ---------------------------------------------------------------------------
-# spring face behavior
-# ---------------------------------------------------------------------------
+# ---------- spring face behavior ----------
 
 
 class SpringFaceTests(_HostCase):
@@ -259,12 +242,10 @@ class SpringFaceTests(_HostCase):
         self.assertAlmostEqual(self.spy[0], 0.9)
         self.assertEqual(self.pop._display.text(), "0.9×")
         self._release(self.slider._x_for_value(0.9))
-        # The committed re-emit dedupes in set_speed — no double signal.
+        # the committed re-emit dedupes in set_speed — no double signal
         self.assertEqual(len(self.spy), 1)
 
     def test_values_stay_on_the_law_grid(self) -> None:
-        # A press between grid points quantizes to 0.05 exactly like the
-        # law's clamp would.
         x = self.slider._x_for_value(1.12)
         self._click(x)
         v = self.btn.speed()
@@ -277,9 +258,9 @@ class SpringFaceTests(_HostCase):
         self.assertEqual(self.pop._display.text(), "1.25×")
 
     def test_sync_never_yanks_a_live_drag(self) -> None:
-        # Between grid points the display follows the finger raw while
-        # the logical value quantizes; the set_speed→sync round-trip
-        # must not snap the handle to the grid mid-drag.
+        # display follows the finger raw while the logical value
+        # quantizes; the set_speed→sync round-trip must not snap the
+        # handle to the grid mid-drag
         self._press(self.slider._x_for_value(1.0))
         x = self.slider._x_for_value(1.12)
         self._move(x)
@@ -309,7 +290,6 @@ class SpringFaceTests(_HostCase):
         self.btn.set_speed(speed_law.SPEED_MIN)
         self.assertTrue(self.pop._plus_btn.isEnabled())
         self.assertFalse(self.pop._minus_btn.isEnabled())
-        # A click on the disabled chip is inert — no signal, no move.
         before = len(self.spy)
         self.pop._minus_btn.click()
         self.assertEqual(len(self.spy), before)
@@ -322,23 +302,18 @@ class SpringFaceTests(_HostCase):
         self.assertEqual(self.pop._display.text(), "1.0×")
 
     def test_external_set_speed_moves_the_slider(self) -> None:
-        # Right-click reset / [ ] shortcuts land while the popover is up.
         self.btn.set_speed(1.75)
         self.assertAlmostEqual(self.slider.value(), 1.75)
         self.assertAlmostEqual(self.slider._display, 1.75)
 
     def test_release_where_the_drag_began_still_syncs(self) -> None:
-        # No live emission happened, only the committed one — nothing
-        # changes, nothing crashes, no phantom signal.
         x = self.slider._x_for_value(1.0)
         self._click(x)
         self.assertEqual(self.btn.speed(), 1.0)
         self.assertEqual(self.spy, [])
 
 
-# ---------------------------------------------------------------------------
-# backend honesty
-# ---------------------------------------------------------------------------
+# ---------- backend honesty ----------
 
 
 class BackendSupportTests(unittest.TestCase):
@@ -354,8 +329,8 @@ class BackendSupportTests(unittest.TestCase):
 
     def test_router_follows_the_active_backend(self) -> None:
         router = PlaybackRouter()
-        # Nothing registered → optimistic default (mpv registers first
-        # in the app and supports speed).
+        # nothing registered → optimistic default (mpv registers first
+        # in the app and supports speed)
         self.assertTrue(router.active_supports_speed())
         mpv = _FakeBackend("mpv", speed=True)
         spot = _FakeBackend("librespot", speed=False)
@@ -378,7 +353,6 @@ class BackendSupportTests(unittest.TestCase):
             self.assertFalse(btn.isEnabled())
             self.assertFalse(btn.backend_supported())
             self.assertEqual(btn.toolTip(), _TIP_UNSUPPORTED)
-            # Stored speed survives the grey-out.
             btn.set_backend_supported(True)
             self.assertTrue(btn.isEnabled())
             self.assertEqual(btn.toolTip(), _TIP_NORMAL)
@@ -387,10 +361,10 @@ class BackendSupportTests(unittest.TestCase):
             QTest.qWait(30)
 
     def test_greyed_refuses_every_user_driven_set(self) -> None:
-        # setEnabled(False) only stops Qt event delivery. The keymap
-        # actions and MPRIS SetRate call set_speed()/reset() straight in,
-        # and honoring them would walk the greyed button's label to a
-        # speed the audio isn't playing at.
+        # setEnabled(False) only stops Qt event delivery — keymap actions
+        # and MPRIS SetRate call set_speed()/reset() straight in, and
+        # honoring them would walk the label to a speed the audio isn't
+        # playing at
         btn = SpeedButton()
         emitted: list[float] = []
         btn.speed_changed.connect(emitted.append)
@@ -404,8 +378,6 @@ class BackendSupportTests(unittest.TestCase):
             self.assertAlmostEqual(btn.speed(), 1.25, msg="value moved")
             self.assertEqual(btn.text(), label_before, "label lied")
             self.assertEqual(emitted, [1.25], "pushed to a deaf backend")
-            # …and the stored value comes back the moment a backend that
-            # honors speed does.
             btn.set_backend_supported(True)
             btn.set_speed(1.5)
             self.assertAlmostEqual(btn.speed(), 1.5)
@@ -416,7 +388,7 @@ class BackendSupportTests(unittest.TestCase):
 
     def test_greyed_still_accepts_a_silent_restore(self) -> None:
         # app.py's startup restore (emit=False) isn't a claim about
-        # what's playing — it must still land.
+        # what's playing — it must still land
         btn = SpeedButton()
         try:
             btn.set_backend_supported(False)
@@ -447,9 +419,7 @@ class WindowGreyWiringTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.app = _app()
-        # Suppress real app-wide QSS pushes (test_preset_flip's pattern) —
-        # nothing here reads the pushed QSS and earlier suite windows
-        # would make every push quadratic.
+        # suppress app-wide QSS pushes (test_preset_flip's pattern)
         mock.patch.object(self.app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
         router = PlaybackRouter()
@@ -494,8 +464,8 @@ class WindowGreyWiringTests(unittest.TestCase):
         self.assertEqual(self.w.speed_btn.toolTip(), _TIP_NORMAL)
 
     def test_active_source_switch_reevaluates(self) -> None:
-        # Flip the router under the window's feet, then deliver a source
-        # switch — the handler must re-grey without a track load.
+        # flip the router under the window's feet, then deliver a source
+        # switch — the handler must re-grey without a track load
         from tide.sources import registry as source_registry
         from tide.sources.local import LocalSource
         reg = source_registry()
@@ -515,7 +485,7 @@ class WindowGreyWiringTests(unittest.TestCase):
 
     def test_keymap_actions_respect_the_grey_out(self) -> None:
         # [ ] \ are window-level shortcuts calling the button directly —
-        # the exact hole a disabled widget doesn't close.
+        # the exact hole a disabled widget doesn't close
         from tide.ui.window import ACTIONS, _nudge_speed
         self.w.speed_btn.set_speed(1.25)
         self._resolve("librespot")
@@ -530,15 +500,14 @@ class WindowGreyWiringTests(unittest.TestCase):
         self.assertAlmostEqual(self.w.speed_btn.speed(), 1.25)
         self.assertEqual(self.w.speed_btn.text(), label)
         self.assertEqual(pushed, [])
-        # Back on mpv the same keys work again.
         self._resolve("mpv")
         _nudge_speed(self.w, +1)
         self.assertGreater(self.w.speed_btn.speed(), 1.25)
         self.assertEqual(len(pushed), 1)
 
     def test_helper_tolerates_a_plain_player(self) -> None:
-        # Back-compat / tests: a player without the probe counts as
-        # supporting — grey only on a positive "can't".
+        # a player without the probe counts as supporting — grey only on
+        # a positive "can't"
         self.w.speed_btn.set_backend_supported(False)
         orig = self.w.player
         try:
@@ -549,9 +518,7 @@ class WindowGreyWiringTests(unittest.TestCase):
         self.assertTrue(self.w.speed_btn.isEnabled())
 
 
-# ---------------------------------------------------------------------------
-# spring volume variant
-# ---------------------------------------------------------------------------
+# ---------- spring volume variant ----------
 
 
 class SpringVolumeTests(unittest.TestCase):
@@ -579,7 +546,6 @@ class SpringVolumeTests(unittest.TestCase):
                 make_volume("nope")]
         try:
             self.assertIsInstance(made[0], SpringVolume)
-            # The default path is untouched.
             self.assertIsInstance(made[1], MonoVolume)
             self.assertIsInstance(made[2], MonoVolume)
         finally:

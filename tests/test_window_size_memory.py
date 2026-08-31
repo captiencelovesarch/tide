@@ -1,15 +1,10 @@
 """v2.0 window-size memory + the debounced field-scoped settings savers.
-
-settings.window_sizes remembers the main window's size per layout slug:
-recorded at the top of apply_layout (before anything moves) and at quit,
-restored instead of the old unconditional resize(*window_default). That
-also kills the classic annoyance where any slot tweak snapped the window
-back to the layout's default size.
-
-The saver hygiene half: volume/speed share one trailing 300 ms debounce
-that writes ONLY their fields via save_fields (no more whole-object
-save() clobbering concurrent savers), and closeEvent flushes so the last
-tick before quit is never lost.
+settings.window_sizes remembers the size per layout slug — recorded at
+the top of apply_layout and at quit, restored instead of the old
+unconditional resize(*window_default) that snapped hand-sized windows
+back. volume/speed share one trailing 300 ms debounce that writes ONLY
+their fields via save_fields (no whole-object save() clobbering
+concurrent savers), and closeEvent flushes the last tick before quit.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -45,10 +40,8 @@ class _WindowCase(unittest.TestCase):
         theming.manager().apply("brutalist-mono")
         layout_module.manager().refresh()
         layout_module.manager().apply("classic")
-        # Suppress real app-wide QSS pushes (test_restyle_coalesce's spy
-        # pattern) — the theme/layout applies above queue one per test,
-        # and each real push repolishes every window earlier suite files
-        # leaked. Size/save logic under test never reads the pushed QSS.
+        # suppress app-wide QSS pushes (test_restyle_coalesce's spy
+        # pattern); nothing under test reads the pushed QSS
         mock.patch.object(self.app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
         self.w = None
@@ -61,9 +54,8 @@ class _WindowCase(unittest.TestCase):
             except (RuntimeError, TypeError):
                 pass
             self.w.close()
-            # close() alone leaks the C++ widget tree until GC; leaked
-            # windows make every later app-wide restyle slower (each one
-            # gets repolished). deleteLater + the qWait below destroys it.
+            # close() alone leaks the C++ widget tree until GC;
+            # deleteLater + the qWait below destroys it
             self.w.deleteLater()
             self.w = None
         QTest.qWait(30)
@@ -88,8 +80,8 @@ class CtorSizeTests(_WindowCase):
         self.assertEqual(w._layout_slug, "classic")
 
     def test_ctor_falls_back_to_layout_default(self) -> None:
-        # No settings file at all — the layout's declared default (the
-        # pre-2.0 behavior, byte for byte).
+        # no settings file at all — the layout's declared default (the
+        # pre-2.0 behavior, byte for byte)
         w = self._make_window()
         self.assertEqual((w.width(), w.height()), (1100, 720))
 
@@ -102,11 +94,9 @@ class CtorSizeTests(_WindowCase):
         self.assertEqual((w.width(), w.height()), (1100, 720))
 
     def test_upgrader_on_non_classic_layout_keeps_1100x720(self) -> None:
-        # Migration invariant, end to end: a 1.5 user on "focused" saw
-        # 1100x720 at every launch (the old ctor hardcode; window_default
-        # never applied at startup). Their first 2.0 launch — bootstrap
-        # adoption, then window construction — must come up at exactly
-        # that size, not focused's declared 1000x720.
+        # migration invariant: a 1.5 user on "focused" saw 1100x720 at
+        # every launch (the old ctor hardcode) — the first 2.0 launch
+        # must come up at exactly that size, not focused's 1000x720
         s = Settings()
         s.first_launch_complete = True
         s.theme = "gruvbox"

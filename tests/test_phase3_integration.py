@@ -1,18 +1,13 @@
-"""v2.0 phase 3 — the stitch seams: cross-agent wiring landed after the
-builders finished their contracts.
+"""v2.0 phase 3 — the stitch seams landed after the builders finished.
 
-What's pinned here:
-- a personality flip re-points the UI-sound player at the incoming
-  preset's pack (modern → the watery ``sounds/modern`` blips, brutalist
-  → the default clicks) — derived from the builtin def, never a
-  Settings/STASH field;
-- modern's builtin theme now seeds the SpringSlider volume face
-  (adaptive ``[slots] volume = "spring"``) and a flip actually builds a
-  SpringVolume in the strip;
-- the main-view crossfade is profile-aware: ``_set_stack_index`` passes
-  ``motion.dur("short")`` and opts into the overshoot lift, which the
-  DIALECT gates — modern springs, brutalist stays flat even at motion
-  full — and stays a synchronous index swap at intensity OFF.
+Pinned: a personality flip re-points the UI-sound player at the
+incoming preset's pack, derived from the builtin def, never a
+Settings/stash field; modern's builtin theme seeds the SpringSlider
+volume face and a flip actually builds a SpringVolume in the strip; the
+main-view crossfade passes ``motion.dur("short")`` and opts into the
+overshoot lift, which the DIALECT gates — modern springs, brutalist
+stays flat even at motion full — and stays a synchronous index swap at
+intensity OFF.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -69,12 +64,10 @@ class _WindowCase(unittest.TestCase):
         config.SETTINGS_FILE = Path(self._tmp.name) / "settings.toml"
         theming.manager().refresh()
         layout_module.manager().refresh()
-        # Suppress the REAL app-wide QSS pushes for the whole case —
-        # closed-but-alive windows from earlier files repolish on every
-        # push (see test_preset_flip for the war story).
+        # suppress app-wide QSS pushes (see test_preset_flip)
         mock.patch.object(self.app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
-        # Flips move global motion intensity — restore the suite default.
+        # flips move global motion intensity — restore it after
         self._orig_intensity = motion_module._user_intensity
         self.w = None
 
@@ -117,7 +110,7 @@ class _WindowCase(unittest.TestCase):
 
 class SoundPackFlipTests(_WindowCase):
     """apply_preset_visuals → _apply_sound_pack: the pack follows the
-    personality (D's phase-3 seam, wired by stitch)."""
+    personality."""
 
     def test_flip_to_modern_wears_the_modern_pack(self) -> None:
         s = _brutalist_settings()
@@ -127,8 +120,8 @@ class SoundPackFlipTests(_WindowCase):
         w.switch_preset("modern")
         QTest.qWait(30)
         self.assertEqual(w.ui_sounds.pack, "modern")
-        # The pack actually landed on files, not just the name: every
-        # key resolves inside sounds/modern/ (the pack ships all six).
+        # the pack landed on files, not just the name — every key
+        # resolves inside sounds/modern/
         for key in SOUND_KEYS:
             path = w.ui_sounds._sounds.get(key)
             self.assertIsNotNone(path, f"{key} lost its file on set_pack")
@@ -151,11 +144,9 @@ class SoundPackFlipTests(_WindowCase):
 
 
 class SoundPackResolutionTests(unittest.TestCase):
-    """_apply_sound_pack's derivation rules, on a stub — no window.
-
-    The method only touches ``self.ui_sounds`` / ``self._settings`` so
-    the unbound function runs against any object; that keeps these
-    cases window-free (and restyle-free)."""
+    """_apply_sound_pack's derivation rules, on a stub — the method only
+    touches ``self.ui_sounds`` / ``self._settings``, so the unbound
+    function runs against any object, window-free."""
 
     class _Stub:
         pass
@@ -191,8 +182,8 @@ class SoundPackResolutionTests(unittest.TestCase):
         self.assertEqual(stub.ui_sounds.pack, "default")
 
     def test_builtin_defs_carry_the_expected_packs(self) -> None:
-        # The derivation source itself: modern declares its pack, the
-        # brutalist def keeps the default (D's one-line presets change).
+        # the derivation source itself: modern declares its pack, the
+        # brutalist def keeps the default
         self.assertEqual(presets.builtin("modern").sound_pack, "modern")
         self.assertEqual(presets.builtin("brutalist").sound_pack, "default")
 
@@ -221,7 +212,7 @@ class SpringVolumeSeedTests(_WindowCase):
         self.assertEqual(s.layout_overrides.get("volume"), "spring")
         self.assertEqual(w._slot_volume, "spring")
         self.assertIsInstance(w.volume, SpringVolume)
-        # The swapped face keeps the shared volume surface wired.
+        # the swapped face keeps the shared volume surface wired
         w.volume.setVolume(37, emit=False)
         self.assertEqual(w.volume.volume(), 37)
 
@@ -232,21 +223,20 @@ class SpringVolumeSeedTests(_WindowCase):
         QTest.qWait(30)
         w.switch_preset("brutalist")
         QTest.qWait(30)
-        # classic layout default (no brutalist volume override stashed).
+        # classic layout default (no brutalist volume override stashed)
         self.assertEqual(w._slot_volume, "blocks")
         self.assertNotIsInstance(w.volume, SpringVolume)
 
 
 class CrossfadeSeamTests(_WindowCase):
-    """window._set_stack_index rides the profile-aware motion API now
-    (B's deferred one-liner): dur('short') + the springy-only overshoot
-    opt-in, still a synchronous swap at OFF."""
+    """window._set_stack_index rides the profile-aware motion API:
+    dur('short') + the springy-only overshoot opt-in, still a
+    synchronous swap at OFF."""
 
     def _unclamp_motion(self) -> None:
-        # Offscreen platforms can report reduced motion, which forces
-        # mechanical — pin it off so the springy branch is actually
-        # exercised (test_motion_profiles' pattern). Both globals are
-        # restored: the dialect binding is process-wide and sticky.
+        # offscreen platforms can report reduced motion, which forces
+        # mechanical — pin it off so the springy branch is exercised.
+        # Both globals restored: the dialect binding is process-wide.
         reduced = motion_module._reduced_motion
         bound = motion_module._preset_profile
         self.addCleanup(
@@ -272,17 +262,15 @@ class CrossfadeSeamTests(_WindowCase):
                              "crossfade must ask the profile, not DUR_SHORT")
             self.assertTrue(kwargs.get("overshoot"),
                             "modern's view switch opts into the lift")
-            # And under the modern personality that dur really is the
-            # springy dialect's.
+            # and under modern that dur really is the springy dialect's
             self.assertEqual(motion_module.profile(), "springy")
         finally:
             motion_module.set_intensity(self._orig_intensity)
 
     def test_brutalist_at_full_never_gets_the_springy_lift(self) -> None:
-        # The overshoot opt-in is unconditional at the call site; the
-        # dialect is what gates it. A brutalist user who turns motion up
-        # to full must get a plain crossfade — no snapshot lift, no
-        # OutBack anywhere.
+        # the overshoot opt-in is unconditional at the call site; the
+        # dialect gates it — brutalist at motion full gets a plain
+        # crossfade, no lift, no OutBack
         s = _brutalist_settings()
         w = self._make_window(s)
         self._unclamp_motion()

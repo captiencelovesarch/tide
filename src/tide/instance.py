@@ -1,26 +1,15 @@
 """Single-instance guard: one tide per config dir, over a QLocalServer.
 
-A second launch shouldn't spawn a second player fighting over mpris, the
-tray, and the audio-capture stream — it should tell the running instance
-to raise itself and exit. The handshake is a QLocalServer (a unix socket
-on Linux) whose name is derived from the *config dir*, so every user —
-and every test sandbox, which redirects tide.config elsewhere — gets its
-own name. The name is computed at call time, never at import time: the
-test conftest repoints tide.config before anything runs, and a
-module-level constant here would leak the real config path into tests.
+The server name hashes the config dir, computed at call time, never at
+import — the test conftest repoints tide.config before anything runs.
+``listen`` fails the same way on a live socket and on a stale file left
+by a crash, so on failure we probe-connect: an answer means yield, no
+answer means removeServer and retry.
 
-Stale sockets are taken over, not obeyed: a crashed instance leaves its
-socket file behind, and ``listen`` fails on it exactly like it does on a
-live one. So on a failed listen we probe-connect — if somebody answers,
-they're real and ``acquire`` yields to them; if nobody does, the file is
-a corpse, ``removeServer`` unlinks it and we retry.
-
-Wire protocol: newline-terminated utf-8 command lines ("raise\\n").
-Deliberately dumb — the second process writes one line and exits, the
-first process's ``on_message`` decides what a command means.
-
-app.py owns the wiring (acquire at startup, notify_running + exit when
-acquire returns None); this module knows nothing about windows.
+Wire protocol: newline-terminated utf-8 command lines ("raise\\n"); a
+second launch writes one line and exits, the first process's
+``on_message`` decides what it means. app.py owns the wiring; this
+module knows nothing about windows.
 """
 from __future__ import annotations
 
@@ -32,14 +21,9 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
 def _server_name() -> str:
-    """Per-user, per-config-dir server name.
-
-    Reads ``tide.config.CONFIG_DIR`` through the module attribute *now* so
-    a redirected config (tests, portable setups) changes the name too. The
-    path is hashed rather than embedded: local-socket names end up as
-    filenames in a shared temp dir and shouldn't carry arbitrary path
-    characters.
-    """
+    """Reads ``tide.config.CONFIG_DIR`` through the module attribute
+    *now* so a redirected config (tests) changes the name. Hashed, not
+    embedded — socket names become filenames in a shared temp dir."""
     from tide import config
 
     digest = hashlib.sha256(str(config.CONFIG_DIR).encode("utf-8")).hexdigest()
@@ -48,26 +32,22 @@ def _server_name() -> str:
 
 class InstanceGuard(QObject):
     """Holds the listening server and forwards received command lines.
-
-    Keep the returned guard referenced for the life of the app — it owns
-    the QLocalServer (child object) and the callback. ``close()`` releases
-    the name so another instance can take it.
-    """
+    Keep the guard referenced for the life of the app; ``close()``
+    releases the name so another instance can take it."""
 
     def __init__(self, server: QLocalServer, on_message: Callable[[str], None]):
         super().__init__()
         self._server = server
         server.setParent(self)
         self._on_message = on_message
-        # Partial lines per connection: a client's write can arrive split
-        # across readyRead bursts; only complete lines are delivered.
+        # a write can arrive split across readyRead bursts; only complete
+        # lines are delivered
         self._partial: dict[QLocalSocket, bytes] = {}
-        # Strong refs to live server-side sockets — the qthreads-style
-        # retain pattern. NEVER swap this for disconnected→deleteLater:
-        # under PySide6 + py3.14 that segfaults inside the deferred
-        # ~QObject (reproduced offscreen — Python also owns the wrapper
-        # from nextPendingConnection, so the C++ socket dies twice).
-        # Explicit ownership + dropping the ref deletes it exactly once,
+        # Strong refs to live server-side sockets (qthreads-style retain).
+        # NEVER swap for disconnected→deleteLater: under PySide6 + py3.14
+        # that segfaults in the deferred ~QObject (reproduced offscreen —
+        # Python also owns the wrapper from nextPendingConnection, so the
+        # C++ socket dies twice). Dropping the ref frees it exactly once,
         # on the GUI thread.
         self._conns: set[QLocalSocket] = set()
         server.newConnection.connect(self._accept)
@@ -78,13 +58,11 @@ class InstanceGuard(QObject):
 
     def close(self) -> None:
         """Stop listening and free the socket name. Safe to call twice."""
-        # Abort retained connections before dropping them: freeing a
-        # still-open socket would emit disconnected from inside its own
-        # C++ destructor, landing in _drop with an already-invalidated
-        # wrapper (seen live as a shiboken RuntimeError at exit). Signals
-        # are blocked around the abort — it emits disconnected
-        # synchronously, and close() means stop, not "flush half-received
-        # junk through _drop".
+        # Abort retained conns before dropping them — freeing a still-open
+        # socket emits disconnected from its own C++ destructor, landing
+        # in _drop with an invalidated wrapper (shiboken RuntimeError at
+        # exit). Signals blocked: abort emits disconnected synchronously,
+        # and close() means stop, not flush.
         conns = list(self._conns)
         self._conns.clear()
         self._partial.clear()
@@ -122,23 +100,20 @@ class InstanceGuard(QObject):
             self._deliver(line)
 
     def _drop(self, sock: QLocalSocket) -> None:
-        # A client that wrote its command without a trailing newline and
-        # hung up still gets heard: drain whatever the socket buffered,
-        # then flush the partial line.
+        # a client that hung up without a trailing newline still gets
+        # heard: drain the buffer, then flush the partial line
         try:
             if sock.bytesAvailable() > 0:
                 self._read(sock)
         except RuntimeError:
-            # Wrapper already invalidated — a guard freed without close()
-            # reaches here from the socket's own destructor at teardown.
-            # The buffered partial below is all that's left to flush.
+            # wrapper invalidated — a guard freed without close() reaches
+            # here from the socket's destructor; flush the partial below
             pass
         rest = self._partial.pop(sock, b"")
         if rest.strip():
             self._deliver(rest)
-        # No deleteLater (segfault — see __init__). Dropping the retained
-        # ref lets Python free the socket on the GUI thread once the
-        # signal emission unwinds.
+        # no deleteLater (segfault — see __init__); dropping the ref frees
+        # the socket on the GUI thread once the emission unwinds
         self._conns.discard(sock)
 
     def _deliver(self, raw: bytes) -> None:
@@ -153,37 +128,28 @@ class InstanceGuard(QObject):
 
 
 def acquire(on_message: Callable[[str], None]) -> InstanceGuard | None:
-    """Claim the single-instance name, or return None if a live instance
-    already owns it.
-
-    ``on_message`` receives each command line another process sends via
-    :func:`notify_running`. Requires a running Q(Core)Application for
-    delivery (signals), but is safe to call before any window exists.
-    """
+    """Claim the single-instance name, or None when a live instance owns
+    it. ``on_message`` receives lines sent via :func:`notify_running`.
+    Needs a running Q(Core)Application for signal delivery, no window."""
     name = _server_name()
     server = QLocalServer()
     if not server.listen(name):
-        # Name taken: either a live instance or a stale socket file left
-        # by a crash. Only a probe can tell them apart. The unclaimed
-        # server wrapper is Python-owned; letting it fall out of scope
-        # frees it here on the GUI thread (no deleteLater — see
-        # InstanceGuard.__init__ for the crash that pattern causes).
+        # Name taken: live instance or stale file — only a probe can
+        # tell. The unclaimed wrapper is Python-owned; scope exit frees
+        # it on the GUI thread (no deleteLater — see __init__'s crash).
         if _probe_alive(name):
             return None
         QLocalServer.removeServer(name)
         if not server.listen(name):
-            # Lost a takeover race, or the temp dir is hostile — either
-            # way somebody/something else holds the name; yield.
+            # lost a takeover race, or the temp dir is hostile — yield
             return None
     return InstanceGuard(server, on_message)
 
 
 def notify_running(command: str = "raise", timeout_ms: int = 800) -> bool:
     """Send one command line to the live instance. True if delivered.
-
     Blocking waits only — this runs in the doomed second process before
-    (or instead of) any event loop.
-    """
+    any event loop."""
     sock = QLocalSocket()
     sock.connectToServer(_server_name())
     if not sock.waitForConnected(timeout_ms):

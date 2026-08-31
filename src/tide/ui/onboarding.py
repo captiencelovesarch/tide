@@ -17,11 +17,10 @@ Steps:
   6. Integrations — discord rich presence + listenbrainz, both optional
   7. All set — summary + launch button
 
-The wizard itself only runs on a config-less first launch. Step 2 is the
-part worth revisiting, and as of v2.0 it has its own front door: Settings →
-appearance → "choose your tide" reopens ``ui.chooser.ChooserDialog``, which
-hosts these same panes and flips the personality without disturbing
-anything the user has set up since.
+The wizard only runs on a config-less first launch. Settings →
+appearance → "choose your tide" reopens the same panes in
+``ui.chooser.ChooserDialog``, flipping the personality without
+disturbing anything else the user has set up.
 """
 from __future__ import annotations
 
@@ -166,13 +165,8 @@ class _ProgressDots(QWidget):
 
 class _PickCard(QFrame):
     """Clickable card with title + subtitle + a small colored stripe.
-    Single-select within a group.
-
-    The theme grid's card. It used to double as the aesthetic step's
-    too, with hand-picked swatches standing in for each personality —
-    v2.0 replaced that with the real chooser panes
-    (``ui.chooser.PersonalityPane``), which preview live theme tokens
-    instead of guessing at them."""
+    Single-select within a group. The theme grid's card — the aesthetic
+    step uses the real chooser panes instead."""
 
     clicked_signal = Signal(str)
 
@@ -330,29 +324,16 @@ class _WelcomeStep(_Step):
 
 
 class _AestheticStep(_Step):
-    """"choose your tide", first-launch edition.
+    """"choose your tide", first-launch edition — hosts the real
+    chooser panes (``ui.chooser.PersonalityPane``, ``compact=True``
+    because the roomy pane doesn't fit this fixed 720×600 canvas).
 
-    This step used to be two hand-painted cards with hardcoded swatches
-    that guessed at what the two personalities look like. It now hosts
-    the REAL chooser panes (``ui.chooser.PersonalityPane``) — the same
-    live previews the standalone ChooserDialog shows, built from each
-    personality's own theme tokens. One implementation of the pitch,
-    three hosts (wizard, update-into-2.0 dialog, settings re-pick); do
-    not fork the design.
-
-    ``compact=True`` because this canvas is fixed at 720×600 and the
-    roomy pane's minimum doesn't fit — same widget, same tokens, less
-    breathing room.
-
-    A click here SELECTS, it does not commit: the wizard's answer is
-    carried in ``OnboardingResult.aesthetic`` and only becomes a
-    personality once app.py's post-wizard handoff runs
-    (commit_personality_choice, route b1). The pane reports; the host
-    decides what a click means — which is why the pane's button is
-    relabelled here. In the dialog it says "choose" and closes the
-    dialog; here the wizard's own [next] is what advances, so a button
-    saying "choose" would look broken the moment it was pressed. It says
-    "this one", and flips to "picked" while the ring is on it.
+    A click SELECTS, it does not commit: the answer rides
+    ``OnboardingResult.aesthetic`` and becomes a personality in
+    app.py's post-wizard handoff (commit_personality_choice, route b1).
+    The button is relabelled "this one" / "picked" because the wizard's
+    own [next] is what advances — a "choose" that did nothing visible
+    would read as broken.
     """
 
     CHOOSE_LABEL = "this one"

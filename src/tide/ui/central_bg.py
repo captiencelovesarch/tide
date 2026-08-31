@@ -117,11 +117,9 @@ _FX_STYLES = frozenset({
     "aurora", "smoke", "caustics",
 })
 
-# set_style's whitelist, built from the backdrop registry so the pickers
-# and the renderer share one list. The assert pins the registry to the
-# renderer's actual style families — a slug added to backdrops.py without
-# a paint branch here must fail loudly at import, not silently render as
-# "field".
+# set_style's whitelist, from the backdrop registry so pickers and the
+# renderer share one list. The assert makes a slug added to backdrops.py
+# without a paint branch here fail at import, not render as "field".
 _STYLES = frozenset(backdrops.SLUGS)
 assert _STYLES == _FX_STYLES | {"field", "band", "liquid"}, (
     "backdrop registry drifted from central_bg's renderer styles"

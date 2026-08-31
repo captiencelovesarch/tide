@@ -217,17 +217,16 @@ class InstanceRaiseDeferralTest(unittest.TestCase):
         self.assertEqual(win.presented, 0)
         handler("raise")
         # NOT synchronous — the show/raise must unwind the emitting stack
-        # first (the modal-from-click crash family).
+        # first (the modal-from-click crash family)
         self.assertEqual(win.presented, 0)
         QTest.qWait(30)
         self.assertEqual(win.presented, 1)
 
 
 class WizardPickLandsBeforeWindowTest(unittest.TestCase):
-    """First-run regression (fixed in 2.0): theme+layout were applied
-    pre-wizard only, and the window-side slot sync fires solely on
-    aesthetic flips it can observe — so a modern wizard pick rendered on
-    the brutalist DEFAULT_SLOTS forever. run_onboarding_if_needed now
+    """First-run regression (fixed in 2.0): a modern wizard pick rendered
+    on the brutalist DEFAULT_SLOTS forever, because the slot sync only
+    fires on flips it can observe. run_onboarding_if_needed now
     re-applies the pick as a preset before MainWindow exists."""
 
     def setUp(self) -> None:
@@ -241,10 +240,8 @@ class WizardPickLandsBeforeWindowTest(unittest.TestCase):
         from tide.ui import onboarding as onboarding_module
         self._onb = onboarding_module
         self._real_dialog = onboarding_module.OnboardingDialog
-        # Suppress real app-wide QSS pushes (test_restyle_coalesce's spy
-        # pattern) — the wizard handoff + tearDown reset each queue one,
-        # and a real push repolishes every window earlier suite files
-        # leaked. Manager/slot state stays fully real.
+        # suppress app-wide QSS pushes (test_restyle_coalesce's spy
+        # pattern); manager/slot state stays fully real
         mock.patch.object(app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
 
@@ -282,9 +279,8 @@ class WizardPickLandsBeforeWindowTest(unittest.TestCase):
         s = Settings()                          # true first launch
         app_module._bootstrap_preset(s)         # pre-wizard startup state
         self.assertTrue(app_module.run_onboarding_if_needed(s))
-        # The state MainWindow will construct from: picked theme applied,
-        # and the picked theme's slot prefs on the layout — not the
-        # brutalist blocks/bracket defaults.
+        # the state MainWindow will construct from: picked theme applied,
+        # its slot prefs on the layout — not the brutalist defaults
         self.assertEqual(theming.manager().current().slug, "nord")
         slots = layout_module.manager().current().slots
         self.assertEqual(slots["progress"], "bar")

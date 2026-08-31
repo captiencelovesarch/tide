@@ -1,16 +1,13 @@
 """v2.0 mid-session personality flip — MainWindow.switch_preset and the
 reworked theme-pick handler.
 
-What's pinned here:
-- a flip costs exactly ONE queued app restyle (apply_bundle batches
-  theme+font+size+case; the sticky radius override coalesces into the
-  same flush) and exactly ONE window slot-rebuild pass;
-- the theme-change handler is guarded during a programmatic flip, so the
-  layout_overrides the stash just restored are never wiped (the old
-  destructive reset is gone for good);
-- a theme pick that crosses personalities routes through switch_preset
-  and lands ON the picked theme, seeding the target's stash;
-- a same-personality theme pick leaves slots and overrides alone.
+Pinned: a flip costs exactly one queued app restyle (apply_bundle
+batches theme+font+size+case; the sticky radius coalesces into the same
+flush) and one window slot-rebuild pass; the theme-change handler is
+guarded during a programmatic flip so the restored layout_overrides are
+never wiped; a cross-personality theme pick routes through switch_preset
+and lands ON the picked theme, seeding the target's stash; a
+same-personality pick leaves slots and overrides alone.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -63,22 +60,18 @@ class _FlipCase(unittest.TestCase):
         config.SETTINGS_FILE = Path(self._tmp.name) / "settings.toml"
         theming.manager().refresh()
         layout_module.manager().refresh()
-        # Suppress the REAL app-wide QSS pushes for the whole case
-        # (test_restyle_coalesce's spy pattern): this deep into the suite
-        # dozens of earlier tests' closed-but-alive windows are still
-        # polishable, so every real push repolishes all of them — seconds
-        # each, minutes per file. Nothing here reads the pushed QSS;
-        # restyle COUNTS are asserted against a nested spy where they
-        # matter, and manager/widget state stays fully real.
+        # Suppress the real app-wide QSS pushes (test_restyle_coalesce's
+        # spy pattern): earlier tests' closed-but-alive windows are still
+        # polishable, so every real push repolishes all of them. Restyle
+        # COUNTS are asserted against a nested spy; state stays real.
         mock.patch.object(self.app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
         self.w = None
 
     def tearDown(self) -> None:
         if self.w is not None:
-            # Detach the window from the global manager BEFORE later tests
-            # apply themes — a closed-but-alive window still listens and
-            # would route flips against a stale settings object.
+            # detach before later tests apply themes — a closed-but-alive
+            # window still listens and would flip a stale settings object
             try:
                 theming.manager().theme_changed.disconnect(
                     self.w._on_theme_changed)
@@ -86,26 +79,20 @@ class _FlipCase(unittest.TestCase):
                 pass
             self.w.close()
             # close() alone leaks the C++ widget tree (~400 widgets a
-            # window) until Python GC gets around to it — and every
-            # app-wide restyle repolishes every leaked window, turning a
-            # restyle-heavy file like this one quadratic. deleteLater
-            # destroys the tree on the GUI thread once the qWait below
-            # turns the loop.
+            # window) until GC, and every restyle repolishes every leaked
+            # window — quadratic. deleteLater + the qWait destroys it.
             self.w.deleteLater()
             self.w = None
         QTest.qWait(30)
         config.SETTINGS_FILE = self._orig_settings_file
-        # Reset the global theming state the flips touched.
         mgr = theming.manager()
         mgr.set_user_override("radius", None)
         theming.set_case_override("")
         mgr.apply_bundle(slug="brutalist-mono", font_family="", font_size=0)
         layout_module.manager().apply("classic", {})
         QTest.qWait(30)   # drain the queued restyles into THIS test
-        # A stray worker delivery (an earlier file's adaptive palette
-        # landing late) can call replace_dynamic_tokens mid-drain and
-        # queue one more flush right as qWait returns. Don't export it —
-        # the restyle-count tests downstream would see a phantom push.
+        # a late palette worker can queue one more flush as qWait returns;
+        # don't export it — downstream counts would see a phantom push
         for _ in range(10):
             if not mgr._restyle_scheduled:
                 break
@@ -156,22 +143,20 @@ class SwitchPresetTests(_FlipCase):
                          "flip must rebuild slots in exactly one pass")
 
     def test_first_visit_to_modern_wears_modern_slots(self) -> None:
-        # No modern stash: the flip seeds the builtin theme's [slots] as
-        # overrides so modern doesn't wear brutalist blocks forever.
+        # no modern stash: the flip seeds the builtin theme's [slots] as
+        # overrides so modern doesn't wear brutalist blocks forever
         s = _brutalist_settings()
         w = self._make_window(s)
         w.switch_preset("modern")
         self.assertEqual(s.layout_overrides.get("progress"), "bar")
-        # v2.0 phase 3: modern's builtin theme seeds the SpringSlider
-        # volume face (adaptive theme.toml [slots]).
         self.assertEqual(s.layout_overrides.get("volume"), "spring")
         self.assertEqual(w._slot_progress, "bar")
         self.assertEqual(w._slot_controls, "large")
 
     def test_flip_roundtrip_keeps_layout_overrides(self) -> None:
-        # The guard: apply_bundle's theme_changed lands back in
+        # the guard: apply_bundle's theme_changed lands back in
         # _on_theme_changed mid-flip; without the flag the slot-prefs
-        # handler would reset the restored overrides to the new theme's.
+        # handler would reset the restored overrides to the new theme's
         s = _brutalist_settings()
         w = self._make_window(s)
         w.switch_preset("modern")
@@ -240,12 +225,9 @@ class ThemePickTests(_FlipCase):
                          "flip must land ON the picked theme, not the "
                          "personality's builtin default")
         self.assertEqual(theming.manager().current().slug, "nord")
-        # First visit: nord's [slots] prefs seed the overrides (the one
-        # good part of the old behavior, kept).
         self.assertEqual(s.layout_overrides.get("progress"), "bar")
         self.assertEqual(w._slot_progress, "bar")
         self.assertEqual(w._slot_volume, "knob")
-        # The brutalist side kept its own theme + tweaks for the way back.
         self.assertEqual(s.preset_state["brutalist"]["theme"], "gruvbox")
         self.assertEqual(
             s.preset_state["brutalist"]["layout_overrides"],
@@ -270,8 +252,8 @@ class ThemePickTests(_FlipCase):
         self.assertEqual(w._slot_volume, "wedge")
 
     def test_pick_without_active_preset_does_nothing(self) -> None:
-        # Pre-adoption config (preset "") — the handler must not invent a
-        # flip; bootstrap adoption owns that transition.
+        # pre-adoption config (preset "") — the handler must not invent a
+        # flip; bootstrap adoption owns that transition
         s = _brutalist_settings()
         s.preset = ""
         s.preset_state.clear()
@@ -285,8 +267,7 @@ class ThemePickTests(_FlipCase):
     def test_cross_pick_defers_the_flip_out_of_the_emission(self) -> None:
         # switch_preset runs a theme apply; nested inside theme_changed
         # delivery it would resume the outer emission with the stale
-        # pre-flip theme for every later-connected subscriber. The flip
-        # must land on its own event-loop turn instead.
+        # pre-flip theme. The flip lands on its own event-loop turn.
         s = _brutalist_settings()
         w = self._make_window(s)
         QTest.qWait(30)
@@ -298,9 +279,8 @@ class ThemePickTests(_FlipCase):
         self.assertEqual(s.theme, "nord")
 
     def test_superseded_cross_pick_does_not_flip(self) -> None:
-        # A cross-aesthetic pick immediately overridden by a same-
-        # personality pick in the same turn: by the time the deferred
-        # flip runs it's stale and must stand down.
+        # a cross-aesthetic pick overridden in the same turn: the
+        # deferred flip is stale by the time it runs and must stand down
         s = _brutalist_settings()
         w = self._make_window(s)
         QTest.qWait(30)
@@ -312,10 +292,9 @@ class ThemePickTests(_FlipCase):
 
 
 class DialogInterplayTests(_FlipCase):
-    """The settings dialog previews every theme selection through the
-    live manager. While it's open a cross-aesthetic slug is a PREVIEW —
-    never a flip, never a disk write; the accept path reconciles the
-    final pick instead."""
+    """While the settings dialog is open a cross-aesthetic slug is a
+    PREVIEW — never a flip, never a disk write; the accept path
+    reconciles the final pick instead."""
 
     def test_preview_while_dialog_open_never_flips(self) -> None:
         s = _brutalist_settings()
@@ -338,7 +317,7 @@ class DialogInterplayTests(_FlipCase):
 
     def test_cancel_style_revert_leaves_zero_trace(self) -> None:
         # _on_cancel re-applies the initial theme while the dialog is
-        # still up — that revert must not flip or persist either.
+        # still up — that revert must not flip or persist either
         s = _brutalist_settings()
         w = self._make_window(s)
         QTest.qWait(30)
@@ -357,8 +336,8 @@ class DialogInterplayTests(_FlipCase):
         self.assertFalse(config.SETTINGS_FILE.exists())
 
     def test_flip_deferred_past_dialog_open_stands_down(self) -> None:
-        # Emission before the flag, timer after: the deferred closure
-        # re-checks and must not flip under an open dialog.
+        # emission before the flag, timer after: the deferred closure
+        # re-checks and must not flip under an open dialog
         s = _brutalist_settings()
         w = self._make_window(s)
         QTest.qWait(30)
@@ -393,7 +372,6 @@ class DialogAcceptReconcileTests(_FlipCase):
             new.preset_state["brutalist"]["theme"], "terminal-green")
         self.assertEqual(
             new.preset_state["brutalist"]["corner_style"], "rounded")
-        # Persisted: the next launch's stash matches the accepted edits.
         back = settings_module.load()
         self.assertEqual(
             back.preset_state["brutalist"]["theme"], "terminal-green")
@@ -406,35 +384,31 @@ class DialogAcceptReconcileTests(_FlipCase):
         new.motion = "lite"                 # tweaked in the dialog too
         w._settings = new
         w._reconcile_preset_after_dialog(s, new)
-        # Same semantics as a live cross-personality pick: land ON the
-        # picked theme wearing the target's state (builtin defaults on
-        # this first visit), never the outgoing widget bundle.
+        # same semantics as a live cross pick: land ON the picked theme
+        # wearing the target's state, never the outgoing widget bundle
         self.assertEqual(new.preset, "modern")
         self.assertEqual(new.theme, "nord")
         self.assertEqual(new.motion, "full")          # modern builtin
         self.assertEqual(new.corner_style, "soft")
         self.assertEqual(new.layout_overrides.get("progress"), "bar")
         self.assertEqual(theming.manager().current().slug, "nord")
-        # The dialog's widget edits stay with the outgoing personality —
-        # they were made looking at its values. The theme pick itself
-        # rides to the target; brutalist keeps the theme it wore.
+        # the dialog's widget edits stay with the outgoing personality —
+        # they were made looking at its values; only the theme pick
+        # rides to the target
         self.assertEqual(new.preset_state["brutalist"]["theme"], "gruvbox")
         self.assertEqual(new.preset_state["brutalist"]["motion"], "lite")
         self.assertEqual(
             new.preset_state["brutalist"]["layout_overrides"],
             {"progress": "dotted"})
-        # An explicit chooser pick this is not.
         self.assertFalse(new.preset_chosen)
-        # Persisted.
         back = settings_module.load()
         self.assertEqual(back.preset, "modern")
         self.assertEqual(back.theme, "nord")
         self.assertEqual(back.preset_state["brutalist"]["theme"], "gruvbox")
 
     def test_cross_accept_keeps_targets_remembered_tweaks(self) -> None:
-        # Modern was visited before and remembers its own look — an
-        # accepted theme pick updates ONLY its theme, exactly like the
-        # live path (the anti-chimera property the reviewers pinned).
+        # a visited modern remembers its own look — an accepted pick
+        # updates ONLY its theme, exactly like the live path
         s = _brutalist_settings()
         s.preset_state["modern"] = {
             "theme": "abyss",
@@ -452,9 +426,8 @@ class DialogAcceptReconcileTests(_FlipCase):
                          "the dialog's outgoing widget bundle")
 
     def test_flip_back_restores_the_dialog_edits(self) -> None:
-        # End-to-end: accept a cross-aesthetic pick, then flip back —
-        # brutalist returns wearing its own theme plus the edits the
-        # user made in that dialog session.
+        # accept a cross pick, then flip back: brutalist returns wearing
+        # its theme plus that session's dialog edits
         s = _brutalist_settings()
         w = self._make_window(s)
         new = self._accepted_copy(s)
@@ -468,7 +441,6 @@ class DialogAcceptReconcileTests(_FlipCase):
         self.assertEqual(new.theme, "gruvbox")
         self.assertEqual(new.corner_style, "rounded")
         self.assertEqual(new.layout_overrides, {"progress": "dotted"})
-        # And modern remembered the accepted pick for the way forward.
         self.assertEqual(new.preset_state["modern"]["theme"], "nord")
 
     def test_pre_adoption_accept_is_a_noop(self) -> None:

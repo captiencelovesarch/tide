@@ -17,19 +17,13 @@ Design contract:
   * Reduced-motion detection: env var ``QT_REDUCED_MOTION=1`` or Qt's
     ``QStyleHints.uiEffectsEnabled() == False`` clamps FULL to LITE. An
     explicit OFF is never overridden — the user always wins downward.
-  * Motion profiles (P3): durations + easings are data, keyed by profile.
-    ``mechanical`` is the brutalist dialect (short, decisive, no bounce)
-    and is byte-for-byte the pre-P3 constants. ``springy`` is the modern
-    dialect — slightly longer, OutBack-family overshoot where it's safe.
-    The dialect belongs to the PERSONALITY, not to the intensity:
-    ``bind_preset(settings.preset)`` picks it (modern → springy, anything
-    else → mechanical) and intensity only says how much motion runs. A
-    brutalist user who turns motion up to full gets more animation, never
-    bounce. ``set_profile`` pins a dialect for tests/embedders; with
-    nothing bound at all the profile falls back to following intensity.
-    Callers ask for ``dur("short")`` / ``ease("out")`` instead of
-    hardcoding; the legacy ``DUR_*`` / ``EASE_*`` constants remain as
-    mechanical aliases.
+  * Motion profiles (P3): durations + easings are data, keyed by
+    profile — ``mechanical`` (brutalist; byte-for-byte the pre-P3
+    constants) and ``springy`` (modern). The dialect follows the
+    PERSONALITY, never the intensity: a brutalist user at FULL gets more
+    animation, never bounce. ``bind_preset(settings.preset)`` picks it;
+    ``set_profile`` pins one for tests/embedders; unbound falls back to
+    following intensity. Callers ask ``dur("short")`` / ``ease("out")``.
   * Idempotent helpers. Each helper takes (or implicitly uses) a target
     widget and registers its in-flight animation under
     ``target._motion_anims[kind]``. A subsequent call with the same
@@ -166,22 +160,16 @@ def _curve(curve_type, overshoot: Optional[float] = None) -> QEasingCurve:
     return c
 
 
-# Duration keys (ms):
-#   micro — hover, focus, button micro
-#   short — toast, dialog fade, view crossfade, basic slides
-#   med   — signature: album art crossfade, title scramble
-#   long  — rarely used directly — reserved for special atmospherics
-# Easing keys (semantic, so a profile can swap curve families):
-#   linear     — even progress (spinners, meters)
-#   out        — the everyday decelerate; safe on opacity in every profile
-#   out_strong — heavier arrival (color glides, big moves); opacity-safe
-#   in_out     — both-ends easing for repositioning
-#   spring     — settles into place. Mechanical: decisive, no bounce.
-#     Springy: OutBack overshoot — ONLY for positions/values, never opacity.
+# Duration keys (ms): micro — hover/focus;  short — toast, dialog fade,
+# crossfade, slides;  med — signature (art crossfade, title scramble);
+# long — reserved for atmospherics.
+# Easing keys (semantic so a profile can swap curve families): linear;
+# out — everyday decelerate, opacity-safe;  out_strong — heavier
+# arrival, opacity-safe;  in_out — repositioning;  spring — settles;
+# springy's OutBack overshoots: positions/values ONLY, never opacity.
 PROFILES: dict = {
-    # The brutalist dialect. These are exactly the pre-P3 constants —
-    # short and decisive; anything longer drifts into "soft / decorative"
-    # territory, and bounce is against the law here.
+    # The brutalist dialect — byte-for-byte the pre-P3 constants, short
+    # and decisive, no bounce.
     "mechanical": {
         "dur": {"micro": 120, "short": 200, "med": 350, "long": 600},
         "ease": {
@@ -192,10 +180,8 @@ PROFILES: dict = {
             "spring": _curve(QEasingCurve.OutQuad),
         },
     },
-    # The modern dialect. A touch longer so the overshoot has room to
-    # read; Back-family curves carry the spring. Overshoot 1.70158 is
-    # Qt's default (~10% past target) — enough to feel alive without
-    # turning the UI into a bouncy castle.
+    # The modern dialect — a touch longer so the overshoot has room to
+    # read. 1.70158 is Qt's default overshoot (~10% past target).
     "springy": {
         "dur": {"micro": 150, "short": 260, "med": 420, "long": 700},
         "ease": {
@@ -209,9 +195,7 @@ PROFILES: dict = {
 }
 
 
-# Which dialect each personality speaks. Anything not listed (a
-# third-party preset id) speaks mechanical: bounce is opt-in, never
-# something a preset gets by accident.
+# Unlisted preset ids (third-party) speak mechanical — bounce is opt-in.
 PRESET_PROFILES: dict = {
     "brutalist": "mechanical",
     "modern": "springy",
@@ -223,9 +207,8 @@ _preset_profile: Optional[str] = None
 
 
 def set_profile(name: Optional[str]) -> None:
-    """Pin the active profile regardless of personality or intensity, or
-    ``None`` to go back to following the bound personality. Unknown names
-    raise — a typo here would silently change the whole app's feel."""
+    """Pin the active profile, or ``None`` to follow the bound personality.
+    Unknown names raise — a typo would silently change the app's feel."""
     global _profile_override
     if name is not None and name not in PROFILES:
         raise ValueError(f"unknown motion profile: {name!r}")
@@ -234,14 +217,7 @@ def set_profile(name: Optional[str]) -> None:
 
 def bind_preset(preset_id: Optional[str]) -> None:
     """Bind the dialect to the active personality (``presets.apply_preset``
-    and the live motion apply both call this).
-
-    This is the whole reason bounce can't leak: intensity is an
-    independent user setting, so binding springy to FULL would hand the
-    brutalist personality OutBack overshoot the moment someone turned
-    motion up. The personality decides the dialect; the intensity decides
-    how much of it runs. ``None``/empty unbinds (back to the
-    intensity-following fallback)."""
+    and the live motion apply call this). ``None``/empty unbinds."""
     global _preset_profile
     if not preset_id:
         _preset_profile = None
@@ -250,19 +226,14 @@ def bind_preset(preset_id: Optional[str]) -> None:
 
 
 def bound_profile() -> Optional[str]:
-    """The dialect bound to the active personality, or ``None`` if nothing
-    has been bound yet. Surfaced for tests / diagnostics."""
+    """The personality-bound dialect, or ``None``. For tests/diagnostics."""
     return _preset_profile
 
 
 def profile() -> str:
-    """Name of the active profile: an explicit pin, else the personality's
-    dialect, else (nothing bound) intensity's fallback.
-
-    Reduced motion always lands on mechanical — overshoot is precisely
-    what that signal asks us to drop — and it outranks the personality
-    binding. An explicit ``set_profile`` pin still wins, because it exists
-    for tests and embedders that mean it."""
+    """Active profile: an explicit pin, else mechanical under reduced
+    motion (overshoot is exactly what that signal asks us to drop), else
+    the personality's dialect, else intensity's fallback."""
     if _profile_override is not None:
         return _profile_override
     if _reduced_motion:
@@ -289,8 +260,8 @@ _dur = dur
 _ease = ease
 
 
-# Legacy aliases (external compat). Always the mechanical values — code
-# that wants profile-aware timing calls dur()/ease() instead.
+# Legacy aliases (external compat) — always mechanical; profile-aware
+# code calls dur()/ease() instead.
 DUR_MICRO = PROFILES["mechanical"]["dur"]["micro"]
 DUR_SHORT = PROFILES["mechanical"]["dur"]["short"]
 DUR_MED = PROFILES["mechanical"]["dur"]["med"]
@@ -576,9 +547,8 @@ def value_lerp(
     owner: Optional[QObject] = None,
     kind: str = "value",
 ) -> Optional[QVariantAnimation]:
-    """Interpolate a float from ``start`` to ``end``, calling ``on_update``
-    per frame. The numeric sibling of ``color_lerp`` — scroll positions,
-    heights, handle offsets. OFF snaps: ``on_update(end)`` synchronously."""
+    """Interpolate a float, calling ``on_update`` per frame — the numeric
+    sibling of ``color_lerp``. OFF snaps: ``on_update(end)`` synchronously."""
     _cancel_prior(owner, kind)
     if intensity() == Intensity.OFF:
         on_update(float(end))
@@ -625,12 +595,9 @@ def spring_settle(
     owner: Optional[QObject] = None,
     kind: str = "spring",
 ) -> Optional[QVariantAnimation]:
-    """Settle a numeric value into place with the profile's ``spring``
-    curve — the SpringSlider's release/jump animation. Gated by
-    construction: OFF snaps synchronously; LITE settles on the mechanical
-    curve (decisive, no bounce); FULL overshoots and springs back.
-    ``on_update`` may receive values past ``end`` mid-flight (that IS the
-    overshoot) — only use for positions/values, never opacity."""
+    """Settle a value with the profile's ``spring`` curve (the
+    SpringSlider's release). OFF snaps; springy overshoots — ``on_update``
+    may see values past ``end``, so positions/values only, never opacity."""
     return value_lerp(
         start,
         end,
@@ -651,11 +618,8 @@ def nudge(
     dur: Optional[int] = None,
     on_done: Optional[Callable[[], None]] = None,
 ) -> Optional[QPropertyAnimation]:
-    """Purely decorative press-feedback bump: shifts ``widget`` by
-    ``(dx, dy)`` and springs it straight back to where it started.
-    Atmospheric tier — a no-op below FULL (``on_done`` still fires), so
-    callers can sprinkle it without their own gating. The widget ends
-    exactly where it began, so layouts stay honest."""
+    """Decorative press bump: shift by ``(dx, dy)`` and spring straight
+    back. Atmospheric tier — a no-op below FULL (``on_done`` still fires)."""
     _cancel_prior(widget, "nudge")
     if intensity() != Intensity.FULL:
         if on_done:
@@ -782,11 +746,8 @@ def crossfade_stack(
     opacity animation) and works for any QStackedWidget children — no
     requirement that pages implement a paint-friendly base class.
 
-    ``overshoot=True`` opts into the springy dialect's flourish: the
-    outgoing snapshot lifts away with a spring while it fades. Gated by
-    construction — it only exists when the active profile is springy
-    (i.e. FULL intensity, not reduced-motion-clamped); mechanical gets
-    the plain crossfade regardless.
+    ``overshoot=True``: springy-only — the outgoing snapshot lifts away
+    with a spring while it fades; mechanical stays plain.
     """
     if stack.currentIndex() == target_idx:
         if on_done:

@@ -1,11 +1,8 @@
-"""Single-instance guard over QLocalServer — real sockets, no mocks.
-
-QLocalServer works headless, so these tests bind actual local sockets
-(under the conftest-sandboxed config dir's derived name) and exercise the
-whole handshake: second acquire loses, notify_running delivers command
-lines to on_message, a crashed instance's stale socket file is taken
-over, and the server name tracks tide.config at call time so a
-redirected config dir can't collide with the real one.
+"""Single-instance guard over QLocalServer — real sockets, no mocks:
+second acquire loses, notify_running delivers command lines to
+on_message, a crashed instance's stale socket file is taken over, and
+the server name tracks tide.config at call time so a redirected config
+dir can't collide with the real one.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -110,7 +107,6 @@ class AcquireTest(unittest.TestCase):
         self.assertEqual(got, ["raise", "play-pause", "raise"])
 
     def test_notify_without_listener_reports_failure(self):
-        # No guard held anywhere → nothing to deliver to.
         self.assertFalse(instance.notify_running("raise", timeout_ms=200))
 
     def test_unterminated_command_delivered_on_hangup(self):
@@ -204,7 +200,6 @@ class StaleSocketTest(unittest.TestCase):
         guard = instance.acquire(got.append)
         self.assertIsNotNone(guard, "acquire must evict a dead socket")
         self._guards.append(guard)
-        # And the takeover must actually work end to end.
         self.assertTrue(instance.notify_running("raise"))
         self.assertTrue(_pump(lambda: got))
         self.assertEqual(got, ["raise"])

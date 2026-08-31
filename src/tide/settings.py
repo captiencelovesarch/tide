@@ -139,10 +139,8 @@ class Settings:
     local_music_dir: str = ""
     local_auto_index: bool = True
     # v1.2.1 — Spotify (Librespot backend)
-    # (A spotify_client_id field lived here through v1.x but nothing ever
-    # read it — the sign-in dialog keeps its own field and auth_spotify
-    # resolves the effective id itself. Deleted in 2.0; load()'s
-    # unknown-key filter silently drops the stale key from old files.)
+    # (spotify_client_id lived here through v1.x, unread; deleted in 2.0
+    # — load()'s unknown-key filter drops the stale key from old files)
     # Audio quality: 96 / 160 / 320 kbps (320 requires Premium tier).
     spotify_bitrate: int = 320
     # Pulse/Pipe sink name passed to librespot. Empty = default sink.
@@ -198,38 +196,26 @@ class Settings:
     # Fullscreen backdrop swells with the bass envelope (shares the mini's
     # capture consumer; only runs while the window is up).
     fullscreen_pulse: bool = True
-    # v2.0 phase 2 — the keymap editor's bindings: action id -> key
-    # sequence string (e.g. "play_pause" -> "Space"). A missing action
-    # means "use the default binding". Global on purpose — muscle memory
-    # doesn't flip with the personality, so this is NOT a preset stash
-    # field.
+    # v2.0 keymap editor bindings: action id -> key sequence; missing =
+    # the default binding. Global — muscle memory doesn't flip with the
+    # personality, so NOT a preset stash field.
     keymap: dict = field(default_factory=dict)
-    # v2.0 phase 2 — the glyph editor's per-glyph overrides: glyph key
-    # (tide.glyphs.KEYS) -> replacement string (1-3 chars). Glyphs are
-    # chrome and chrome is personality, so this one IS in
-    # presets.STASH_FIELDS and round-trips on a flip.
+    # v2.0 glyph editor overrides: glyph key (tide.glyphs.KEYS) -> 1-3
+    # char string. Chrome flips, so this IS in presets.STASH_FIELDS.
     glyph_overrides: dict = field(default_factory=dict)
-    # v2.0 "two tides" — personality presets. ``preset`` is the active
-    # personality id: "" (pre-2.0 config that was never adopted),
-    # "brutalist", or "modern". ``preset_chosen`` flips True only on an
-    # EXPLICIT pick in the chooser/onboarding — silently adopting an
-    # upgrader's existing look keeps it False so the chooser can still
-    # offer itself later.
+    # v2.0 personality presets. ``preset`` is the active id: "" (pre-2.0
+    # config never adopted), "brutalist", or "modern". ``preset_chosen``
+    # flips True only on an EXPLICIT pick — silent adoption keeps it
+    # False so the chooser can still offer itself later.
     preset: str = ""
     preset_chosen: bool = False
-    # Per-personality stash of the look/feel fields (presets.STASH_FIELDS):
-    # preset id -> {settings field -> stashed value}. Switching
-    # personalities round-trips through here so each side keeps its own
-    # tweaks instead of resetting to the builtin defaults every time.
+    # Per-personality stash (presets.STASH_FIELDS): preset id ->
+    # {settings field -> stashed value}. Flips round-trip through here.
     preset_state: dict = field(default_factory=dict)
-    # v2.0 phase 4 — the theme picker's escape hatch. By default the
-    # appearance tab lists only themes whose [meta] aesthetic matches the
-    # active personality (5 brutalist / 11 modern today); ticking this
-    # shows the whole catalog. Picking across the line still means "take
-    # me to the other tide" — window._maybe_apply_theme_slot_prefs /
-    # _reconcile_preset_after_dialog own that flip, unchanged.
-    # Deliberately NOT a presets.STASH_FIELD: this is a preference about
-    # the PICKER, not part of either personality's look.
+    # v2.0 theme picker escape hatch: list the whole catalog, not just
+    # the personality's aesthetic. A cross-line pick still flips the tide
+    # (window._reconcile_preset_after_dialog). NOT a stash field — about
+    # the picker, not part of either look.
     theme_picker_show_all: bool = False
     # Remembered main-window size per layout: layout slug -> [w, h].
     window_sizes: dict = field(default_factory=dict)
@@ -270,11 +256,9 @@ def _to_toml(s: Settings) -> str:
     for f in fields(s):
         val = getattr(s, f.name)
         if isinstance(val, dict):
-            # Serialize as a [table] at the bottom. Scalar/list entries sit
-            # right under the header; dict values (preset_state's per-preset
-            # stashes) become [field.sub] sub-tables. Sub-tables must trail
-            # the scalars — toml assigns everything after a sub-header to
-            # that sub-table.
+            # Serialize as a [table] at the bottom; dict values (preset
+            # stashes) become [field.sub] sub-tables, which must trail the
+            # scalars — toml assigns everything after a sub-header to it.
             tables.append(f"\n[{f.name}]")
             subs: list[str] = []
             for k, v in val.items():
@@ -387,14 +371,10 @@ def save(s: Settings) -> None:
 
 
 def save_fields(s: Settings, *names: str) -> None:
-    """Load-modify-save: re-parse the file on disk and copy ONLY the named
-    fields from ``s`` onto that fresh copy before writing it back.
-
-    Concurrent savers (main window, mini, the preset switcher) each hold
-    their own stale ``Settings`` object — a whole-object ``save()`` from
-    one silently reverts whatever another wrote in between. Merging at the
-    field level fixes that last-writer-wins clobber. Falls back to a full
-    ``save(s)`` when there's nothing parseable on disk to merge into.
+    """Load-modify-save: re-parse the disk file and copy ONLY the named
+    fields from ``s`` onto it. Concurrent savers hold stale ``Settings``
+    objects — a whole-object ``save()`` from one reverts what another
+    wrote in between. Full ``save(s)`` when nothing on disk parses.
     """
     known = {f.name for f in fields(Settings)}
     unknown = [n for n in names if n not in known]
@@ -418,11 +398,10 @@ def save_fields(s: Settings, *names: str) -> None:
 
 
 def ensure_v1_backup() -> None:
-    """One-shot downgrade shield for 2.0: archive the last 1.x settings
-    file as settings.toml.v1.bak before the preset fields ever land in it.
-    A 1.x tide run after a 2.0 one drops every unknown key on its next
-    save(), so without this a downgrade would silently shed the whole
-    preset state. Best-effort — never raises."""
+    """One-shot downgrade shield: archive the last 1.x settings file as
+    settings.toml.v1.bak before preset fields land in it — a 1.x run
+    after a 2.0 one drops unknown keys on its next save(), silently
+    shedding the preset state. Best-effort — never raises."""
     try:
         path = config.SETTINGS_FILE
         v1 = path.with_name(path.name + ".v1.bak")

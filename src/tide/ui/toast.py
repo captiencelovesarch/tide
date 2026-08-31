@@ -133,9 +133,8 @@ class Toast(QFrame):
             QTimer.singleShot(self._lifetime_ms, self.dismiss)
 
     # ---------- animation ----------
-    # Everything routes through the motion module: intensity OFF means the
-    # toast appears at its resting spot and vanishes on dismiss — zero
-    # animation objects, which is the brutalist contract.
+    # All through the motion module: at intensity OFF the toast appears at
+    # its resting spot and vanishes on dismiss — zero animation objects.
 
     def _slide_in(self) -> None:
         target = self._target_position()
@@ -143,9 +142,7 @@ class Toast(QFrame):
         # Not shown yet (motion.fade_in calls show), so this pre-placement
         # never paints — at OFF the slide immediately re-moves to target.
         self.move(start)
-        # "spring" easing: mechanical profile lands decisively; springy
-        # pops a touch past the resting spot and settles — the modern
-        # dialect's hello.
+        # spring ease: mechanical lands decisively; springy pops past + settles.
         motion_module.slide(
             self, start, target, easing=motion_module.ease("spring"),
         )

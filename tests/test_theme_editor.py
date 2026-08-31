@@ -1,22 +1,11 @@
-"""ThemeEditorDialog — the phase-2 token/color editor.
-
-What's pinned here:
-- edits preview live through the theming manager's STICKY user layer
-  (deferred restyles only — no synchronous app-wide QSS push);
-- the swatch click DEFERS its QColorDialog out of the click emission
-  (the modal-from-click segfault rule);
-- open → edit → cancel leaves ZERO trace: manager override layer, user
-  font/size/case, current slug, the themes dir and settings.toml all
-  exactly as they were — including pre-existing sticky overrides, which
-  must be restored, not removed;
-- open → edit → [save as my theme] persists EXACTLY the intended
-  artifact: one theme dir (toml + verbatim qss) with the edits baked in
-  and everything else copied from the base, the manager refreshed and
-  landed on the new slug, the preview override layer back to its
-  pre-open state — and settings.toml still untouched (persisting
-  settings.theme is the caller's job);
-- slug collisions suffix (including against bundled slugs — a user
-  theme can never shadow shipped nord).
+"""ThemeEditorDialog — the phase-2 token/color editor. Edits preview
+live through the manager's STICKY user layer (deferred restyles only);
+the swatch click defers its QColorDialog out of the click emission (the
+modal-from-click segfault rule); cancel leaves zero trace and restores
+pre-existing sticky overrides; [save as my theme] writes one theme dir,
+refreshes the manager onto the new slug, and never touches
+settings.toml (persisting settings.theme is the caller's job); slug
+collisions suffix and never shadow a bundled slug.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_theme_editor.py
 """
@@ -45,23 +34,20 @@ class _EditorCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.app = _app()
-        # Hermetic disk: a fresh user-themes dir + settings path per test,
-        # patched the same way test_preset_flip patches SETTINGS_FILE.
+        # hermetic disk: fresh user-themes dir + settings path per test
         self._tmp = tempfile.TemporaryDirectory(prefix="tide-themeed-")
         self.addCleanup(self._tmp.cleanup)
         self._orig_user_dir = config.USER_THEMES_DIR
         config.USER_THEMES_DIR = Path(self._tmp.name) / "themes"
         self._orig_settings_file = config.SETTINGS_FILE
         config.SETTINGS_FILE = Path(self._tmp.name) / "settings.toml"
-        # Suppress REAL app-wide QSS pushes for the case (the established
-        # spy pattern) — leaked widgets from earlier suite files make
-        # every real push a quadratic repolish storm. Manager state stays
-        # fully real; only the final QApplication call is stubbed.
+        # suppress app-wide QSS pushes (test_preset_flip's spy pattern);
+        # manager state stays fully real
         mock.patch.object(self.app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
-        # Known-clean manager baseline. Both override layers cleared —
-        # apply() only drops the dynamic layer on a slug CHANGE, so a
-        # same-slug re-apply would leak an earlier test's tokens.
+        # known-clean baseline, both override layers cleared — apply()
+        # only drops the dynamic layer on a slug CHANGE, so a same-slug
+        # re-apply would leak an earlier test's tokens
         mgr = theming.manager()
         mgr.refresh()
         mgr._user_overrides.clear()
@@ -81,8 +67,8 @@ class _EditorCase(unittest.TestCase):
         mgr._dynamic_overrides.clear()
         theming.set_case_override("")
         mgr.apply_bundle(slug=self.BASE_SLUG, font_family="", font_size=0)
-        # Restore the real dirs BEFORE the final refresh so the manager
-        # forgets any tmp user theme a save test wrote.
+        # restore the real dirs BEFORE the final refresh so the manager
+        # forgets any tmp user theme a save test wrote
         config.USER_THEMES_DIR = self._orig_user_dir
         config.SETTINGS_FILE = self._orig_settings_file
         mgr.refresh()
@@ -122,8 +108,8 @@ class BuildTests(_EditorCase):
             self.assertIn(key, dlg.swatches)
 
     def test_seeds_show_what_is_on_screen(self) -> None:
-        # A pre-existing sticky override is part of "what I see" and must
-        # seed the row; dynamic (adaptive) overrides must NOT.
+        # a pre-existing sticky override is part of "what I see" and must
+        # seed the row; dynamic (adaptive) overrides must NOT
         mgr = theming.manager()
         mgr.set_user_override("accent", "#00ff00")
         mgr.override_tokens({"accent_alt_dynamic_ignore": "#123456"})
@@ -133,7 +119,6 @@ class BuildTests(_EditorCase):
         self.assertNotIn("accent_alt_dynamic_ignore", dlg.token_keys())
         base = mgr.current()
         self.assertEqual(dlg.current_tokens()["bg"], base.tokens["bg"])
-        # Typography + radius seed from the theme (no overrides set).
         self.assertEqual(dlg.size_spin.value(), 10)
         self.assertEqual(dlg.weight_combo.currentData(), 400)
         self.assertEqual(dlg.radius_spin.value(), 0)
@@ -148,8 +133,8 @@ class BuildTests(_EditorCase):
 
 class DeferredColorDialogTests(_EditorCase):
     def test_swatch_click_defers_the_color_dialog(self) -> None:
-        # Rule: any modal reachable from a click handler opens on the
-        # NEXT event-loop turn, never inside the click emission.
+        # any modal reachable from a click handler opens on the NEXT
+        # event-loop turn, never inside the click emission
         dlg = self._open()
         with mock.patch.object(
             theme_editor.QColorDialog, "getColor",
@@ -186,7 +171,6 @@ class LivePreviewTests(_EditorCase):
         self.assertEqual(mgr._user_overrides.get("accent"), "#ff0000")
         self.assertEqual(mgr.current_effective().token("accent"), "#ff0000")
         self.assertEqual(dlg.swatches["accent"].text(), "#ff0000")
-        # Preview only — nothing on disk.
         self.assertFalse(config.SETTINGS_FILE.exists())
         self.assertFalse(config.USER_THEMES_DIR.exists())
 
@@ -206,8 +190,8 @@ class LivePreviewTests(_EditorCase):
             theming.effective_radius_px(mgr.current_effective()), 9)
 
     def test_restyles_stay_deferred(self) -> None:
-        # The preview path must never push app QSS inside the calling
-        # turn — the manager's queue owns the flush.
+        # the preview path must never push app QSS inside the calling
+        # turn — the manager's queue owns the flush
         dlg = self._open()
         QTest.qWait(30)   # drain construction-time queue
         with mock.patch.object(self.app, "setStyleSheet") as spy:
@@ -237,9 +221,9 @@ class CancelTests(_EditorCase):
         QTest.qWait(30)
         self.assertEqual(self._manager_state(), before,
                          "cancel left preview state behind")
-        # Dynamic layer dropped before the effective read: a stray
-        # adaptive delivery from an earlier suite file could shadow the
-        # now-un-overridden accent (same hazard test_preset_flip drains).
+        # drop the dynamic layer before the effective read: a stray
+        # adaptive delivery from an earlier file could shadow the
+        # now-un-overridden accent (same hazard test_preset_flip drains)
         mgr = theming.manager()
         mgr._dynamic_overrides.clear()
         self.assertEqual(mgr.current_effective().token("accent"),
@@ -250,8 +234,8 @@ class CancelTests(_EditorCase):
                          "cancel wrote a theme dir")
 
     def test_cancel_restores_preexisting_sticky_overrides(self) -> None:
-        # The user's own sticky layer (corner style radius, an earlier
-        # accent tweak) must come BACK — not get removed with ours.
+        # the user's own sticky layer must come BACK — not get removed
+        # with ours
         mgr = theming.manager()
         mgr.set_user_override("accent", "#00ff00")
         mgr.set_user_override("radius", "6px")
@@ -266,9 +250,8 @@ class CancelTests(_EditorCase):
         self.assertEqual(mgr._user_overrides.get("radius"), "6px")
 
     def test_untouched_cancel_is_silent(self) -> None:
-        # Pinned on the manager call (not theme_changed emissions, which
-        # a stray adaptive delivery from another file could add to): a
-        # no-edit close must not cost a theme re-apply.
+        # pinned on the manager call, not theme_changed (a stray adaptive
+        # delivery could add emissions): no-edit close costs no re-apply
         dlg = self._open()
         QTest.qWait(30)
         mgr = theming.manager()
@@ -285,9 +268,8 @@ class CancelTests(_EditorCase):
         dlg.set_token("accent", "#ff0000")
         dlg.reject()
         QTest.qWait(20)
-        # Manager drifted after the dialog closed (adaptive, another
-        # tool). A second reject (window close after cancel) must not
-        # re-impose the stale snapshot.
+        # the manager drifted after close; a second reject (window close
+        # after cancel) must not re-impose the stale snapshot
         theming.manager().set_user_override("accent", "#abcdef")
         dlg.reject()
         QTest.qWait(20)
@@ -315,12 +297,10 @@ class SaveTests(_EditorCase):
         self.assertTrue((dest / "theme.qss").is_file())
         with open(dest / "theme.toml", "rb") as f:
             data = tomllib.load(f)
-        # Meta: user's name, aesthetic + dark inherited.
         self.assertEqual(data["meta"]["name"], "My Waves")
         self.assertEqual(data["meta"]["slug"], "my-waves")
         self.assertEqual(data["meta"]["aesthetic"], "brutalist")
         self.assertTrue(data["meta"]["dark"])
-        # Edited fields landed; everything else copied from the base.
         self.assertEqual(data["tokens"]["accent"], "#123456")
         self.assertEqual(data["tokens"]["bg"], base.tokens["bg"])
         self.assertEqual(data["tokens"]["border_dim"],
@@ -335,31 +315,26 @@ class SaveTests(_EditorCase):
         self.assertEqual(data["layout"]["list_marker"],
                          base.layout["list_marker"])
         self.assertEqual(data["slots"], dict(base.slots))
-        # QSS: a standalone copy of the base theme's full stylesheet.
-        # Bundled themes no longer ship a theme.qss file (they compose
-        # from themes/_base.qss at load — see test_qss_split), so the
-        # copy comes from Theme.qss and must never depend on _base.qss.
+        # QSS: a standalone copy of the base's full stylesheet. Bundled
+        # themes ship no theme.qss (they compose from _base.qss at load),
+        # so the copy comes from Theme.qss and must not depend on _base.qss.
         self.assertEqual(
             (dest / "theme.qss").read_text(encoding="utf-8"), base.qss)
-        # The manager refreshed and landed on the new theme…
         mgr = theming.manager()
         self.assertIn("my-waves", {t.slug for t in mgr.list_themes()})
         self.assertEqual(mgr.current().slug, "my-waves")
         # …with the preview layer gone: the accent now comes from the
-        # THEME, and the sticky layer is back to its pre-open state.
+        # THEME, and the sticky layer is back to its pre-open state
         self.assertEqual(mgr._user_overrides, pre_open["overrides"])
         self.assertEqual(mgr.user_font(), pre_open["font"])
         self.assertEqual(mgr.user_font_size(), pre_open["font_size"])
         self.assertEqual(theming.case_override(), pre_open["case"])
-        # The THEME carries the edit now (no override needed). Drop the
-        # dynamic layer before the effective read — a stray adaptive
-        # delivery from an earlier suite file can land mid-test and
-        # shadow an un-overridden token (the test_preset_flip teardown
-        # documents the same hazard).
+        # the THEME carries the edit now. Drop the dynamic layer before
+        # the effective read — a stray adaptive delivery can land
+        # mid-test and shadow an un-overridden token.
         self.assertEqual(mgr.current().tokens["accent"], "#123456")
         mgr._dynamic_overrides.clear()
         self.assertEqual(mgr.current_effective().token("accent"), "#123456")
-        # Settings stay the caller's problem — never written from here.
         self.assertFalse(config.SETTINGS_FILE.exists())
         self.assertEqual(dlg.saved_slug(), "my-waves")
 
@@ -372,7 +347,6 @@ class SaveTests(_EditorCase):
         QTest.qWait(30)
         self.assertEqual(got, ["plain-clone"])
         self.assertEqual(dlg.result(), ThemeEditorDialog.Accepted)
-        # A zero-edit save is a legit "clone the current look".
         dest = config.USER_THEMES_DIR / "plain-clone"
         with open(dest / "theme.toml", "rb") as f:
             data = tomllib.load(f)
@@ -390,7 +364,6 @@ class SaveTests(_EditorCase):
         self.assertEqual(theme.t("typography", "weight"), 600)
 
     def test_save_bakes_what_is_on_screen(self) -> None:
-        # A pre-existing sticky accent is part of the look being saved.
         theming.manager().set_user_override("accent", "#00ff00")
         QTest.qWait(20)
         dlg = self._open()
@@ -401,8 +374,8 @@ class SaveTests(_EditorCase):
                   "rb") as f:
             data = tomllib.load(f)
         self.assertEqual(data["tokens"]["accent"], "#00ff00")
-        # The untouched sticky override survives the accept (it's the
-        # user's state, not a preview of ours).
+        # the untouched sticky override survives the accept (user state,
+        # not our preview)
         self.assertEqual(
             theming.manager()._user_overrides.get("accent"), "#00ff00")
 
@@ -411,8 +384,6 @@ class SaveTests(_EditorCase):
         self.assertEqual(first.saved_slug(), "waves")
         first.deleteLater()
         QTest.qWait(20)
-        # Second save under the same name — the first one's dir (and its
-        # discovered slug) forces the suffix.
         dlg = self._open()
         dlg.name_edit.setText("waves")
         dlg.save_btn.click()
@@ -441,8 +412,8 @@ class SaveTests(_EditorCase):
         self.assertEqual(data["meta"]["name"], "my brutalist mono")
 
     def test_themes_dir_resolves_at_call_time(self) -> None:
-        # The dialog was built while USER_THEMES_DIR pointed at A; the
-        # save must land wherever tide.config points WHEN it runs.
+        # the dialog was built while USER_THEMES_DIR pointed elsewhere;
+        # the save must land wherever tide.config points WHEN it runs
         dlg = self._open()
         moved = Path(self._tmp.name) / "elsewhere"
         config.USER_THEMES_DIR = moved
@@ -452,8 +423,8 @@ class SaveTests(_EditorCase):
         self.assertTrue((moved / "late-bind" / "theme.toml").is_file())
 
     def test_write_failure_keeps_the_dialog_open(self) -> None:
-        # Point the themes dir at a FILE so mkdir fails: the dialog
-        # reports inline, stays open, and a later cancel still reverts.
+        # point the themes dir at a FILE so mkdir fails: the dialog
+        # reports inline, stays open, and a later cancel still reverts
         blocker = Path(self._tmp.name) / "blocked"
         blocker.write_text("not a dir")
         config.USER_THEMES_DIR = blocker

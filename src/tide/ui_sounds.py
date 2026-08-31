@@ -6,13 +6,11 @@ when the master toggle is off, when music is playing (set via ``set_muted``),
 or when the key has no WAV registered.
 
 WAVs live in ``tide/sounds/`` inside the package and ship with the wheel.
-Sound packs are subdirectories of that dir: ``set_pack("modern")`` resolves
-each key against ``sounds/modern/`` first and falls back to the default
-pack per key, so a pack only has to author the sounds it wants to change.
-``"default"`` (the initial pack) is the sounds dir itself. The loader is
-lenient: any missing file silently disables that key, so the feature
-degrades cleanly on a fresh checkout where the user hasn't authored every
-sound yet.
+Sound packs are subdirectories: ``set_pack("modern")`` resolves each key
+against ``sounds/modern/`` first, falling back per key to the default
+pack (the sounds dir itself), so a pack only authors what it changes.
+The loader is lenient: any missing file silently disables that key, so
+the feature degrades cleanly when not every sound is authored yet.
 
 Music-playing detection: ``app.py`` connects the playback router's
 ``state_changed`` signal to ``set_muted(state == PlayState.PLAYING)``,
@@ -129,11 +127,8 @@ class UiSoundPlayer(QObject):
 
     @Slot(str)
     def set_pack(self, name: str) -> None:
-        """Switch the active sound pack. ``"default"`` (or empty) is the
-        bundled sounds dir itself; any other name resolves against
-        ``sounds/<name>/`` with per-key fallback to default. Unknown pack
-        names just fall back everywhere — lenient like the rest of the
-        loader."""
+        """Switch the active sound pack. Unknown pack names just fall
+        back everywhere — lenient like the rest of the loader."""
         self._pack = str(name or "default")
         self._load()
 

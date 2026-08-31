@@ -1,19 +1,14 @@
 """v2.0 phase 4 — the chooser ("choose your tide").
 
-What's pinned here:
-- both panes build offscreen, standalone or inside the dialog;
-- each pane wears its OWN personality's real theme — proven by putting a
-  LIGHT theme on the app and rendering the panes anyway: the tokens that
-  come out of the paint are the panes' theme files, not the app's;
-- a click / Enter resolves to the right preset id, Esc resolves to
-  nothing at all;
-- the chooser never writes settings — the caller applies (tools emit,
-  callers persist);
-- brutalist never animates, modern's backdrop stops dead on hide/close,
-  and a backdrop frame never touches tokens or QSS.
+Pinned: both panes build offscreen, standalone or inside the dialog;
+each pane wears its OWN personality's real theme — proven by putting a
+light theme on the app and rendering the panes anyway; a click / Enter
+resolves to the right preset id, Esc resolves to nothing; the chooser
+never writes settings — the caller applies; brutalist never animates,
+modern's backdrop stops dead on hide/close, and a backdrop frame never
+touches tokens or QSS.
 
-Run offscreen:
-  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
+Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
 import os
 import sys
@@ -37,10 +32,8 @@ def _app() -> QApplication:
 
 
 class _ChooserCase(unittest.TestCase):
-    """Shared harness. Same shape as test_preset_flip's: hermetic
-    settings file, app-wide QSS pushes suppressed (this deep into the
-    suite every real push repolishes every leaked window), windows torn
-    down with deleteLater + a drained event loop."""
+    """The test_preset_flip-shaped harness: hermetic settings file, QSS
+    pushes suppressed, deleteLater + drained teardown."""
 
     def setUp(self) -> None:
         self.app = _app()
@@ -51,9 +44,8 @@ class _ChooserCase(unittest.TestCase):
         theming.manager().refresh()
         mock.patch.object(self.app, "setStyleSheet").start()
         self.addCleanup(mock.patch.stopall)
-        # The chooser is shown at startup, where motion is whatever the
-        # adopted preset set. Pin FULL so "brutalist is still anyway" is
-        # a real assertion and not an artifact of the ambient setting.
+        # pin FULL so "brutalist is still anyway" is a real assertion,
+        # not an artifact of whatever the adopted preset set
         self._orig_intensity = motion.intensity()
         motion.initialize("full")
         self._widgets: list = []
@@ -108,8 +100,8 @@ class BuildTests(_ChooserCase):
             self.assertTrue(pane.isVisible())
 
     def test_pane_builds_standalone(self) -> None:
-        # Phase 4B hosts this widget inside the onboarding wizard, with
-        # no ChooserDialog anywhere — it has to stand on its own.
+        # phase 4B hosts this widget inside the onboarding wizard, with
+        # no ChooserDialog anywhere — it has to stand on its own
         for preset_id in chooser.PANE_ORDER:
             pane = self._pane(preset_id)
             pane.resize(420, 520)
@@ -118,9 +110,8 @@ class BuildTests(_ChooserCase):
             self.assertEqual(pane.preset_id, preset_id)
 
     def test_compact_panes_fit_the_wizard_canvas(self) -> None:
-        # Phase 4B drops these into the 720x600 onboarding wizard. The
-        # roomy pane's ~480px minimum height doesn't fit there; compact
-        # is the same widget with less breathing room.
+        # phase 4B drops these into the 720x600 wizard; the roomy pane's
+        # ~480px minimum doesn't fit, compact is the same widget tighter
         for preset_id in chooser.PANE_ORDER:
             roomy = self._pane(preset_id)
             tight = chooser.PersonalityPane(preset_id, compact=True)
@@ -130,7 +121,6 @@ class BuildTests(_ChooserCase):
             self.assertLessEqual(tight.minimumSizeHint().width(),
                                  roomy.minimumSizeHint().width())
             self.assertLess(tight.minimumSizeHint().height(), 400)
-            # Still the same pitch, still commit-able.
             self.assertEqual(tight.preset_id, preset_id)
             self.assertIsNotNone(tight.theme)
 
@@ -167,9 +157,8 @@ class ThemeTests(_ChooserCase):
             self.assertEqual(pane.theme.aesthetic, preset_id)
 
     def test_tokens_reach_the_paint_not_the_app_theme(self) -> None:
-        # The money test: dress the APP in a light theme, then render the
-        # panes. If either of them picked up the app's palette instead of
-        # its own theme file, this fails.
+        # dress the APP in a light theme, then render the panes — a pane
+        # that picked up the app's palette instead of its theme file fails
         theming.manager().apply("paper")
         QTest.qWait(20)
         paper_bg = theming.manager().current().token("bg")
@@ -189,8 +178,8 @@ class ThemeTests(_ChooserCase):
                         "light app theme")
 
     def test_typography_is_the_themes_own(self) -> None:
-        # Every theme's base QSS carries a universal font rule, so the
-        # pane fonts have to ride in its own stylesheet to win.
+        # every theme's base QSS carries a universal font rule, so the
+        # pane fonts have to ride in its own stylesheet to win
         for preset_id in chooser.PANE_ORDER:
             pane = self._pane(preset_id)
             family = str(pane.theme.t("typography", "family", ""))
@@ -206,7 +195,6 @@ class ThemeTests(_ChooserCase):
                       modern._button.styleSheet().lower())
 
     def test_generated_art_needs_no_network_or_cache(self) -> None:
-        # A placeholder is drawn, never fetched: no art_cache, no QNAM.
         for preset_id in chooser.PANE_ORDER:
             pane = self._pane(preset_id)
             pm = chooser.placeholder_art(48, pane.theme, radius=6)
@@ -215,8 +203,8 @@ class ThemeTests(_ChooserCase):
 
     def test_preview_slider_leaves_the_theme_manager_alone(self) -> None:
         # _PreviewSpring shadows the manager's effective-theme accessor
-        # for exactly one paint. If that swap ever leaked, every widget
-        # in the app would start painting in the chooser's theme.
+        # for exactly one paint — a leaked swap would repaint the whole
+        # app in the chooser's theme
         mgr = theming.manager()
         theming.manager().apply("gruvbox")
         QTest.qWait(20)
@@ -259,10 +247,9 @@ class ThemeTests(_ChooserCase):
         self.fail("the brutalist mock lost its 'now playing' rule")
 
     def test_the_brutalist_rule_ignores_the_live_case_override(self) -> None:
-        # text_case_override is a per-personality STASH_FIELD, and
-        # theming's override beats any theme. An upgrader wearing "upper"
-        # would otherwise meet a brutalist pane shouting NOW PLAYING one
-        # line above a bullet promising lowercase mono.
+        # text_case_override is a per-personality stash field and
+        # theming's override beats any theme — an upgrader wearing
+        # "upper" would otherwise meet a pane shouting NOW PLAYING
         from tide import glyphs
         try:
             theming.set_case_override("upper")
@@ -280,8 +267,8 @@ class ThemeTests(_ChooserCase):
         self.assertTrue(heading.startswith("──"), heading)
 
     def test_the_apps_own_headings_still_follow_the_user(self) -> None:
-        # The preview escape is opt-in: ordinary chrome keeps obeying the
-        # override and the glyph pack exactly as before.
+        # the preview escape is opt-in: ordinary chrome keeps obeying the
+        # override and the glyph pack exactly as before
         from tide import glyphs
         from tide.ui.headings import line_heading
         try:
@@ -307,7 +294,7 @@ class ResolutionTests(_ChooserCase):
         modern = d.pane("modern")
         QTest.mouseClick(modern, Qt.LeftButton, pos=QPoint(6, 6))
         # choice() lands synchronously; the close + signal are deferred a
-        # turn so nothing tears the dialog down inside a click handler.
+        # turn so nothing tears the dialog down inside a click handler
         self.assertEqual(d.choice(), "modern")
         self.assertEqual(got, [])
         QTest.qWait(30)
@@ -373,8 +360,8 @@ class ResolutionTests(_ChooserCase):
         self.assertEqual(got, ["modern"])
 
     def test_the_chooser_never_writes_settings(self) -> None:
-        # Tools emit, callers persist. Nothing in here — construction,
-        # choosing, dismissing — may touch the settings file.
+        # nothing in here — construction, choosing, dismissing — may
+        # touch the settings file; the caller persists
         with mock.patch.object(settings_module, "save") as save, \
                 mock.patch.object(settings_module, "save_fields") as fields:
             d = self._dialog()
@@ -415,8 +402,8 @@ class MotionTests(_ChooserCase):
         self.assertGreater(pane._phase, 0.0, "the backdrop never ticked")
 
     def test_frames_never_touch_tokens_or_qss(self) -> None:
-        # theme_changed is a ~10Hz bus, not a frame clock. A backdrop
-        # frame is a float and an update(), full stop.
+        # theme_changed is a ~10Hz bus, not a frame clock — a backdrop
+        # frame is a float and an update(), full stop
         d = self._dialog()
         pane = d.pane("modern")
         mgr = theming.manager()
@@ -465,13 +452,11 @@ class MotionTests(_ChooserCase):
         finally:
             os.environ.pop("QT_REDUCED_MOTION", None)
             motion.initialize("full")
-        # And it still paints its gradient — stillness is not blankness.
         self.assertFalse(self._render(pane).isNull())
 
     def test_app_motion_off_does_not_still_the_modern_pitch(self) -> None:
-        # The panes preview their own personality's motion, not the
-        # app's: a brutalist user (motion off) still gets shown what
-        # modern actually looks like.
+        # the panes preview their own personality's motion, not the
+        # app's — a brutalist user still gets shown what modern looks like
         motion.set_intensity("off")
         pane = self._pane("modern")
         pane.resize(360, 460)

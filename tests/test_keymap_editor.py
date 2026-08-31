@@ -1,21 +1,11 @@
-"""Keymap editor + the ACTIONS shortcut table (v2.0 phase 2).
-
-What's pinned here:
-- the ACTIONS table carries every v1 shortcut with its exact default —
-  the full id→sequence map is asserted so no binding can silently
-  regress out of the extraction;
-- _wire_shortcuts builds from the table, rebind_shortcuts applies a
-  changed settings.keymap to the live QShortcuts without a restart, and
-  an empty-string binding really unbinds;
-- tooltips (shuffle / repeat / sleep / fullscreen) and the audio-fx
-  popover hint derive from the live keymap instead of hardcoding key
-  names;
-- the editor: rows for every action, live conflict highlight,
-  cancel = zero trace (settings object, disk, main window untouched),
-  accept persists ONLY the keymap field and stores only deviations from
-  the defaults;
-- open_keymap_editor defers the modal out of the calling emission
-  (the PySide6 + py3.14 modal-from-click crash rule).
+"""Keymap editor + the ACTIONS shortcut table (v2.0 phase 2). The table
+carries every v1 shortcut with its exact default (the full id→sequence
+map is asserted); rebind_shortcuts applies a changed settings.keymap to
+the live QShortcuts without a restart, and an empty binding really
+unbinds; tooltips and the fx popover hint derive from the live keymap;
+the editor refuses conflicts, cancel leaves zero trace, and accept
+persists ONLY keymap deviations from the defaults; open_keymap_editor
+defers the modal (the modal-from-click crash rule).
 
 Run offscreen:
   QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_keymap_editor.py
@@ -40,9 +30,8 @@ def _app() -> QApplication:
     return QApplication.instance() or QApplication(sys.argv[:1])
 
 
-# The shipped bindings, verbatim from v1's hand-wired QShortcut lines.
-# This is the anti-regression pin: extracting the table must not lose,
-# rename or re-key a single shortcut.
+# The shipped bindings, verbatim from v1's hand-wired QShortcut lines —
+# the extraction must not lose, rename or re-key a single shortcut.
 EXPECTED_DEFAULTS = {
     "search": "Ctrl+L",
     "search_alt": "Ctrl+F",
@@ -132,10 +121,9 @@ class _WindowCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.app = _app()
-        # Hermetic settings file: a window wearing a Settings object
-        # persists window_sizes on close (the phase-1 size memory) —
-        # that write must not land on the shared sandbox path other
-        # test files assert against.
+        # hermetic settings file: a window wearing a Settings object
+        # persists window_sizes on close — that write must not land on
+        # the shared sandbox path other files assert against
         self._tmp = tempfile.TemporaryDirectory(prefix="tide-keymap-w-")
         self.addCleanup(self._tmp.cleanup)
         self._orig_settings_file = config.SETTINGS_FILE
@@ -196,7 +184,6 @@ class WindowShortcutTests(_WindowCase):
         QTest.qWait(20)
         self.assertEqual(w.stack.currentIndex(), 2,
                          "the rebound key didn't reach the action")
-        # The old default is gone — Ctrl+3 must no longer switch views.
         w._switch_view("home")
         QTest.qWait(20)
         QTest.keyClick(w, Qt.Key_3, Qt.ControlModifier)
@@ -335,9 +322,8 @@ class EditorTests(unittest.TestCase):
                          "cancel rebound the live shortcuts")
 
     def test_accept_persists_only_the_keymap_field(self) -> None:
-        # Disk holds volume=33; the editor's live object says volume=80.
-        # Accept must write the keymap WITHOUT exporting the object's
-        # other fields (save_fields merge semantics).
+        # disk holds volume=33, the live object volume=80 — accept must
+        # write the keymap WITHOUT exporting the object's other fields
         on_disk = Settings()
         on_disk.volume = 33
         settings_module.save(on_disk)
@@ -401,7 +387,6 @@ class EditorTests(unittest.TestCase):
         self.assertTrue(dlg._row_labels["like"].styleSheet(),
                         "conflicting row not highlighted")
         self.assertTrue(dlg._row_labels["shuffle"].styleSheet())
-        # Resolving the clash clears the highlight.
         dlg._edits["like"].setKeySequence(QKeySequence("Ctrl+J"))
         self.assertEqual(dlg.conflicted_ids(), set())
         self.assertFalse(dlg._row_labels["like"].styleSheet())
@@ -415,9 +400,9 @@ class EditorTests(unittest.TestCase):
                          "two unbound rows counted as a key clash")
 
     def test_conflicted_save_is_refused(self) -> None:
-        # Persisting a conflict silently deadens BOTH shortcuts (Qt
-        # emits activatedAmbiguously, which nothing connects) — so the
-        # editor must refuse, not highlight-and-save-anyway.
+        # persisting a conflict silently deadens BOTH shortcuts (Qt emits
+        # activatedAmbiguously, which nothing connects) — the editor must
+        # refuse, not highlight-and-save-anyway
         from PySide6.QtWidgets import QDialog as _QDialog
         stub = _StubWindow()
         self.addCleanup(stub.deleteLater)
@@ -433,7 +418,6 @@ class EditorTests(unittest.TestCase):
                          "the refused save reached the disk")
         self.assertEqual(stub.rebind_calls, 0,
                          "the refused save rebound the live shortcuts")
-        # The refusal explains itself inline on the blurb row.
         self.assertIn("share a key", dlg.blurb.text())
         self.assertTrue(dlg.blurb.styleSheet(),
                         "the refusal must be visually distinct")
@@ -527,8 +511,8 @@ class CompanionKeymapTests(_WindowCase):
         w = self._make_window()
         s = Settings()
         w._settings = s
-        # Lazily-constructed companions, registered the way the window
-        # holds them — _companions() is the walk rebind uses.
+        # lazily-built companions, registered the way the window holds
+        # them — _companions() is the walk rebind uses
         w._mini = MiniPlayer(w)
         w._fs = FullscreenPlayer(w)
         s.keymap = {"like": "Ctrl+J", "mini_mode": "Ctrl+Shift+M"}
@@ -541,15 +525,13 @@ class CompanionKeymapTests(_WindowCase):
                          "Ctrl+J")
         self.assertEqual(self._key(w._fs._keymap_shortcuts["mini_mode"]),
                          "Ctrl+Shift+M")
-        # The replaced defaults are really gone from the companions.
         self.assertNotIn(
             "Ctrl+H",
             {self._key(sc) for sc in w._mini._keymap_shortcuts.values()})
 
     def test_rebound_key_fires_in_the_mini(self) -> None:
-        # Behavioral end-to-end: the handler table reads the window's
-        # attributes at construction, so a pre-construction stub sees
-        # the fire.
+        # the handler table reads the window's attributes at
+        # construction, so a pre-construction stub sees the fire
         from tide.ui.mini import MiniPlayer
         w = self._make_window()
         s = Settings()

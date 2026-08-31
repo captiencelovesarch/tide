@@ -1,19 +1,14 @@
 """Motion profiles (P3): mechanical vs springy dialects.
 
-What's pinned here:
-- the mechanical profile is byte-for-byte the pre-P3 constants (brutalist
-  law: short, decisive, and NO Back/Elastic/Bounce curves anywhere);
-- the springy profile carries the overshoot, and only under the "spring"
-  key — the modern personality's dialect;
-- the dialect follows the PERSONALITY (bind_preset: modern → springy,
-  brutalist / anything else → mechanical) — a brutalist user who turns
-  motion up to full gets more mechanical motion, never bounce. Reduced
-  motion lands on mechanical, set_profile pins/unpins, and with nothing
-  bound the profile falls back to following intensity;
-- legacy DUR_*/EASE_* module constants stay as mechanical aliases;
-- intensity OFF is a hard zero-animation guarantee: every helper (and the
-  toast, which used to leak raw QPropertyAnimations) constructs NOTHING
-  and lands end-state synchronously.
+Pinned: the mechanical profile is byte-for-byte the pre-P3 constants
+(short, decisive, no Back/Elastic/Bounce anywhere); the springy profile
+carries the overshoot, only under the "spring" key; the dialect follows
+the PERSONALITY (bind_preset: modern → springy, everything else →
+mechanical) — brutalist at full motion never bounces; reduced motion
+lands on mechanical, set_profile pins/unpins, nothing bound falls back
+to following intensity; legacy DUR_*/EASE_* stay as mechanical aliases;
+intensity OFF constructs NOTHING and lands end-state synchronously (the
+toast used to leak raw QPropertyAnimations).
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -51,9 +46,8 @@ class _MotionState(unittest.TestCase):
         self._intensity = motion._user_intensity
         self._override = motion._profile_override
         self._reduced = motion._reduced_motion
-        # The personality binding is process-global and sticky — any
-        # earlier test that applied a preset would otherwise decide this
-        # one's dialect.
+        # the personality binding is process-global and sticky — an
+        # earlier test's preset would otherwise decide this one's dialect
         self._bound = motion._preset_profile
         motion._preset_profile = None
 

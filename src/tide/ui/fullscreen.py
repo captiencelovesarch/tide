@@ -180,8 +180,7 @@ class FullscreenPlayer(QWidget):
         # Which side pane is up: "lyrics" | "queue" | "off". showEvent
         # applies the remembered setting.
         self._pane = "off"
-        # Open/close geometry animation (host width + art size together) —
-        # an in-flight motion.value_lerp handle, or None.
+        # Open/close geometry animation (host width + art size together).
         self._pane_anim = None
         # Per-screen metrics, filled by prepare_for_screen.
         self._pane_w = 700
@@ -362,7 +361,6 @@ class FullscreenPlayer(QWidget):
         self._bottom_eff = QGraphicsOpacityEffect(self._bottom_bar)
         self._bottom_eff.setOpacity(1.0)
         self._bottom_bar.setGraphicsEffect(self._bottom_eff)
-        # In-flight motion.value_lerp handle for the chrome fade, or None.
         self._zen_anim = None
         self._zen_timer = QTimer(self)
         self._zen_timer.setSingleShot(True)
@@ -392,17 +390,11 @@ class FullscreenPlayer(QWidget):
         window.player.duration_changed.connect(self._on_duration)
         theming.manager().theme_changed.connect(self._on_theme)
 
-        # Escape is a fixed exit affordance on every companion window —
-        # deliberately NOT rebindable. L/Q/K are this surface's own
-        # pane keys, not ACTIONS ids, so they stay literal too.
+        # Escape is a fixed exit affordance — deliberately NOT rebindable.
+        # L/Q/K are this surface's own pane keys, not ACTIONS ids.
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._request_exit)
-        # The transport keys mirror rebindable ACTIONS ids. QShortcut
-        # context is per-window, so the main window's shortcuts can't
-        # fire here — these are built from the SAME effective keymap
-        # (and re-keyed by MainWindow.rebind_shortcuts' companion walk),
-        # so a rebind follows the user into fullscreen instead of the
-        # shipped defaults living on in it. Volume resolves at fire time
-        # (attribute access) so a strip rebuild can't strand it.
+        # Same rebindable-keymap pattern as the mini (see mini.py);
+        # volume resolves at fire time so a strip rebuild can't strand it.
         self._keymap_handlers = {
             "fullscreen": self._request_exit,
             "mini_mode": self._request_mini,
@@ -434,10 +426,8 @@ class FullscreenPlayer(QWidget):
         self._install_wake_filters()
 
     def rebind_shortcuts(self) -> None:
-        """Re-key the transport shortcuts from the effective keymap.
-        Runs at construction and from MainWindow.rebind_shortcuts (the
-        keymap editor's accept path) via the _companions walk. An
-        unbound action ("" sequence) leaves an inert QShortcut."""
+        """Re-key from the effective keymap — at construction and from
+        MainWindow.rebind_shortcuts' companion walk. Unbound ("") = inert."""
         from .window import effective_keymap
         km = effective_keymap(getattr(self._window, "_settings", None))
         for action_id, sc in self._keymap_shortcuts.items():
@@ -513,10 +503,8 @@ class FullscreenPlayer(QWidget):
         self.apply_settings()
 
     def resolved_backdrop_style(self) -> str:
-        # backdrops.resolve owns the follow semantics: on THIS surface
-        # follow mirrors the main window's whole look, including whether
-        # the backdrop is on at all (the mini deliberately diverges —
-        # the rationale lives on resolve()'s docstring).
+        # backdrops.resolve owns follow: this surface mirrors the main
+        # window's whole look, backdrop toggle included (mini diverges).
         s = self._settings()
         return backdrops.resolve(
             s.fullscreen_backdrop_style,
@@ -582,12 +570,9 @@ class FullscreenPlayer(QWidget):
     # ---------- data slots (queue / player / theme) ----------
 
     def refresh_glyphs(self) -> None:
-        """Re-derive the construction-time static glyphs from the
-        registry. Play/like/repeat re-resolve on every state refresh
-        already; these are set once in __init__ — without this, a
-        personality flip's glyph overrides (window.refresh_glyphs →
-        sync_now) would never reach this transport. The pane tabs and
-        exit (♫ / ≡ / ✕) are surface literals, not registry keys."""
+        """The mini's refresh_glyphs contract — re-derive the
+        construction-time static glyphs so a personality flip lands. The
+        pane tabs and exit (♫ / ≡ / ✕) are surface literals, not keys."""
         _g = glyphs.glyph
         # Glyph-only button: the glyph doubles as the bracket label.
         self.shuffle_btn.setLabel(_g("shuffle"))
@@ -859,9 +844,8 @@ class FullscreenPlayer(QWidget):
                 self._lyrics_host.hide()
             self._finish_pane_move()
 
-        # out_strong (mechanical OutCubic — the pre-P3 curve verbatim;
-        # springy OutQuint), never the spring: this width drives the art
-        # size, and an overshoot would poke the art past its band.
+        # out_strong, never the spring: this width drives the art size,
+        # and an overshoot would poke the art past its band.
         self._pane_anim = motion_module.value_lerp(
             0.0, 1.0,
             on_update=_tick,
@@ -915,9 +899,7 @@ class FullscreenPlayer(QWidget):
         return super().eventFilter(obj, event)
 
     def _animate_chrome(self, to: float) -> None:
-        # value_lerp cancels the prior in-flight fade (same owner+kind)
-        # and snaps synchronously at intensity OFF — brutalist zero-anim.
-        # Opacity: the profile's plain "out" ease, never the spring.
+        # Same cancel + OFF-snap fade as the mini's _animate_zen.
         self._zen_anim = motion_module.value_lerp(
             float(self._top_eff.opacity()), float(to),
             on_update=self._on_chrome_opacity,

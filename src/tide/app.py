@@ -105,18 +105,14 @@ def run_onboarding_if_needed(user_settings):
         user_settings.report_plays = bool(r.report_plays)
         user_settings.report_plays_answered = True
     user_settings.first_launch_complete = True
-    # v2.0: the aesthetic step's pick IS the personality pick. File the
-    # wizard's field state under the chosen preset and re-apply it all
-    # BEFORE MainWindow exists. The 1.x flow applied theme+layout before
-    # the wizard only, so a modern pick rendered on the brutalist default
-    # slot variants forever — the window-side slot sync only fires on
-    # aesthetic flips it can observe, and the wizard's flip happened while
-    # no window was listening.
+    # v2.0: the aesthetic step's pick IS the personality pick — file the
+    # wizard's state under it and re-apply BEFORE MainWindow exists (1.x
+    # applied theme+layout pre-wizard only, so a modern pick rendered on
+    # brutalist slot variants forever).
     from . import presets
     preset_id = r.aesthetic if r.aesthetic in presets.BUILTINS else "modern"
-    # Seed the layout slot prefs from the picked theme — the same reset a
-    # live aesthetic flip performs (window._maybe_apply_theme_slot_prefs),
-    # done by hand here for the flip nobody observed.
+    # seed slot prefs from the picked theme — the reset a live flip does
+    # (window._maybe_apply_theme_slot_prefs), by hand for the unobserved one
     try:
         for t in theming.manager().list_themes():
             if t.slug == r.theme_slug and t.slots:
@@ -124,73 +120,44 @@ def run_onboarding_if_needed(user_settings):
                 break
     except Exception:
         pass
-    # Scale before theme (ordering contract): the wizard's scale pick must
-    # be live before apply_preset re-applies the theme, or the whole first
-    # session renders at the pre-wizard scale.
+    # scale before theme (ordering contract) — otherwise the whole first
+    # session renders at the pre-wizard scale
     from .ui import scale as scale_module
     scale_module.set_factor(user_settings.ui_scale)
-    # Drop the pre-wizard adoption scaffolding: it was bookkeeping, not a
-    # visit, and the wizard only runs when no settings file exists — a
-    # later flip to the other personality should start from its builtin
-    # defaults, not a phantom snapshot of pre-wizard state.
+    # drop the pre-wizard adoption's stash (bookkeeping, not a visit) — a
+    # later flip should start from builtins, not a phantom snapshot
     if user_settings.preset and user_settings.preset != preset_id:
         user_settings.preset_state.pop(user_settings.preset, None)
     user_settings.preset = preset_id
     presets.stash(user_settings)   # the wizard's picks ARE this preset's stash
-    # Stamped before the full save as well as inside the commit below:
-    # this is the write that carries first_launch_complete and the
-    # sources, and the wizard's answer belongs in the same one.
+    # stamped here too so the full save below carries the answer
     user_settings.preset_chosen = True
     try:
         settings_module.save(user_settings)
     except Exception:
         pass
-    # Route (b1) hands off to the shared commit below: it stamps
-    # preset_chosen, pushes the managers in contract order and re-persists
-    # field-scoped. The preset is already active here, so apply_preset
-    # takes its same-id path and the wizard's stash stands.
+    # route (b1) hands off to the shared commit; the preset is already
+    # active, so apply_preset same-id path — the wizard's stash stands
     commit_personality_choice(user_settings, preset_id, window=None)
     return True
 
 
 # ---------------------------------------------------------------------------
-# the chooser routes (v2.0 phase 4)
-#
-# Three entry points reach "choose your tide", and every one of them
-# commits through commit_personality_choice() — the single place that
-# knows what an explicit pick MEANS (stamp the choice, seed a first
-# visit's slots, flip the managers, persist field-scoped):
-#
-#   (b1) fresh install — the wizard's aesthetic step, which is now two
-#        real chooser panes (ui/onboarding._AestheticStep hosts
-#        ui/chooser.PersonalityPane). run_onboarding_if_needed above
-#        hands its pick down, pre-window.
-#   (b2) update into 2.0 — run_chooser_if_needed() below: settings exist
-#        (first_launch_complete) but nobody ever picked, so the chooser
-#        runs ONCE from run(), after the preset bootstrap (the panes read
-#        the theme registry) and before MainWindow (a pick has to be
-#        live on the first frame).
-#   (b3) settings re-pick — the appearance tab's personality section
-#        (ui/settings.py) calls run_chooser() / commit_personality_choice()
-#        with the live MainWindow, so the flip lands through
-#        window.switch_preset instead of a pre-window apply.
-#
-# The dialog itself writes nothing (tools emit, callers persist) — this
-# module is the caller for all three.
+# "choose your tide" routes (v2.0 phase 4): (b1) fresh install — the
+# wizard's aesthetic step, pre-window; (b2) update into 2.0 —
+# run_chooser_if_needed(), once, pre-window; (b3) settings re-pick —
+# run_chooser() with the live MainWindow (flip via window.switch_preset).
+# All commit through commit_personality_choice(); the dialog itself
+# writes nothing — this module persists.
 # ---------------------------------------------------------------------------
 
 
 def _seed_first_visit_slots(user_settings, preset_id: str) -> None:
-    """Pre-window twin of MainWindow.switch_preset's first-visit seeding.
-
-    A personality nobody has visited yet has no stash, so restore() gives
-    it the Settings defaults for layout_overrides — i.e. the layout's own
-    slot variants, not the ones its theme asks for. The window-side flip
-    seeds the incoming builtin theme's ``[slots]`` prefs for exactly this
-    reason; the chooser can fire before any window exists, so do the same
-    here. No-op when the preset is already active or already has a stash
-    (a re-pick must never reset the user's remembered tweaks).
-    """
+    """Pre-window twin of MainWindow.switch_preset's first-visit seeding:
+    a never-visited personality's restore() would land the Settings
+    default layout_overrides instead of its builtin theme's ``[slots]``
+    prefs. No-op when the preset is active or has a stash (a re-pick
+    never resets remembered tweaks)."""
     from . import presets
     if preset_id == user_settings.preset or preset_id in user_settings.preset_state:
         return
@@ -212,30 +179,18 @@ def _seed_first_visit_slots(user_settings, preset_id: str) -> None:
 def commit_personality_choice(user_settings, preset_id: str, *, window=None) -> bool:
     """Commit an explicit personality pick — the shared tail of all three
     chooser routes. Returns False (changing nothing) for an unknown id.
-
-    ``preset_chosen`` is stamped BEFORE the apply so apply_preset's own
-    field-scoped save carries it: one write, not two. With a live window
-    holding this same Settings object the flip routes through
-    MainWindow.switch_preset — its re-entry guard, its first-visit
-    seeding and its single slot-rebuild pass. Pre-window (or handed a
-    window bound to some other settings object) it's a plain
-    apply_preset, with the seeding done here instead.
-
-    Ordering is never re-derived: presets.apply_preset owns the
-    theme→layout→motion→corner contract in both paths.
-
-    A FIRST answer that names the personality the silent migration
-    already adopted the user into claims that personality's builtin feel
-    (presets.claim_builtin) — otherwise the pane matching their adoption
-    would be a dead button while the other one transformed the app.
+    ``preset_chosen`` is stamped BEFORE the apply so apply_preset's
+    field-scoped save carries it: one write, not two. A live window
+    holding this same Settings object routes the flip through
+    MainWindow.switch_preset; otherwise plain apply_preset with the
+    seeding done here (ordering lives in presets.apply_preset for both).
     """
     from . import presets
     if preset_id not in presets.BUILTINS:
         return False
-    # Gated on the STAMP, never on the id: once the question has been
-    # answered, picking the active personality is a RE-PICK and a re-pick
-    # keeps every tweak. Route (b1) stamps the flag itself before handing
-    # off, so the wizard's own answers are never claimed over.
+    # gated on the STAMP, not the id — an answered question makes this a
+    # RE-PICK, which keeps every tweak (see presets.claim_builtin). Route
+    # (b1) stamps before handing off, so wizard answers are never claimed.
     if not user_settings.preset_chosen and preset_id == user_settings.preset:
         presets.claim_builtin(user_settings, preset_id)
     user_settings.preset_chosen = True
@@ -249,36 +204,24 @@ def commit_personality_choice(user_settings, preset_id: str, *, window=None) -> 
 
 
 def dismiss_personality_choice(user_settings) -> None:
-    """The chooser was waved away (esc / close-X / window manager).
-
-    Stamp the question as ASKED so the user isn't offered it at every
-    launch, and change NOTHING else. This is the last mile of the
-    migration invariant: an upgrader who dismisses keeps the exact look
-    1.x left them with — the preset the silent adoption filed them under
-    stays active, every visual field keeps its value, and the only byte
-    that moves on disk is this one flag. Deliberately not a "maybe
-    later" (which would mean nagging forever) and deliberately not a
-    default pick (which would change their look behind their back).
-    """
+    """The chooser was waved away. Stamp the question as ASKED and
+    change NOTHING else — the adopted preset and every visual field stay
+    put (the migration invariant's last mile). Not "maybe later"
+    (nagging forever), not a default pick (a silent look change)."""
     if user_settings.preset_chosen:
         return
     user_settings.preset_chosen = True
     try:
         settings_module.save_fields(user_settings, "preset_chosen")
     except Exception:
-        # Best effort, exactly like every other startup persist: the
-        # worst case is being asked once more next launch.
+        # best effort — worst case is being asked once more next launch
         pass
 
 
 def run_chooser(user_settings, *, parent=None, window=None) -> str:
-    """Show "choose your tide" modally and commit whatever it resolves
-    to. Returns the chosen preset id, or "" when it was dismissed.
-
-    Shared by routes (b2) and (b3) — the only difference between them is
-    the ``window`` (and therefore whether the flip is a pre-window apply
-    or a live switch_preset).
-    """
+    """Show "choose your tide" modally and commit the result. Returns
+    the chosen id, or "" when dismissed. Shared by (b2) and (b3); the
+    only difference is ``window``."""
     from .ui.chooser import ChooserDialog, PANE_ORDER
     initial = (user_settings.preset if user_settings.preset in PANE_ORDER
                else PANE_ORDER[0])
@@ -287,8 +230,8 @@ def run_chooser(user_settings, *, parent=None, window=None) -> str:
         dlg.exec()
         choice = dlg.choice()
     finally:
-        # Queue the C++ teardown instead of letting the Python local drop
-        # it synchronously — the modal-from-click crash family.
+        # queue the C++ teardown rather than dropping the local
+        # synchronously — the modal-from-click crash family
         dlg.deleteLater()
     if choice:
         commit_personality_choice(user_settings, choice, window=window)
@@ -298,20 +241,11 @@ def run_chooser(user_settings, *, parent=None, window=None) -> str:
 
 
 def run_chooser_if_needed(user_settings) -> str:
-    """(b2) The update-into-2.0 route: offer the chooser exactly once.
-
-    Shown when settings already exist (so the wizard will never run
-    again) but nobody has ever picked a personality — precisely the 1.5 /
-    1.6 user the silent adoption just migrated. ``preset_chosen`` is
-    stamped either way, so the second launch skips straight past.
-
-    Guarded like every other startup side-quest in this module: an
-    upgrade that can't build the chooser (a half-installed theme tree, a
-    Qt platform that refuses the frameless full-screen dialog) must
-    still get their player. The stamp is deliberately NOT written on
-    that path — they were never actually asked, so the offer stands next
-    launch, and until then the silent adoption keeps their 1.x look.
-    """
+    """(b2) offer the chooser exactly once: settings exist but nobody
+    ever picked. ``preset_chosen`` is stamped either way, so the second
+    launch skips past. Exception-guarded — if the chooser can't build,
+    the user still gets their player, and the stamp is NOT written: they
+    were never asked, so the offer stands next launch."""
     if user_settings.preset_chosen or not user_settings.first_launch_complete:
         return ""
     try:
@@ -321,18 +255,10 @@ def run_chooser_if_needed(user_settings) -> str:
 
 
 def _reassert_cli_theme(cli_theme: str | None) -> None:
-    """Re-apply the ``--theme`` override after the boot side-quests.
-
-    ``--theme`` is a RUN-ONLY override: _bootstrap_preset applies it last
-    so it wins, and it never lands in settings or in a personality's
-    stash. But both side-quests that follow — the wizard (b1) and the
-    chooser (b2) — can COMMIT a personality, and every commit re-applies
-    that personality's theme bundle over whatever is on screen. Without
-    this, ``tide --theme nord`` silently loses its argument on exactly
-    the one launch where either of them fires.
-
-    A cancelled wizard / dismissed chooser applies nothing, so this is
-    then a harmless repeat of what is already on.
+    """Re-apply the run-only ``--theme`` override after the boot
+    side-quests: a wizard/chooser commit re-applies the personality's
+    theme bundle, so without this ``tide --theme nord`` loses its
+    argument exactly when either fires. Otherwise a harmless repeat.
     """
     if not cli_theme:
         return
@@ -340,29 +266,22 @@ def _reassert_cli_theme(cli_theme: str | None) -> None:
 
 
 def _bootstrap_preset(user_settings, cli_theme: str | None = None) -> None:
-    """Startup preset bootstrap — pre-window, pre-wizard.
-
-    A pre-2.0 config (``preset == ""``) gets silently filed under the
-    personality its theme belongs to; the stash snapshots every field
-    verbatim, so an upgrader's first 2.0 frame is identical to their last
-    1.x one. Then the active preset is pushed through the managers in
-    contract order (theme bundle, layout, motion, corner override).
-
-    Adoption persists only for real upgraders: on a true first launch the
-    wizard saves its own explicit pick minutes later, and a cancelled
-    wizard should keep leaving no settings file behind (as it always has).
-
-    ``cli_theme`` (--theme) applies on top as a run-only override — it
+    """Startup preset bootstrap — pre-window, pre-wizard. A pre-2.0
+    config (``preset == ""``) is silently filed under the personality its
+    theme belongs to; the stash snapshots every field verbatim, so an
+    upgrader's first 2.0 frame is identical to their last 1.x one. Then
+    the active preset is pushed through the managers in contract order.
+    Adoption persists only for real upgraders — a cancelled wizard keeps
+    leaving no settings file. ``cli_theme`` applies on top, run-only; it
     never lands in settings or the stash.
     """
     from . import presets
     theming.manager().refresh()
     from . import layout as layout_module
     layout_module.manager().refresh()
-    # An unrecognized preset with nothing to restore from (hand-edited
-    # file, a downgrade past a future version's third preset) must not
-    # crash the launch — treat it as pre-2.0 and re-adopt from the live
-    # fields. An unknown id WITH a stash keeps working as-is.
+    # an unrecognized preset with no stash (hand-edited file, downgrade
+    # past a future third preset) must not crash the launch — treat as
+    # pre-2.0 and re-adopt. An unknown id WITH a stash keeps working.
     if (user_settings.preset
             and user_settings.preset not in presets.BUILTINS
             and user_settings.preset not in user_settings.preset_state):
@@ -371,13 +290,9 @@ def _bootstrap_preset(user_settings, cli_theme: str | None = None) -> None:
     if adopted:
         presets.adopt_current(user_settings)
         if user_settings.first_launch_complete:
-            # Migration invariant, size half: 1.x resized to 1100x720 at
-            # every launch no matter the layout (window_default only ever
-            # applied on live layout switches), so seed that exact size
-            # as the active layout's remembered one. Without it a
-            # focused/dj-deck upgrader's first 2.0 frame would come up at
-            # the layout's declared default instead of the size they
-            # launched at yesterday.
+            # migration invariant, size half: 1.x resized to 1100x720
+            # every launch, so seed that as the remembered size — else a
+            # focused/dj-deck upgrader's first frame is the layout default
             user_settings.window_sizes.setdefault(
                 user_settings.layout or "classic", [1100, 720])
     presets.apply_preset(user_settings, user_settings.preset, window=None,
@@ -390,41 +305,33 @@ def _bootstrap_preset(user_settings, cli_theme: str | None = None) -> None:
             pass
     if cli_theme:
         theming.manager().apply(cli_theme)
-    # Keep the old `or DEFAULT_THEME` guarantee: an empty (or vanished)
-    # theme slug falls back instead of leaving the app unstyled.
+    # an empty/vanished slug falls back — never leave the app unstyled
     if theming.manager().current() is None:
         theming.manager().apply(DEFAULT_THEME)
 
 
 def _boot_glyph_overrides(user_settings) -> None:
-    """Push the saved per-glyph overrides into the glyph registry BEFORE
-    the window is constructed — every transport label draws through
-    glyphs.glyph() at build time, so the first frame already wears them.
-    (Personality flips re-apply the incoming set via
-    window.apply_preset_visuals; this is the launch-time half.)"""
+    """Push saved per-glyph overrides into the registry BEFORE the window
+    is constructed — transport labels draw through glyphs.glyph() at
+    build time. (Personality flips re-apply via apply_preset_visuals.)"""
     from . import glyphs
     glyphs.set_overrides(dict(user_settings.glyph_overrides or {}))
 
 
 def _attach_settings(window, user_settings) -> None:
-    """Bind the live Settings object to the window and re-key the
-    shortcuts. _wire_shortcuts runs inside MainWindow's constructor —
-    before this attach — so a saved custom keymap only lands through
-    this rebind; without it, custom bindings would only apply after the
-    first keymap-editor accept."""
+    """Bind the live Settings to the window and re-key the shortcuts.
+    _wire_shortcuts runs inside MainWindow's constructor, before this
+    attach — without the rebind, a saved custom keymap would only apply
+    after the first keymap-editor accept."""
     window._settings = user_settings
     window.rebind_shortcuts()
 
 
 def _instance_message_handler(raise_target: list):
     """Command router for pokes from a second tide launch (instance.py).
-
-    ``raise_target`` is a one-slot list run() fills with the MainWindow
-    once it exists; commands arriving before that are dropped. Delivery
-    happens mid-signal-emission (the guard's socket readyRead), so the
-    actual show/raise defers via singleShot(0) — presenting a window from
-    inside a handler is the modal-from-click crash family.
-    """
+    ``raise_target`` is a one-slot list run() fills with the MainWindow;
+    earlier commands are dropped. Delivery is mid-signal-emission, so the
+    show/raise defers via singleShot(0) — the modal-from-click family."""
     def _on_command(command: str) -> None:
         window = raise_target[0]
         if command != "raise" or window is None:
@@ -468,10 +375,9 @@ def run(argv: list[str] | None = None) -> int:
     app.setOrganizationName("tide")
     app.setDesktopFileName("tide")
 
-    # One tide per config dir: a second launch pokes the live instance and
-    # bows out instead of double-running (two mpris services, two trays,
-    # two audio-capture consumers named "tide"). Claimed right after the
-    # QApplication exists — command delivery rides the event loop.
+    # One tide per config dir — a second launch pokes the live instance
+    # and bows out (else two mpris services, two trays, two captures).
+    # Claimed right after QApplication exists; delivery rides the loop.
     from . import instance as instance_module
     raise_target: list = [None]   # filled with the MainWindow once built
     guard = instance_module.acquire(_instance_message_handler(raise_target))
@@ -482,10 +388,9 @@ def run(argv: list[str] | None = None) -> int:
         sys.exit(0)
 
     user_settings = settings_module.load()
-    # 2.0 downgrade shield: archive the last 1.x settings file (once)
-    # before any 2.0 save stamps the preset fields into it — a later 1.x
-    # run would silently drop them on its next save. Must precede the
-    # first save_fields() below (the adoption persist).
+    # 2.0 downgrade shield: archive the 1.x settings file once, before
+    # any 2.0 save stamps preset fields into it (a later 1.x run would
+    # drop them). Must precede the adoption persist below.
     settings_module.ensure_v1_backup()
 
     # Initialize the motion system once, before any UI is built. Reduced-
@@ -508,27 +413,19 @@ def run(argv: list[str] | None = None) -> int:
 
     # Register tide's bundled fonts so they're available regardless of
     # what's installed system-wide. The user's font/size/case overrides
-    # ride the preset bootstrap below — apply_bundle pushes all of them
-    # before its one theme apply, so the very first frame already uses
-    # the right family.
+    # ride the preset bootstrap below, before its one theme apply.
     theming.register_bundled_fonts()
 
-    # v2.0: theme + layout + motion + corners travel together as a
-    # personality preset. Applied as early as possible so the wizard
-    # renders themed, and before window construction so the initial UI
-    # uses the right variants.
+    # v2.0: theme+layout+motion+corners travel as a preset — applied
+    # early so the wizard renders themed with the right variants
     _bootstrap_preset(user_settings, cli_theme=args.theme)
 
     # First-launch wizard. Runs once; subsequent launches skip past.
     if not run_onboarding_if_needed(user_settings):
         return 1
 
-    # v2.0 route (b2): an existing 1.x install has settings but has never
-    # been asked which tide it wants. Offer the chooser ONCE, here — after
-    # the bootstrap above (the panes preview real themes, so the registry
-    # has to be live) and before MainWindow (a pick must be on the first
-    # frame, not one restyle late). A dismissal changes nothing but the
-    # stamp; see dismiss_personality_choice.
+    # v2.0 route (b2), once — after the bootstrap (the panes preview real
+    # themes), before MainWindow (the pick must be on the first frame)
     run_chooser_if_needed(user_settings)
 
     # Last thing that can move the theme has now run; put the run-only
@@ -772,10 +669,9 @@ def run(argv: list[str] | None = None) -> int:
     # Nav-rail icons (per the user's nav_icon_set preference).
     window.apply_nav_icons(user_settings.nav_icon_set or "off")
 
-    # v2.0: one window-side push of every preset-owned visual (backdrops,
-    # pulses, nav icons, thumbnails, ui sounds). hasattr-guarded while the
-    # method lands in window.py; the wiring above stays regardless — it
-    # CONSTRUCTS the adaptive/ambient drivers the method only re-pushes.
+    # v2.0: one window-side push of every preset-owned visual.
+    # hasattr-guarded while the method lands in window.py; the wiring
+    # above stays — it CONSTRUCTS the drivers the method only re-pushes.
     if hasattr(window, "apply_preset_visuals"):
         window.apply_preset_visuals()
 
@@ -901,9 +797,8 @@ def run(argv: list[str] | None = None) -> int:
     ui_sounds = ui_sounds_module.UiSoundPlayer(parent=window)
     ui_sounds.set_enabled(bool(user_settings.ui_sounds_enabled))
     window.ui_sounds = ui_sounds
-    # The startup apply_preset_visuals above ran before this player
-    # existed — land the personality's sound pack now that it does
-    # (modern → the watery "modern" pack, everything else → default).
+    # apply_preset_visuals above ran before this player existed — land
+    # the personality's sound pack now (modern → "modern", else default)
     if hasattr(window, "_apply_sound_pack"):
         window._apply_sound_pack()
 
@@ -927,9 +822,8 @@ def run(argv: list[str] | None = None) -> int:
         pass
 
     rc = app.exec()
-    # Release the single-instance name first: a relaunch racing this
-    # teardown should get a clean listen, not a probe against a dying
-    # server.
+    # release the single-instance name first — a relaunch racing this
+    # teardown should get a clean listen, not a probe of a dying server
     try:
         guard.close()
     except Exception:

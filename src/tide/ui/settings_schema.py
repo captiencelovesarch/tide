@@ -1,25 +1,12 @@
-"""The option-descriptor table — settings as data.
+"""Option descriptors — the settings dialog as data.
 
-Through v1.x every user-facing option cost four hand-written touch
-points: a widget in the dialog's _build_ui, a load in _populate, a store
-in _on_save, and a live-apply block in window._do_open_settings. Four
-places to forget, and the hidden-field bugs to prove it (local_auto_index
-and the spotify tuning knobs shipped with no GUI at all).
+Each :class:`OptionDesc` names a Settings field and declares its
+tab/section row, widget kind, choice source, per-preset flag, and live
+applier. :func:`coverage_report` + its meta-test force every field into
+:data:`REGISTRY` or :data:`INTERNAL_FIELDS` (with a written reason).
 
-This registry is the one place. Each :class:`OptionDesc` names a
-Settings field and declares everything the generated dialog needs: which
-tab/section row it lives on, what widget kind renders it, where its
-choices come from, whether it flips with the personality preset, and
-which MainWindow applier pushes it live on accept.
-
-The guarantee lives in :func:`coverage_report` and its meta-test: every
-``Settings`` dataclass field is either in :data:`REGISTRY` (it has a GUI
-surface) or in :data:`INTERNAL_FIELDS` (a written reason why it doesn't
-need one). Add a field without deciding, and the suite goes red.
-
-Import-time Qt-free on purpose — choice providers import their
-registries lazily so the meta-test (and anything else) can read the
-schema without a QApplication.
+No Qt at import time — choice providers import lazily so the meta-test
+runs without a QApplication.
 """
 from __future__ import annotations
 
@@ -29,21 +16,12 @@ from .. import presets
 from ..settings import Settings
 
 
-# The widget vocabulary the generated dialog knows how to build.
-#   bool   → bracket toggle / checkbox
-#   choice → combo fed by ``choices``
-#   int    → spin box
-#   str    → line edit
-#   font   → the shipped font picker (preview faces, editable, bundled
-#            fonts pinned up top) — preserved as-is, not regenerated
-#   custom → a registered builder on the dialog side
+# bool → toggle, choice → combo fed by ``choices``, int → spin box,
+# str → line edit, font → the v1 font picker, custom → a registered
+# builder on the dialog side.
 KINDS: tuple[str, ...] = ("bool", "choice", "int", "str", "font", "custom")
 
-# The dialog's tab taxonomy. v1.x shipped appearance / mini player /
-# playback / integrations / advanced; 2.0 keeps the shape but the mini
-# tab becomes "windows" (the fullscreen options join it) and the
-# hidden source tuning gets a real "sources" tab. About / session tools
-# stay hand-built dialog chrome, not descriptors.
+# Dialog tabs. About / session tools stay hand-built chrome.
 TABS: tuple[str, ...] = (
     "appearance",
     "playback",
@@ -55,18 +33,15 @@ TABS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class OptionDesc:
-    """One user-facing option, declaratively.
+    """One user-facing option.
 
-    ``key`` is the Settings dataclass field name. ``choices`` is either
-    an inline tuple of ``(value, label)`` rows or the NAME of a zero-arg
-    provider function in this module (so pickers read the live
-    registries — themes on disk, monitor sources, layout dirs — at
-    dialog-open time instead of freezing a list that can drift).
-    ``live`` names a MainWindow applier method run by the accept-time
-    live-apply chain (window.LIVE_APPLY_ORDER); None = the value is read
-    fresh wherever it's consumed, nothing to push. ``preview`` marks
-    options that apply while the dialog is still open (with
-    snapshot-revert on cancel — previews never commit)."""
+    ``key`` is the Settings field name. ``choices`` is an inline tuple
+    of ``(value, label)`` rows or the NAME of a zero-arg provider in
+    this module, called at dialog-open so pickers read live registries.
+    ``live`` names the MainWindow applier run by the accept-time chain
+    (window.LIVE_APPLY_ORDER); None = read fresh where consumed.
+    ``preview`` options apply while the dialog is open, with
+    snapshot-revert on cancel — previews never commit."""
     key: str
     label: str
     kind: str
@@ -85,16 +60,10 @@ class OptionDesc:
 # ---------------------------------------------------------------------------
 
 def _theme_rows() -> tuple[tuple[str, str, str], ...]:
-    """(slug, display name, aesthetic) for every discovered theme
-    (bundled + system + user), sorted by display name — the one disk
-    read both theme providers below are built from.
-
-    The aesthetic is blank for a theme that never DECLARED one: tide
-    guesses a value from typography.mono so the QSS dialect and the
-    widget shapes have something to go on, but a guess is not a claim,
-    and the picker below must not hide someone's theme on the strength
-    of one (see :func:`theme_choices_for`).
-    """
+    """(slug, display name, aesthetic) per discovered theme, sorted by
+    display name. Aesthetic is "" for a theme that never DECLARED one:
+    tide's mono guess picks a QSS dialect, but the picker must not hide
+    a theme on a guess (see :func:`theme_choices_for`)."""
     from .. import theming
     themes = theming.discover_themes()
     rows: list[tuple[str, str, str]] = []
@@ -106,17 +75,9 @@ def _theme_rows() -> tuple[tuple[str, str, str], ...]:
 
 
 def theme_choices() -> tuple[tuple[str, str], ...]:
-    """Every discovered theme (bundled + system + user), sorted by
-    display name — the same order the v1 picker shipped.
-
-    This is the CATALOG, deliberately unfiltered: resolve_choices() is
-    what the schema meta-tests read (every Settings default must be a
-    pickable row), and the whole catalog is what the theme editor and
-    any non-personality surface want. The appearance tab narrows it to
-    the active personality through :func:`theme_choices_for` — a
-    provider can't do the narrowing itself because it takes no
-    arguments and the schema layer holds no Settings object.
-    """
+    """The full catalog, unfiltered — what the meta-tests and the theme
+    editor read. The appearance tab narrows it via
+    :func:`theme_choices_for` (a provider takes no arguments)."""
     return tuple((slug, name) for slug, name, _aesthetic in _theme_rows())
 
 
@@ -125,29 +86,17 @@ def theme_choices_for(preset_id: str, show_all: bool = False,
                       ) -> tuple[tuple[str, str], ...]:
     """The catalog narrowed to one personality's [meta] aesthetic.
 
-    ``show_all`` (the appearance tab's "show all themes" escape, stored
-    as ``Settings.theme_picker_show_all``) returns the catalog verbatim,
-    and so does an unknown/absent ``preset_id`` — a config that was
-    never adopted into a personality has nothing to filter by, so it
-    sees everything rather than an arbitrary half.
-
-    ``keep`` names slugs that stay listed whatever their aesthetic. The
-    picker always passes the theme it opened on and the theme it is
-    currently showing: a picker that can't display the value it holds
-    would silently re-write it to some other theme on the next accept.
-    Rows keep the catalog's order either way.
-
-    A theme that declares no ``[meta] aesthetic`` belongs to BOTH sides.
-    Every bundled theme declares one, but ``[meta] aesthetic`` is new in
-    2.0 and hand-installed themes long predate it — classifying those by
-    tide's mono guess would make a brutalist user's own themes look
-    deleted, which is a v1.x regression aimed squarely at the audience
-    brutalist exists for. Undeclared means unclaimed, not modern.
+    ``show_all`` or an unknown/absent ``preset_id`` returns the catalog
+    verbatim. ``keep`` slugs stay listed whatever their aesthetic: the
+    picker passes the theme it opened on and the theme it's showing —
+    a picker that can't display the value it holds silently re-writes
+    it on the next accept. A theme with no declared aesthetic stays
+    listed for BOTH sides: hand-installed themes predate the key, and
+    filing them by tide's mono guess would make a brutalist user's own
+    themes look deleted (a v1.x regression).
     """
-    # Personality ids and theme aesthetics share one vocabulary by
-    # design ("brutalist" / "modern"), which is what lets adopt_current
-    # file a 1.x user by their theme — so the match below is ==, not a
-    # translation table.
+    # Personality ids and theme aesthetics share one vocabulary, so the
+    # match is ==.
     rows = _theme_rows()
     if show_all or preset_id not in presets.BUILTINS:
         return tuple((slug, name) for slug, name, _a in rows)
@@ -169,15 +118,13 @@ def layout_choices() -> tuple[tuple[str, str], ...]:
 
 
 def backdrop_choices() -> tuple[tuple[str, str], ...]:
-    """The renderer's backdrop styles — main-window picker, where a
-    backdrop always paints something."""
+    """Backdrop styles for the main window, which always paints one."""
     from .. import backdrops
     return tuple(backdrops.choices())
 
 
 def companion_backdrop_choices() -> tuple[tuple[str, str], ...]:
-    """The mini/fullscreen composition: "follow" leads, "off" trails —
-    a companion window can mirror the main backdrop or decline to paint."""
+    """Mini/fullscreen backdrops: "follow" leads, "off" trails."""
     from .. import backdrops
     return (
         *backdrops.choices_with_follow(),
@@ -186,9 +133,8 @@ def companion_backdrop_choices() -> tuple[tuple[str, str], ...]:
 
 
 def audio_device_choices() -> tuple[tuple[str, str], ...]:
-    """Monitor sources for the visualizer capture, after the "auto"
-    default. Best-effort — enumerating sources shells out to the audio
-    server, and a machine without one still gets a working picker."""
+    """Monitor sources after the "auto" default. Best-effort — a
+    machine with no audio server still gets a working picker."""
     rows: list[tuple[str, str]] = [("", "auto (tide's audio only)")]
     try:
         from .. import audio_capture
@@ -201,9 +147,7 @@ def audio_device_choices() -> tuple[tuple[str, str], ...]:
 
 
 def nav_icon_choices() -> tuple[tuple[str, str], ...]:
-    """Nav-rail icon sets from the nav_icons registry. Glyph-set labels
-    embed the actual glyphs so the picker previews the vibe itself; a new
-    set registered in NAV_ICON_SETS appears here with zero edits."""
+    """Nav-rail icon sets; glyph-set labels embed the actual glyphs."""
     from . import nav_icons
     rows: list[tuple[str, str]] = []
     for set_name in nav_icons.VALID_SETS:
@@ -218,18 +162,16 @@ def nav_icon_choices() -> tuple[tuple[str, str], ...]:
 
 
 def corner_choices() -> tuple[tuple[str, str], ...]:
-    """Corner styles with their pixel radii, straight from the one
-    radius map (central_bg.CORNER_RADII) so the labels can't lie."""
+    """Corner styles labelled with their radii, read straight from
+    central_bg.CORNER_RADII."""
     from .central_bg import CORNER_RADII
     return tuple(
         (style, f"{style} · {px}px") for style, px in CORNER_RADII.items()
     )
 
 
-# Blurbs keyed by registry value. Indexing (not .get) is deliberate: a
-# new tier/style landing in its registry without a blurb here raises,
-# and the schema meta-test goes red instead of a picker silently
-# shipping a KeyError at open time.
+# Indexed (not .get) on purpose: a new registry value without a blurb
+# fails the schema meta-test instead of KeyError-ing at picker-open.
 _MOTION_BLURBS: dict[str, str] = {
     "off": "off · instant transitions",
     "lite": "lite · signature + everyday",
@@ -254,7 +196,7 @@ _CASE_BLURBS: dict[str, str] = {
 
 
 def motion_choices() -> tuple[tuple[str, str], ...]:
-    """Motion tiers from the Intensity enum, in enum order."""
+    """Motion tiers from the Intensity enum, in order."""
     from . import motion as motion_module
     return tuple(
         (tier.value, _MOTION_BLURBS[tier.value])
@@ -263,8 +205,7 @@ def motion_choices() -> tuple[tuple[str, str], ...]:
 
 
 def scale_choices() -> tuple[tuple[str, str], ...]:
-    """UI scale presets from the Scale enum; the multiplier in each label
-    reads straight off the factor table so the numbers can't drift."""
+    """Scale presets; the multiplier labels read off the factor table."""
     from . import scale as scale_module
     factors = getattr(scale_module, "_FACTORS")
     return tuple(
@@ -273,15 +214,13 @@ def scale_choices() -> tuple[tuple[str, str], ...]:
 
 
 def loading_choices() -> tuple[tuple[str, str], ...]:
-    """Loading-indicator styles from the indicator's own whitelist, each
-    labelled with a tiny sample rendering."""
+    """Loading-indicator styles, each labelled with a sample."""
     from .loading_indicator import VALID_STYLES
     return tuple((style, _LOADING_BLURBS[style]) for style in VALID_STYLES)
 
 
 def case_choices() -> tuple[tuple[str, str], ...]:
-    """Text-case modes from theming.CASE_MODES, after the follow-the-theme
-    empty default."""
+    """theming.CASE_MODES after the follow-the-theme empty default."""
     from .. import theming
     return (
         ("", "from theme"),
@@ -293,14 +232,8 @@ def case_choices() -> tuple[tuple[str, str], ...]:
 # live-apply vocabulary
 # ---------------------------------------------------------------------------
 
-# Applier methods the settings engine was still due to add to MainWindow
-# when this schema landed — the allowlist the meta-test accepted
-# alongside real hasattr(MainWindow, name) hits, so this file could land
-# before the engine's window.py work. All 18 appliers now exist on
-# MainWindow (each carries its contract in its own docstring;
-# LIVE_APPLY_ORDER encodes scale→theme, corner→csd→translucency and
-# pitch-last as data), so the allowlist is pruned to its documented end
-# state: empty, with the existence test running purely on hasattr.
+# Applier names the meta-test accepts before they exist on MainWindow —
+# lets a schema entry land ahead of its window.py work. Empty now.
 PENDING_LIVE_APPLIERS: dict[str, str] = {}
 
 
@@ -323,9 +256,8 @@ REGISTRY: tuple[OptionDesc, ...] = (
         label="show all themes · including the other personality's",
         kind="bool", tab="appearance", section="theme",
         # No live applier: this reshapes the PICKER above it, not the
-        # app. The dialog rebuilds the theme rows on the spot
-        # (SettingsDialog._CHANGE_HOOKS → refresh_theme_choices) and the
-        # accept path just persists the preference.
+        # app — the dialog rebuilds the theme rows on the spot via
+        # _CHANGE_HOOKS → refresh_theme_choices.
         tooltip="the list above shows the themes built for the "
                 "personality you're wearing. tick this to see all of "
                 "them — picking one from the other side takes you to "
@@ -676,10 +608,9 @@ REGISTRY: tuple[OptionDesc, ...] = (
         tab="windows", section="fullscreen",
         choices="companion_backdrop_choices", per_preset=True,
         live="apply_fullscreen_setting",
-        # No key name here on purpose: this layer is Qt/window-free, so
-        # it can't resolve the live keymap, and a hardcoded "f11" goes
-        # stale the moment the fullscreen action is rebound. The [⤢]
-        # button's own tooltip advertises the live binding.
+        # No hotkey named on purpose: this layer can't read the live
+        # keymap, and a hardcoded "f11" goes stale on rebind. The [⤢]
+        # button's tooltip advertises the live binding.
         tooltip="the lean-back now-playing window (the [⤢] button on "
                 "the strip).",
     ),
@@ -697,13 +628,9 @@ REGISTRY: tuple[OptionDesc, ...] = (
 # fields with no descriptor — each with its reason
 # ---------------------------------------------------------------------------
 
-# Every Settings field NOT in the registry, with why it needs no settings
-# row. The rule: a field lands here only when some OTHER GUI surface owns
-# it (named below) or it's pure bookkeeping no user should ever set —
-# never because someone forgot. (spotify_client_id isn't listed because
-# it's gone: grep showed nothing ever read it — the sign-in dialog keeps
-# its own field and auth_spotify resolves the effective id itself — so
-# 2.0 deleted it from Settings outright.)
+# Every Settings field NOT in the registry, with why: another GUI
+# surface owns it, or it's bookkeeping no user sets. (spotify_client_id
+# isn't here — nothing read it, so 2.0 deleted it from Settings.)
 INTERNAL_FIELDS: frozenset[str] = frozenset({
     # bookkeeping — stamped by the app, never chosen by the user
     "first_launch_complete",    # onboarding-completion stamp
@@ -741,10 +668,9 @@ INTERNAL_FIELDS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 def resolve_choices(desc: OptionDesc) -> tuple[tuple[object, str], ...]:
-    """The concrete (value, label) rows for a choice descriptor —
-    inline tuples pass through, provider names get called. Raises on a
-    descriptor with no choices or a dangling provider name; both are
-    programming errors the meta-test catches."""
+    """Concrete (value, label) rows — inline tuples pass through,
+    provider names get called. Raises on missing choices or a dangling
+    provider (the meta-test catches both)."""
     if desc.choices is None:
         raise ValueError(f"{desc.key} has no choices (kind={desc.kind})")
     if isinstance(desc.choices, str):
@@ -764,13 +690,9 @@ def by_key() -> dict[str, OptionDesc]:
 
 
 def coverage_report() -> tuple[list[str], list[str]]:
-    """The GUI-exposure guarantee, as data.
-
-    Returns ``(missing, orphaned)``: Settings dataclass fields covered by
+    """Returns ``(missing, orphaned)``: Settings fields covered by
     neither REGISTRY nor INTERNAL_FIELDS, and registry keys that aren't
-    dataclass fields. The meta-test asserts both empty — so no future
-    Settings field can ship without either a GUI surface or a written
-    reason it doesn't need one."""
+    dataclass fields. The meta-test asserts both empty."""
     field_names = {f.name for f in _dataclass_fields(Settings)}
     registry_keys = [desc.key for desc in REGISTRY]
     covered = set(registry_keys) | INTERNAL_FIELDS
@@ -781,8 +703,8 @@ def coverage_report() -> tuple[list[str], list[str]]:
 
 def stash_membership_consistent() -> list[str]:
     """Registry keys whose per_preset flag disagrees with
-    presets.STASH_FIELDS membership. Empty = consistent; the per-preset
-    row markers in the dialog are only honest if this holds."""
+    presets.STASH_FIELDS — the dialog's per-preset row markers lie
+    unless this comes back empty."""
     stashed = set(presets.STASH_FIELDS)
     return sorted(
         desc.key for desc in REGISTRY

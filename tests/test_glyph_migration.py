@@ -1,15 +1,11 @@
-"""Phase-1 registry call-site migrations — pixel-identical or it didn't
-happen.
+"""Phase-1 registry call-site migrations, pinned byte-identical.
 
-The glyph/backdrop/heading/status call sites moved off their hand-typed
-literals onto the registries (tide.glyphs, tide.backdrops, ui/headings,
-theming.status_color). The deal was byte-identical output, so these tests
-compare what the widgets actually render against the OLD literals —
-spelled as unicode escapes, mirroring test_registries, so a lookalike
-codepoint can't sneak through a diff. On top of the equality pins, the
+The glyph/backdrop/heading/status call sites moved off hand-typed
+literals onto the registries. These tests compare what the widgets
+actually render against the OLD literals — spelled as unicode escapes
+so a lookalike codepoint can't sneak through a diff — and the
 pack-routing tests prove the call sites really go through the registry
-(a registered pack changes what a fresh widget draws) rather than having
-been re-hardcoded to strings that merely match today.
+rather than having been re-hardcoded to strings that match today.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """

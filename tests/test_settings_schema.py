@@ -1,16 +1,14 @@
 """v2.0 phase 2 — the option-descriptor table (ui/settings_schema.py).
 
-The headline is the coverage meta-test: every Settings dataclass field
-must be in REGISTRY (it has a GUI surface) or in INTERNAL_FIELDS (a
-written reason why not). Add a field without deciding and this file goes
-red — the "no option ever ships without a GUI again" guarantee.
+The headline is the coverage meta-test: every Settings field must be in
+REGISTRY (it has a GUI surface) or in INTERNAL_FIELDS (a written reason
+why not) — the "no option ever ships without a GUI again" guarantee.
 
 Also pinned: descriptor shape sanity (kinds, tabs, choices resolve
-against the live registries, defaults are actually pickable), per-preset
-flags matching presets.STASH_FIELDS, live-applier names resolving on
-MainWindow (or sitting in the documented this-phase allowlist), the two
-new Settings fields (keymap / glyph_overrides), and the deletion of the
-never-read spotify_client_id.
+against the live registries, defaults pickable), per-preset flags
+matching presets.STASH_FIELDS, live-applier names resolving on
+MainWindow (or sitting in the allowlist), the two new fields
+(keymap / glyph_overrides), and the deleted spotify_client_id.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -37,9 +35,7 @@ from tide.ui.settings_schema import (
 )
 
 
-# ---------------------------------------------------------------------------
-# coverage — the guarantee
-# ---------------------------------------------------------------------------
+# ---------- coverage — the guarantee ----------
 
 class CoverageTests(unittest.TestCase):
     def test_every_settings_field_is_covered(self) -> None:
@@ -77,7 +73,7 @@ class CoverageTests(unittest.TestCase):
         self.assertIs(mapping["theme"], REGISTRY[0])
 
     def test_hidden_v1_fields_now_have_descriptors(self) -> None:
-        # The four options that shipped with no GUI at all in 1.x.
+        # the four options that shipped with no GUI at all in 1.x
         mapping = by_key()
         for key in ("local_auto_index", "spotify_bitrate",
                     "spotify_audio_device", "spotify_connect_enabled"):
@@ -93,9 +89,7 @@ class CoverageTests(unittest.TestCase):
         )
 
 
-# ---------------------------------------------------------------------------
-# descriptor sanity
-# ---------------------------------------------------------------------------
+# ---------- descriptor sanity ----------
 
 class DescriptorSanityTests(unittest.TestCase):
     def test_descriptors_are_frozen(self) -> None:
@@ -114,10 +108,9 @@ class DescriptorSanityTests(unittest.TestCase):
 
     def test_choice_descriptors_resolve(self) -> None:
         """Every choice descriptor yields (value, label) rows with unique
-        values and non-empty labels — providers hit the LIVE registries
-        (themes on disk, layout dirs, backdrop/nav/motion/scale/case
-        tables), so a registry drifting out from under its blurbs fails
-        here, not at dialog-open time."""
+        values and non-empty labels. Providers hit the LIVE registries,
+        so a registry drifting out from under its blurbs fails here, not
+        at dialog-open time."""
         for desc in REGISTRY:
             if desc.kind != "choice":
                 continue
@@ -165,9 +158,8 @@ class DescriptorSanityTests(unittest.TestCase):
                 self.assertIn(getattr(defaults, desc.key), values)
 
     def test_preview_implies_live_applier(self) -> None:
-        # A preview applies through its live applier (rule: previews never
-        # commit — snapshot, apply, revert-on-cancel). No applier, no way
-        # to preview.
+        # a preview applies through its live applier — no applier, no way
+        # to preview (previews never commit)
         for desc in REGISTRY:
             if desc.preview:
                 self.assertIsNotNone(
@@ -175,8 +167,8 @@ class DescriptorSanityTests(unittest.TestCase):
                 )
 
     def test_companion_backdrops_wrap_follow_and_off(self) -> None:
-        # The mini/fullscreen pickers must compose both sentinels around
-        # the real styles: follow leads, off trails.
+        # the mini/fullscreen pickers compose both sentinels around the
+        # real styles: follow leads, off trails
         from tide import backdrops
         rows = schema.companion_backdrop_choices()
         self.assertEqual(rows[0][0], backdrops.FOLLOW)
@@ -190,22 +182,19 @@ class DescriptorSanityTests(unittest.TestCase):
         self.assertEqual(rows[0][0], "")
 
 
-# ---------------------------------------------------------------------------
-# per-preset flags vs presets.STASH_FIELDS
-# ---------------------------------------------------------------------------
+# ---------- per-preset flags vs presets.STASH_FIELDS ----------
 
 class PerPresetTests(unittest.TestCase):
     def test_per_preset_matches_stash_membership(self) -> None:
         # per_preset=True exactly when the field flips with the
-        # personality — the "·per personality·" row markers are only
-        # honest if this holds.
+        # personality — the "·per personality·" markers depend on it
         self.assertEqual(stash_membership_consistent(), [])
 
     def test_glyph_overrides_joined_stash_fields(self) -> None:
         self.assertIn("glyph_overrides", presets.STASH_FIELDS)
 
     def test_keymap_stays_global(self) -> None:
-        # Bindings are muscle memory — they must NOT flip with the preset.
+        # bindings are muscle memory — they must NOT flip with the preset
         self.assertNotIn("keymap", presets.STASH_FIELDS)
 
     def test_stash_fields_still_all_real_settings_fields(self) -> None:
@@ -214,10 +203,9 @@ class PerPresetTests(unittest.TestCase):
             self.assertIn(name, known, name)
 
     def test_restore_seeds_fresh_glyph_overrides_empty(self) -> None:
-        # A never-visited personality has no stash; glyph_overrides must
-        # come back as the Settings default ({}), not None (PresetDef
-        # carries no glyph_overrides attr — falls through to the
-        # dataclass default).
+        # a never-visited personality has no stash; glyph_overrides must
+        # come back as the default ({}), not None (PresetDef carries no
+        # glyph_overrides attr — falls through to the dataclass default)
         s = Settings()
         s.glyph_overrides = {"play": "!"}
         presets.restore(s, "modern")
@@ -238,16 +226,13 @@ class PerPresetTests(unittest.TestCase):
         self.assertEqual(s.glyph_overrides, {"like_on": "★"})
 
 
-# ---------------------------------------------------------------------------
-# live appliers
-# ---------------------------------------------------------------------------
+# ---------- live appliers ----------
 
 class LiveApplierTests(unittest.TestCase):
     def test_live_names_exist_on_mainwindow_or_are_pending(self) -> None:
         """Every ``live`` name must be a real MainWindow method or sit in
-        the documented PENDING_LIVE_APPLIERS allowlist (appliers the
-        settings engine adds later this phase). Checked against the class
-        — appliers are methods, no window build needed."""
+        the PENDING_LIVE_APPLIERS allowlist. Checked against the class —
+        appliers are methods, no window build needed."""
         from tide.ui.window import MainWindow
         for desc in REGISTRY:
             if desc.live is None:
@@ -262,8 +247,8 @@ class LiveApplierTests(unittest.TestCase):
                 )
 
     def test_no_dead_allowlist_entries(self) -> None:
-        # Every pending applier must be referenced by at least one
-        # descriptor — a stale entry means the allowlist drifted.
+        # every pending applier must be referenced — a stale entry means
+        # the allowlist drifted
         used = {d.live for d in REGISTRY if d.live is not None}
         dead = sorted(set(PENDING_LIVE_APPLIERS) - used)
         self.assertEqual(dead, [])
@@ -274,9 +259,7 @@ class LiveApplierTests(unittest.TestCase):
             self.assertTrue(doc.strip(), f"{name}: undocumented")
 
 
-# ---------------------------------------------------------------------------
-# the two new Settings fields
-# ---------------------------------------------------------------------------
+# ---------- the two new Settings fields ----------
 
 class _SandboxedCase(unittest.TestCase):
     """Per-test settings.toml — the module reads config.SETTINGS_FILE at
@@ -327,8 +310,8 @@ class NewFieldsTests(_SandboxedCase):
         self.assertEqual(back.volume, 55)
 
     def test_stale_spotify_client_id_key_is_dropped_quietly(self) -> None:
-        # A 1.x file still carries the deleted key; load() must shrug it
-        # off like any unknown key.
+        # a 1.x file still carries the deleted key; load() must shrug it
+        # off like any unknown key
         config.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         config.SETTINGS_FILE.write_text(
             'theme = "gruvbox"\n'

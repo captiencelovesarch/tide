@@ -55,9 +55,8 @@ class _StatusDot(QFrame):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         from PySide6.QtGui import QColor
-        # ok/warn resolve through the theme's status tokens (@ok/@warn,
-        # dark/light-aware fallbacks). "off" isn't a status — it's the
-        # disabled-neutral, so it keeps its flat gray.
+        # ok/warn go through the theme's status tokens; "off" isn't a
+        # status — it's the disabled-neutral, flat gray.
         if self._state in ("ok", "warn"):
             c = QColor(status_color(self._state))
         else:

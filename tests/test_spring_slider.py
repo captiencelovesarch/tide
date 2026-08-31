@@ -1,26 +1,12 @@
-"""SpringSlider — the modern personality's magnetic-detent spring slider.
-
-What's pinned here:
-- detent snap math: ~6px magnet radius in value-space, detents win over
-  the step grid (even off-grid detents), radius scales with groove width;
-- step quantization on drag / programmatic sets, range renormalization;
-- wheel = one step per notch (with sub-notch accumulation), arrow keys /
-  Home / End, bound nudges emit nothing;
-- motion OFF ⇒ every settle is a synchronous snap and no animation
-  object is ever created (the brutalist zero-animation contract);
-- motion on ⇒ the settle animates then fires value_committed exactly
-  once, with rapid retargets coalescing into a single commit;
-- the modern personality gets the springy OutBack overshoot, brutalist
-  stays mechanical at every intensity (the dialect follows the
-  personality, never the motion level);
-- painting reads theming tokens at paint time (current_effective), with
-  hex fallbacks when no theme is applied;
-- the value bubble fits: at the widget's own sizeHint it clears the
-  handle disc and the tick band, and a host that pins us shorter gets no
-  bubble at all rather than one painted over the ticks;
-- a theme tick is a repaint, never a layout invalidation (theme_changed
-  is a ~10 Hz bus under the adaptive driver);
-- teardown mid-settle / mid-drag doesn't crash and leaves no timer.
+"""SpringSlider — the modern personality's magnetic-detent slider.
+Detents beat the step grid inside a ~6px magnet whose value-space
+radius scales with groove width. Motion OFF ⇒ every settle is a
+synchronous snap and no animation object is ever created; motion on ⇒
+the settle animates then fires value_committed exactly once, rapid
+retargets coalescing. Modern gets the springy OutBack overshoot,
+brutalist stays mechanical at every intensity. Painting reads theming
+tokens at paint time; a theme tick is a repaint, never a layout
+invalidation; teardown mid-settle / mid-drag leaves no timer.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_spring_slider.py
 """
@@ -87,10 +73,9 @@ class _SliderCase(unittest.TestCase):
         self.app = _app()
         self._prev_intensity = motion._user_intensity
         self.addCleanup(motion.set_intensity, self._prev_intensity)
-        # The motion dialect is process-global and sticky: any earlier
-        # test file that applied a preset would otherwise pick this
-        # widget's curves. Start from "nothing bound, no reduced-motion
-        # clamp" and put it all back afterwards.
+        # the motion dialect is process-global and sticky — an earlier
+        # file's preset would otherwise pick this widget's curves.
+        # Start clean, put it all back afterwards.
         for name in ("_profile_override", "_preset_profile", "_reduced_motion"):
             self.addCleanup(setattr, motion, name, getattr(motion, name))
         motion._profile_override = None
@@ -166,16 +151,16 @@ class DetentSnapTests(_SliderCase):
                                places=6)
 
     def test_off_grid_detent_wins_exactly(self) -> None:
-        # A detent that isn't on the step grid must come back verbatim —
-        # detents beat quantization.
+        # an off-grid detent must come back verbatim — detents beat
+        # quantization
         self._off()
         self.s.set_detents([1.333])
         self._click(self.s._x_for_value(1.333) + 3)
         self.assertEqual(self.s.value(), 1.333)
 
     def test_magnet_radius_is_pixel_space(self) -> None:
-        # Same 5px offset, narrower widget: the value-space radius grows,
-        # the snap still lands.
+        # same 5px offset, narrower widget: the value-space radius grows,
+        # the snap still lands
         self._off()
         self.s.resize(140, 36)
         self._click(self.s._x_for_value(1.25) + 5)
@@ -249,10 +234,8 @@ class WheelKeyTests(_SliderCase):
         self.assertAlmostEqual(self.s.value(), 2.0)
         self.assertEqual(self.changed, [])
         self.assertEqual(self.committed, [])
-        # A notch that moved nothing belongs to whatever scrolls behind
-        # us — these sliders sit inside the fx rack's QScrollArea, and
-        # swallowing dead notches would freeze the page under the
-        # pointer.
+        # a dead notch belongs to whatever scrolls behind us (the fx
+        # rack's QScrollArea) — swallowing it would freeze the page
         self.assertIs(ev.accepted, False)
 
     def test_wheel_sub_notch_accumulates(self) -> None:
@@ -304,8 +287,8 @@ class MotionOffTests(_SliderCase):
                           "motion OFF created a settle animation")
 
     def test_release_always_commits_even_unchanged(self) -> None:
-        # Consumers flush pending debounce on committed — a round-trip
-        # drag must still deliver it.
+        # consumers flush pending debounce on committed — a round-trip
+        # drag must still deliver it
         self._off()
         self._click(self.s._x_for_value(1.0))
         self.assertEqual(self.changed, [])
@@ -380,10 +363,9 @@ class MotionOnTests(_SliderCase):
         self._wait_committed()
 
     def test_modern_settles_with_the_springy_overshoot(self) -> None:
-        # The repealed law: bouncy is the MODERN dialect — the
-        # personality picks it, not the intensity (a brutalist user at
-        # full motion still gets mechanical curves, see
-        # test_motion_profiles).
+        # bouncy is the MODERN dialect — the personality picks it, not
+        # the intensity (brutalist at full motion stays mechanical, see
+        # test_motion_profiles)
         motion.bind_preset("modern")
         with mock.patch.object(motion, "intensity",
                                return_value=motion.Intensity.FULL):
@@ -395,8 +377,8 @@ class MotionOnTests(_SliderCase):
         self.assertEqual(self.committed, [2.0])
 
     def test_brutalist_settle_has_no_bounce(self) -> None:
-        # Mechanical is the brutalist dialect at every intensity —
-        # decisive, never OutBack.
+        # mechanical is the brutalist dialect at every intensity — never
+        # OutBack
         motion.bind_preset("brutalist")
         motion.set_intensity(motion.Intensity.FULL)
         self._click(self.s._x_for_value(2.0))
@@ -505,8 +487,7 @@ class BubbleLayoutTests(_SliderCase):
                 self.assertGreaterEqual(self._tick_band()[0], -0.01)
 
     def test_short_host_drops_the_bubble_instead_of_overlapping(self) -> None:
-        # The transport's SpringVolume seat is 26px — there is no honest
-        # place for a bubble there.
+        # the transport's SpringVolume seat is 26px — no room for a bubble
         self.s.resize(400, scale.px(26))
         self.assertIsNone(self.s._bubble_rect("100%"))
         self._off()
@@ -544,8 +525,8 @@ class ThemeTickTests(_SliderCase):
             self.assertEqual(geom.call_count, 1)
 
     def test_host_minimum_width_survives_a_theme_tick(self) -> None:
-        # The speed popover asks for a 220px groove; a theme tick used to
-        # stomp it back to the 80px floor.
+        # the speed popover asks for a 220px groove; a theme tick used to
+        # stomp it back to the 80px floor
         self.s.setMinimumWidth(scale.px(220))
         self.s._on_theme(None)
         self.assertEqual(self.s.minimumWidth(), scale.px(220))

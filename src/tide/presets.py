@@ -1,19 +1,10 @@
-"""Personality presets — the v2.0 "two tides" core.
-
-tide presents as two different players: "brutalist" (mono, still,
-text-bracket chrome) and "modern" (adaptive color, motion, soft
-corners). Secretly it's one app — a preset is the bundle of look/feel
-settings that flips between the two atomically.
-
-Each personality keeps its own tweaks: switching stashes the outgoing
-preset's STASH_FIELDS into ``Settings.preset_state`` and restores the
-incoming one's stash (or its builtin defaults on first visit), so
-brutalist → modern → brutalist brings back your gruvbox, your slots,
-everything.
-
-Import-time Qt-free on purpose: ``apply_preset`` runs at startup before
-any window exists, and the unit tests drive it with fake managers.
-Anything Qt-adjacent is imported lazily inside the functions.
+"""Personality presets — the v2.0 "two tides" core: "brutalist" and
+"modern" are look/feel bundles that flip atomically. A flip stashes the
+outgoing preset's STASH_FIELDS into ``Settings.preset_state`` and
+restores the incoming one's stash (or builtin defaults on first visit),
+so each personality keeps its own tweaks. Qt imports stay lazy:
+``apply_preset`` runs before any window exists, and the unit tests
+drive it with fake managers.
 """
 from __future__ import annotations
 
@@ -25,9 +16,8 @@ from .settings import Settings
 
 @dataclass(frozen=True)
 class PresetDef:
-    """A builtin personality: id + the look/feel values a fresh visit
-    (no stash yet) starts from. Fields with a Settings twin use the same
-    name so restore() can copy them across by string."""
+    """A builtin personality's fresh-visit values. Fields with a Settings
+    twin share its name so restore() can copy by string."""
     id: str
     label: str
     blurb: str
@@ -99,9 +89,8 @@ BUILTINS: dict[str, PresetDef] = {
 }
 
 
-# The Settings fields a personality owns — everything stash/restore
-# round-trips on a flip. Anything not listed here (volume, sources,
-# playback speed, ...) is shared between personalities and untouched.
+# The Settings fields a personality owns — stash/restore round-trips all
+# of them; anything not listed (volume, sources, speed, ...) is shared.
 STASH_FIELDS: tuple[str, ...] = (
     "theme",
     "layout",
@@ -122,26 +111,14 @@ STASH_FIELDS: tuple[str, ...] = (
     "fullscreen_pulse",
     "ui_sounds_enabled",
     "show_thumbnails",
-    # v2.0 phase 2 — the glyph editor's per-glyph overrides. Glyphs are
-    # chrome and chrome is personality: your brutalist ▶ swap shouldn't
-    # bleed into modern. (keymap is deliberately NOT here — key bindings
-    # are muscle memory, global across personalities.)
+    # glyphs flip (chrome is personality); keymap stays global (muscle memory)
     "glyph_overrides",
 )
 
 
-# What a FIRST answer to "choose your tide" leaves alone — everything
-# else in STASH_FIELDS resets to the chosen personality's builtin. See
-# claim_builtin() for why a first answer resets anything at all.
-#
-# The split is "the look you brought" vs "the feel you just picked". A
-# 1.x upgrader arrives with a theme, a layout, their slot variants and
-# their typography/glyph tweaks; all of that is compatible with either
-# personality, they chose it on purpose, and wiping it would be exactly
-# the unexplained change the migration invariant forbids. Motion,
-# corners, backdrops, nav icons and the rest are what the PANE promised
-# — the whole point of the side that reads "nothing moves. ever." is
-# that clicking it stops the motion.
+# What a FIRST answer to "choose your tide" keeps; the rest resets to
+# the chosen builtin (see claim_builtin). These are the look a 1.x
+# upgrader chose on purpose — the migration invariant forbids wiping them.
 FIRST_ANSWER_KEEPS: tuple[str, ...] = (
     "theme",
     "layout",
@@ -159,9 +136,8 @@ def builtin(preset_id: str) -> PresetDef:
 
 
 def _settings_default(name: str):
-    """The Settings dataclass default for one field — the reset value for
-    stash fields a PresetDef doesn't carry (layout_overrides, font
-    overrides)."""
+    """Settings dataclass default for ``name`` — the reset value for stash
+    fields a PresetDef doesn't carry (layout_overrides, font overrides)."""
     for f in fields(Settings):
         if f.name != name:
             continue
@@ -173,9 +149,8 @@ def _settings_default(name: str):
 
 
 def _fresh_value(preset_id: str, name: str):
-    """What ``name`` starts as on a preset never visited before (or a
-    stash from an older build that predates the field): the builtin def's
-    value when it has one, else the Settings default."""
+    """Value for a never-visited preset (or a stash predating the field):
+    the builtin's value if it has one, else the Settings default."""
     d = BUILTINS.get(preset_id)
     if d is not None and hasattr(d, name):
         return getattr(d, name)
@@ -183,28 +158,12 @@ def _fresh_value(preset_id: str, name: str):
 
 
 def claim_builtin(settings: Settings, preset_id: str) -> None:
-    """Make an ALREADY-ACTIVE personality actually wear its builtin — the
-    first answer to "choose your tide", when the answer is the side the
-    silent migration already filed the user under.
-
-    ``adopt_current`` runs long before the chooser opens, so by the time
-    the panes are on screen ``settings.preset`` is one of them. Without
-    this, that pane is a dead button: ``apply_preset``'s same-id path
-    only refreshes the stash, so a 1.5 user on a mono theme with
-    ``motion=full`` and rounded corners could click the side that
-    advertises "monospace type, hard edges" and "nothing moves. ever."
-    and keep every bounce and every rounded corner — the zero-animation
-    product contract quietly unmet. The OTHER pane meanwhile delivered
-    its builtin in full (first visit → restore), so which pane changed
-    anything depended on a theme-aesthetic guess the user never saw.
-
-    Only the archetype's own fields move; ``FIRST_ANSWER_KEEPS`` stays.
-    A pick made after the question has been answered is a RE-PICK, not a
-    first answer, and must never reset the user's tweaks — which is why
-    the caller (app.commit_personality_choice) gates this on
-    ``preset_chosen`` rather than on the id.
-
-    KeyError on an unknown preset id, like :func:`builtin`.
+    """Make an ALREADY-ACTIVE personality wear its builtin — the first
+    answer to "choose your tide" when it matches the silently-adopted
+    id. Without this the pre-selected pane is a dead button, since
+    apply_preset's same-id path only refreshes the stash.
+    ``FIRST_ANSWER_KEEPS`` stays. Callers gate on ``preset_chosen``, not
+    the id — a re-pick must never reset tweaks. KeyError on unknown ids.
     """
     if preset_id not in BUILTINS:
         raise KeyError(preset_id)
@@ -225,12 +184,10 @@ def stash(settings: Settings) -> None:
 
 
 def restore(settings: Settings, preset_id: str) -> None:
-    """Write ``preset_id``'s stash (or its builtin defaults when it has
-    never been visited) onto the settings fields and make it active.
-
-    Stash entries win field-by-field, so a stash written by an older
-    build simply gets defaults for fields it doesn't know about.
-    KeyError when ``preset_id`` is unknown and has no stash to go on.
+    """Write ``preset_id``'s stash (or builtin defaults) onto the
+    settings fields and make it active. Stash entries win field-by-field
+    — an older build's stash gets defaults for fields it lacks. KeyError
+    for an unknown id with no stash.
     """
     stashed = settings.preset_state.get(preset_id)
     if stashed is None and preset_id not in BUILTINS:
@@ -246,21 +203,13 @@ def restore(settings: Settings, preset_id: str) -> None:
 
 def apply_preset(settings: Settings, preset_id: str, window=None,
                  persist: bool = True) -> None:
-    """Flip the active personality: stash the outgoing preset, restore the
-    incoming one, and push the result to the live managers in the one
-    order that honors every contract (theme bundle first, then layout,
-    then motion, then the sticky corner override).
-
-    Safe pre-window (``window=None``) — startup calls this before any
-    widget exists; the window-side visuals hook only runs when a window
-    is passed. Persistence is field-scoped (save_fields) so a flip can't
-    clobber what another saver wrote in between.
-
-    Re-applying the ACTIVE preset (startup bootstrap, wizard handoff)
-    never restores: the live fields are the truth — the settings dialog
-    edits them without touching the stash, so restoring here would revert
-    every dialog customization on the next launch. The stash is refreshed
-    from the live values instead; only a real flip round-trips through it.
+    """Flip the active personality: stash the outgoing, restore the
+    incoming, push to the live managers in contract order (theme bundle,
+    layout, motion, sticky corner override). Safe with ``window=None``.
+    Persistence is field-scoped (save_fields) so a flip can't clobber a
+    concurrent saver. Re-applying the ACTIVE preset only refreshes the
+    stash: the settings dialog edits live fields without touching the
+    stash, and restoring here would revert those edits on next launch.
     """
     if settings.preset != preset_id:
         if settings.preset:
@@ -269,8 +218,7 @@ def apply_preset(settings: Settings, preset_id: str, window=None,
     else:
         stash(settings)
 
-    # One batched theme apply — slug + font + size + case in a single
-    # restyle instead of the four the individual setters would cost.
+    # one restyle for slug+font+size+case instead of four
     from . import theming
     theming.manager().apply_bundle(
         slug=settings.theme,
@@ -284,13 +232,11 @@ def apply_preset(settings: Settings, preset_id: str, window=None,
     )
     from .ui import motion as motion_module
     motion_module.set_intensity(settings.motion)
-    # The personality picks the motion dialect; intensity only picks how
-    # much of it runs. Binding here (not to FULL) is what keeps OutBack
-    # overshoot out of brutalist when someone turns motion up.
+    # dialect follows the personality, not the intensity — this is what
+    # keeps OutBack overshoot out of brutalist at motion=full
     motion_module.bind_preset(preset_id)
-    # Corner style rides the same sticky @radius override the settings
-    # dialog pushes (window._do_open_settings) so every QSS widget that
-    # reads @radius matches the personality's softness.
+    # same sticky @radius override the settings dialog pushes
+    # (window._do_open_settings), so every @radius QSS widget matches
     from .ui.central_bg import corner_radius as _corner_radius
     radius_px = _corner_radius(settings.corner_style)
     theming.manager().set_user_override(
@@ -307,20 +253,16 @@ def apply_preset(settings: Settings, preset_id: str, window=None,
                 *STASH_FIELDS,
             )
         except Exception:
-            # Persistence is best-effort — the flip already happened on
-            # screen; a full save retries the next time anything saves.
+            # best-effort — the flip happened; the next full save retries
             pass
 
 
 def adopt_current(settings: Settings) -> str:
-    """Silent 1.x → 2.0 migration: file the user's current look under the
-    personality their theme belongs to, changing NOTHING they can see.
-
-    Every field keeps its value verbatim; the stash snapshots them so the
-    first real flip round-trips back to exactly this state. preset_chosen
-    stays False — adoption is not a choice, so the chooser can still
-    offer itself later. Returns the adopted preset id.
-    """
+    """Silent 1.x → 2.0 migration: file the current look under the
+    personality its theme belongs to, changing NOTHING visible; the stash
+    snapshots every field so the first flip round-trips back.
+    preset_chosen stays False — adoption is not a choice, the chooser
+    may still offer itself. Returns the preset id."""
     aesthetic = ""
     try:
         from . import theming
