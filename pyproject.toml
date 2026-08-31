@@ -64,7 +64,8 @@ include = [
   "src/tide/fonts/*.ttf",
   "src/tide/fonts/*.otf",
   "src/tide/icons/**/*.svg",
-  "src/tide/sounds/*.wav",
+  "src/tide/sounds/**/*.wav",
+  "src/tide/sounds/**/*.md",
 ]
 
 # The sdist must additionally carry everything the wheel build consumes
@@ -79,9 +80,15 @@ include = [
   "src/tide/fonts/*.ttf",
   "src/tide/fonts/*.otf",
   "src/tide/icons/**/*.svg",
-  "src/tide/sounds/*.wav",
+  "src/tide/sounds/**/*.wav",
+  "src/tide/sounds/**/*.md",
   "assets/icon-*.png",
   "tide.desktop",
   "PKGBUILD",
   "CHANGELOG.md",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "packaging: builds a real wheel — slower; skipped when python-build is unavailable",
 ]

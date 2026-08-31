@@ -162,7 +162,9 @@ class SwitchPresetTests(_FlipCase):
         w = self._make_window(s)
         w.switch_preset("modern")
         self.assertEqual(s.layout_overrides.get("progress"), "bar")
-        self.assertEqual(s.layout_overrides.get("volume"), "knob")
+        # v2.0 phase 3: modern's builtin theme seeds the SpringSlider
+        # volume face (adaptive theme.toml [slots]).
+        self.assertEqual(s.layout_overrides.get("volume"), "spring")
         self.assertEqual(w._slot_progress, "bar")
         self.assertEqual(w._slot_controls, "large")
 

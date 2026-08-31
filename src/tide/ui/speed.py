@@ -4,11 +4,25 @@ A bracket-styled toggle that displays the current playback speed (e.g.
 ``[1.25×]``) and opens a small popover for fine adjustment. Right-click the
 button to reset to 1.0×.
 
-The popover offers three ways to change speed: a −/+ row that nudges by
-0.05, a preset row of common TikTok values (0.5 / 0.75 / 1.0 / 1.25 / 1.5 /
-2.0), and an explicit "reset" button. All actions emit a single
-``speed_changed`` signal — the SpeedButton is the authoritative store and
-syncs the popover after each change so the displayed value never drifts.
+The popover has two faces, picked when it's built from the window's active
+personality:
+
+- brutalist (default): the original bracket popover — a −/+ row that
+  nudges by 0.05, a preset row of common TikTok values (0.5 / 0.75 / 1.0 /
+  1.25 / 1.5 / 2.0), and an explicit "reset" button.
+- modern: a SpringSlider over the same law — magnetic detents on the
+  presets, ±0.05 nudge chips at the ends, a live readout, and reset.
+
+Both faces emit a single ``speed_changed`` signal — the SpeedButton is the
+authoritative store and syncs the popover after each change so the
+displayed value never drifts. A personality flip mid-session picks the new
+face on the next open (the cached popover is rebuilt), never mid-show.
+
+The button also greys itself (``set_backend_supported``) when the active
+playback backend can't do variable speed — librespot renders Spotify's
+audio server-side, so pretending the nudges work would be a lie. Greyed
+refuses every user-driven path, keyboard and MPRIS included; only silent
+programmatic restores (``emit=False``) still land.
 
 Speed range is clamped to [0.5, 2.0]. mpv accepts wider but anything outside
 this range is more "novelty" than "audible," so the UI doesn't expose it.
@@ -27,6 +41,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import theming
+from . import scale
+from .spring_slider import SpringSlider
 from .widgets import BracketButton
 
 # The speed law (range, presets, clamp, formatting) lives at package root
@@ -43,6 +59,10 @@ from ..speed_law import (  # noqa: F401  (re-exports)
 from ..speed_law import clamp as _clamp  # noqa: F401  (re-export)
 
 
+_TIP_NORMAL = "playback speed — right-click to reset to 1.0×"
+_TIP_UNSUPPORTED = "speed n/a on this source"
+
+
 class SpeedButton(BracketButton):
     """Speed indicator + entry point to the popover.
 
@@ -55,14 +75,29 @@ class SpeedButton(BracketButton):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(format_speed(1.0), parent=parent)
         self._speed: float = 1.0
-        self._popover: SpeedPopover | None = None
+        self._popover: QFrame | None = None
+        self._popover_face_built: str = ""
+        self._backend_supported: bool = True
         self.clicked.connect(self._open_popover)
-        self.setToolTip("playback speed — right-click to reset to 1.0×")
+        self.setToolTip(_TIP_NORMAL)
 
     def speed(self) -> float:
         return self._speed
 
     def set_speed(self, value: float, *, emit: bool = True) -> None:
+        if emit and not self._backend_supported:
+            # Greyed means inert on EVERY path, not just the ones Qt
+            # blocks. setEnabled(False) stops clicks and the right-click
+            # reset, but the [ ] \ keymap actions and MPRIS SetRate call
+            # straight in — honoring them would walk the greyed button's
+            # label to a speed the audio isn't playing at, while its own
+            # tooltip says the feature is unavailable.
+            #
+            # Programmatic restores (emit=False — app.py's startup) still
+            # land: the stored value is not a claim about what's playing,
+            # and it re-applies the moment a backend that honors speed
+            # comes back.
+            return
         clamped = _clamp(value)
         if abs(clamped - self._speed) < 1e-4:
             # Even on no-op, keep the popover's display in sync — the user
@@ -80,6 +115,29 @@ class SpeedButton(BracketButton):
     def reset(self) -> None:
         self.set_speed(1.0)
 
+    def set_backend_supported(self, supported: bool) -> None:
+        """Grey the control when the active playback backend can't do
+        variable speed (librespot renders audio server-side). Disabled
+        means no popover, no right-click reset, and no user-driven
+        ``set_speed`` at all — the keymap ([ ] \\) and MPRIS SetRate go
+        through the same refusal, so the label can never claim a speed
+        the audio isn't playing at. The tooltip says why.
+
+        The stored speed is untouched: it re-applies the moment playback
+        lands back on a backend that honors it."""
+        supported = bool(supported)
+        if supported == self._backend_supported:
+            return
+        self._backend_supported = supported
+        self.setEnabled(supported)
+        self.setToolTip(_TIP_NORMAL if supported else _TIP_UNSUPPORTED)
+        if not supported and self._popover is not None \
+                and self._popover.isVisible():
+            self._popover.hide()
+
+    def backend_supported(self) -> bool:
+        return self._backend_supported
+
     def mousePressEvent(self, ev: QMouseEvent) -> None:
         if ev.button() == Qt.RightButton:
             self.reset()
@@ -87,12 +145,30 @@ class SpeedButton(BracketButton):
             return
         super().mousePressEvent(ev)
 
+    def _popover_face(self) -> str:
+        """``"spring"`` when the window's active personality is modern,
+        else ``"bracket"``. Read from the window's settings at popover
+        build time; anything unknown (no settings attached, tests, a
+        third-party preset id) defaults to the bracket face."""
+        settings = getattr(self.window(), "_settings", None)
+        preset = str(getattr(settings, "preset", "") or "")
+        return "spring" if preset == "modern" else "bracket"
+
     def _open_popover(self) -> None:
+        face = self._popover_face()
+        if self._popover is not None and self._popover_face_built != face:
+            # The personality flipped since this popover was built —
+            # rebuild so the new face shows on this open. Cheap: the
+            # popover carries no state beyond what sync() pushes.
+            self._popover.deleteLater()
+            self._popover = None
         if self._popover is None:
             # Parent the popover to the main window so it floats above the
             # button without inheriting the button's layout constraints.
-            self._popover = SpeedPopover(self.window())
+            cls = SpringSpeedPopover if face == "spring" else SpeedPopover
+            self._popover = cls(self.window())
             self._popover.speed_changed.connect(self.set_speed)
+            self._popover_face_built = face
         self._popover.sync(self._speed)
         self._popover.show_above(self)
 
@@ -189,6 +265,139 @@ class SpeedPopover(QFrame):
         self.raise_()
 
     # ---------- internals ----------
+
+    def _on_minus(self) -> None:
+        self.speed_changed.emit(self._current - SPEED_STEP)
+
+    def _on_plus(self) -> None:
+        self.speed_changed.emit(self._current + SPEED_STEP)
+
+    def _apply_theme(self, theme) -> None:
+        bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
+        fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        self.setStyleSheet(
+            f"QFrame#SpeedPopover {{ background: {bg}; border: 1px solid {fg}; }}"
+        )
+
+
+class SpringSpeedPopover(QFrame):
+    """The modern face: a magnetic-detent SpringSlider over the speed law,
+    ±0.05 nudge chips at the ends, a live readout on top, and reset.
+
+    Same external surface as SpeedPopover (``speed_changed`` / ``sync`` /
+    ``show_above``) so the SpeedButton can't tell the faces apart. The
+    bracket popover above stays exactly as it was — this class exists so
+    that one never has to change. ``show_above`` / ``_apply_theme`` are
+    therefore small deliberate duplicates; keep them in sync by hand.
+
+    Value flow: the slider emits live during a drag (speed follows the
+    finger — mpv's speed property is cheap), the button clamps through
+    speed_law and syncs back, and the sync only touches the slider when
+    the value actually differs, so it never yanks the handle out from
+    under an in-progress drag.
+    """
+
+    speed_changed = Signal(float)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
+        self.setObjectName("SpeedPopover")
+        self._apply_theme(theming.manager().current())
+        theming.manager().theme_changed.connect(self._apply_theme)
+
+        # Live readout, big & centered — same inline emphasis as the
+        # bracket face's display.
+        self._display = QLabel(format_speed(1.0))
+        self._display.setAlignment(Qt.AlignCenter)
+        self._display.setObjectName("SpeedPopoverDisplay")
+        self._display.setStyleSheet("font-weight: 600;")
+
+        # The slider IS the speed law: UI range, step grid, preset
+        # detents, and the shared formatter.
+        self._slider = SpringSlider()
+        self._slider.set_range(SPEED_MIN, SPEED_MAX, SPEED_STEP)
+        self._slider.set_detents(SPEED_PRESETS)
+        self._slider.set_formatter(format_speed)
+        self._slider.setMinimumWidth(scale.px(220))
+        self._slider.value_changed.connect(self._on_slider_changed)
+        self._slider.value_committed.connect(self._on_slider_committed)
+
+        # ±0.05 nudge chips at the ends of the slider.
+        self._minus_btn = BracketButton(f"−{SPEED_STEP:.2f}")
+        self._plus_btn = BracketButton(f"+{SPEED_STEP:.2f}")
+        self._minus_btn.clicked.connect(self._on_minus)
+        self._plus_btn.clicked.connect(self._on_plus)
+
+        slider_row = QHBoxLayout()
+        slider_row.setSpacing(8)
+        slider_row.addWidget(self._minus_btn)
+        slider_row.addWidget(self._slider, stretch=1)
+        slider_row.addWidget(self._plus_btn)
+
+        self._reset_btn = BracketButton("reset")
+        self._reset_btn.clicked.connect(lambda: self.speed_changed.emit(1.0))
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+        root.addWidget(self._display)
+        root.addLayout(slider_row)
+        root.addWidget(self._reset_btn, alignment=Qt.AlignRight)
+
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._current: float = 1.0
+
+    def sync(self, speed: float) -> None:
+        self._current = float(speed)
+        self._display.setText(format_speed(speed))
+        # Same edge hinting as the bracket face.
+        self._minus_btn.setEnabled(speed > SPEED_MIN + 1e-4)
+        self._plus_btn.setEnabled(speed < SPEED_MAX - 1e-4)
+        # Only move the handle when the value really changed — during a
+        # drag the slider itself originated this sync, and a set_value
+        # here would snap the display out from under the finger. External
+        # changes (right-click reset, [ ] shortcuts) settle springily
+        # while the popover is up; the first pre-show sync snaps.
+        if abs(self._slider.value() - float(speed)) > 1e-9:
+            self._slider.set_value(float(speed), animate=self.isVisible())
+
+    def show_above(self, anchor: QWidget) -> None:
+        """Duplicate of SpeedPopover.show_above — see the class docstring
+        for why the bracket face is left verbatim."""
+        self.adjustSize()
+        anchor_top_left = anchor.mapToGlobal(anchor.rect().topLeft())
+        x = anchor_top_left.x() + (anchor.width() - self.width()) // 2
+        y = anchor_top_left.y() - self.height() - 4
+        screen = anchor.screen()
+        if screen is not None:
+            geom = screen.availableGeometry()
+            if y < geom.top():
+                # Not enough room above — flip below.
+                y = anchor_top_left.y() + anchor.height() + 4
+            # Keep within horizontal screen bounds too.
+            x = max(geom.left() + 4, min(x, geom.right() - self.width() - 4))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+
+    # ---------- internals ----------
+
+    def _on_slider_changed(self, value: float) -> None:
+        # Live during interaction: the logical value is already final
+        # (only the display springs), so pushing it to the player now is
+        # honest. The button's clamp is a no-op here — slider steps live
+        # on the same 0.05 grid, detents on the presets.
+        self._current = float(value)
+        self._display.setText(format_speed(self._current))
+        self.speed_changed.emit(self._current)
+
+    def _on_slider_committed(self, value: float) -> None:
+        # The settle landed. The live emits already delivered this value
+        # (set_speed dedupes), but a release exactly where the drag began
+        # emits nothing live — re-emitting keeps the button's popover
+        # sync honest in every case.
+        self.speed_changed.emit(float(value))
 
     def _on_minus(self) -> None:
         self.speed_changed.emit(self._current - SPEED_STEP)

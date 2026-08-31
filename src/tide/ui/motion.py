@@ -17,6 +17,19 @@ Design contract:
   * Reduced-motion detection: env var ``QT_REDUCED_MOTION=1`` or Qt's
     ``QStyleHints.uiEffectsEnabled() == False`` clamps FULL to LITE. An
     explicit OFF is never overridden — the user always wins downward.
+  * Motion profiles (P3): durations + easings are data, keyed by profile.
+    ``mechanical`` is the brutalist dialect (short, decisive, no bounce)
+    and is byte-for-byte the pre-P3 constants. ``springy`` is the modern
+    dialect — slightly longer, OutBack-family overshoot where it's safe.
+    The dialect belongs to the PERSONALITY, not to the intensity:
+    ``bind_preset(settings.preset)`` picks it (modern → springy, anything
+    else → mechanical) and intensity only says how much motion runs. A
+    brutalist user who turns motion up to full gets more animation, never
+    bounce. ``set_profile`` pins a dialect for tests/embedders; with
+    nothing bound at all the profile falls back to following intensity.
+    Callers ask for ``dur("short")`` / ``ease("out")`` instead of
+    hardcoding; the legacy ``DUR_*`` / ``EASE_*`` constants remain as
+    mechanical aliases.
   * Idempotent helpers. Each helper takes (or implicitly uses) a target
     widget and registers its in-flight animation under
     ``target._motion_anims[kind]``. A subsequent call with the same
@@ -143,21 +156,150 @@ def _detect_reduced_motion() -> bool:
     return False
 
 
-# ---------- standard durations + easings ----------
+# ---------- motion profiles ----------
 
 
-# Milliseconds. Chosen for a brutalist/mechanical feel — short and decisive.
-# Anything longer drifts into "soft / decorative" territory.
-DUR_MICRO = 120   # hover, focus, button micro
-DUR_SHORT = 200   # toast, dialog fade, view crossfade, basic slides
-DUR_MED = 350     # signature: album art crossfade, title scramble
-DUR_LONG = 600    # rarely used directly — reserved for special atmospherics
+def _curve(curve_type, overshoot: Optional[float] = None) -> QEasingCurve:
+    c = QEasingCurve(curve_type)
+    if overshoot is not None:
+        c.setOvershoot(overshoot)
+    return c
 
 
-EASE_LINEAR = QEasingCurve(QEasingCurve.Linear)
-EASE_OUT_QUAD = QEasingCurve(QEasingCurve.OutQuad)
-EASE_OUT_CUBIC = QEasingCurve(QEasingCurve.OutCubic)
-EASE_IN_OUT_QUAD = QEasingCurve(QEasingCurve.InOutQuad)
+# Duration keys (ms):
+#   micro — hover, focus, button micro
+#   short — toast, dialog fade, view crossfade, basic slides
+#   med   — signature: album art crossfade, title scramble
+#   long  — rarely used directly — reserved for special atmospherics
+# Easing keys (semantic, so a profile can swap curve families):
+#   linear     — even progress (spinners, meters)
+#   out        — the everyday decelerate; safe on opacity in every profile
+#   out_strong — heavier arrival (color glides, big moves); opacity-safe
+#   in_out     — both-ends easing for repositioning
+#   spring     — settles into place. Mechanical: decisive, no bounce.
+#     Springy: OutBack overshoot — ONLY for positions/values, never opacity.
+PROFILES: dict = {
+    # The brutalist dialect. These are exactly the pre-P3 constants —
+    # short and decisive; anything longer drifts into "soft / decorative"
+    # territory, and bounce is against the law here.
+    "mechanical": {
+        "dur": {"micro": 120, "short": 200, "med": 350, "long": 600},
+        "ease": {
+            "linear": _curve(QEasingCurve.Linear),
+            "out": _curve(QEasingCurve.OutQuad),
+            "out_strong": _curve(QEasingCurve.OutCubic),
+            "in_out": _curve(QEasingCurve.InOutQuad),
+            "spring": _curve(QEasingCurve.OutQuad),
+        },
+    },
+    # The modern dialect. A touch longer so the overshoot has room to
+    # read; Back-family curves carry the spring. Overshoot 1.70158 is
+    # Qt's default (~10% past target) — enough to feel alive without
+    # turning the UI into a bouncy castle.
+    "springy": {
+        "dur": {"micro": 150, "short": 260, "med": 420, "long": 700},
+        "ease": {
+            "linear": _curve(QEasingCurve.Linear),
+            "out": _curve(QEasingCurve.OutCubic),
+            "out_strong": _curve(QEasingCurve.OutQuint),
+            "in_out": _curve(QEasingCurve.InOutCubic),
+            "spring": _curve(QEasingCurve.OutBack, 1.70158),
+        },
+    },
+}
+
+
+# Which dialect each personality speaks. Anything not listed (a
+# third-party preset id) speaks mechanical: bounce is opt-in, never
+# something a preset gets by accident.
+PRESET_PROFILES: dict = {
+    "brutalist": "mechanical",
+    "modern": "springy",
+}
+
+# None = nothing pinned / nothing bound.
+_profile_override: Optional[str] = None
+_preset_profile: Optional[str] = None
+
+
+def set_profile(name: Optional[str]) -> None:
+    """Pin the active profile regardless of personality or intensity, or
+    ``None`` to go back to following the bound personality. Unknown names
+    raise — a typo here would silently change the whole app's feel."""
+    global _profile_override
+    if name is not None and name not in PROFILES:
+        raise ValueError(f"unknown motion profile: {name!r}")
+    _profile_override = name
+
+
+def bind_preset(preset_id: Optional[str]) -> None:
+    """Bind the dialect to the active personality (``presets.apply_preset``
+    and the live motion apply both call this).
+
+    This is the whole reason bounce can't leak: intensity is an
+    independent user setting, so binding springy to FULL would hand the
+    brutalist personality OutBack overshoot the moment someone turned
+    motion up. The personality decides the dialect; the intensity decides
+    how much of it runs. ``None``/empty unbinds (back to the
+    intensity-following fallback)."""
+    global _preset_profile
+    if not preset_id:
+        _preset_profile = None
+        return
+    _preset_profile = PRESET_PROFILES.get(str(preset_id), "mechanical")
+
+
+def bound_profile() -> Optional[str]:
+    """The dialect bound to the active personality, or ``None`` if nothing
+    has been bound yet. Surfaced for tests / diagnostics."""
+    return _preset_profile
+
+
+def profile() -> str:
+    """Name of the active profile: an explicit pin, else the personality's
+    dialect, else (nothing bound) intensity's fallback.
+
+    Reduced motion always lands on mechanical — overshoot is precisely
+    what that signal asks us to drop — and it outranks the personality
+    binding. An explicit ``set_profile`` pin still wins, because it exists
+    for tests and embedders that mean it."""
+    if _profile_override is not None:
+        return _profile_override
+    if _reduced_motion:
+        return "mechanical"
+    if _preset_profile is not None:
+        return _preset_profile
+    return "springy" if intensity() == Intensity.FULL else "mechanical"
+
+
+def dur(key: str) -> int:
+    """Duration in ms for ``key`` under the active profile."""
+    return PROFILES[profile()]["dur"][key]
+
+
+def ease(key: str) -> QEasingCurve:
+    """Easing curve for ``key`` under the active profile. Returns a copy —
+    QEasingCurve is mutable and the profile tables must stay pristine."""
+    return QEasingCurve(PROFILES[profile()]["ease"][key])
+
+
+# Helpers shadow ``dur``/``easing`` with their keyword parameters; these
+# private aliases keep the module functions reachable inside them.
+_dur = dur
+_ease = ease
+
+
+# Legacy aliases (external compat). Always the mechanical values — code
+# that wants profile-aware timing calls dur()/ease() instead.
+DUR_MICRO = PROFILES["mechanical"]["dur"]["micro"]
+DUR_SHORT = PROFILES["mechanical"]["dur"]["short"]
+DUR_MED = PROFILES["mechanical"]["dur"]["med"]
+DUR_LONG = PROFILES["mechanical"]["dur"]["long"]
+
+EASE_LINEAR = PROFILES["mechanical"]["ease"]["linear"]
+EASE_OUT_QUAD = PROFILES["mechanical"]["ease"]["out"]
+EASE_OUT_CUBIC = PROFILES["mechanical"]["ease"]["out_strong"]
+EASE_IN_OUT_QUAD = PROFILES["mechanical"]["ease"]["in_out"]
 
 
 # Default monospace-safe glyph pool for scramble_text. Mixes block fills
@@ -226,8 +368,8 @@ def _read_current_opacity(target: QWidget) -> float:
 def fade_in(
     widget: QWidget,
     *,
-    dur: int = DUR_SHORT,
-    easing: QEasingCurve = EASE_OUT_QUAD,
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
     on_done: Optional[Callable[[], None]] = None,
 ) -> Optional[QPropertyAnimation]:
     """Fade ``widget`` to fully opaque. Calls ``widget.show()`` first so the
@@ -240,6 +382,8 @@ def fade_in(
         if on_done:
             on_done()
         return None
+    dur = _dur("short") if dur is None else dur
+    easing = _ease("out") if easing is None else easing
     start_opacity = _read_current_opacity(widget) if widget.graphicsEffect() else 0.0
     eff = QGraphicsOpacityEffect(widget)
     eff.setOpacity(start_opacity)
@@ -274,8 +418,8 @@ def fade_in(
 def fade_out(
     widget: QWidget,
     *,
-    dur: int = DUR_SHORT,
-    easing: QEasingCurve = EASE_OUT_QUAD,
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
     hide_on_done: bool = True,
     on_done: Optional[Callable[[], None]] = None,
 ) -> Optional[QPropertyAnimation]:
@@ -289,6 +433,8 @@ def fade_out(
         if on_done:
             on_done()
         return None
+    dur = _dur("short") if dur is None else dur
+    easing = _ease("out") if easing is None else easing
     start_opacity = _read_current_opacity(widget)
     eff = QGraphicsOpacityEffect(widget)
     eff.setOpacity(start_opacity)
@@ -328,8 +474,8 @@ def slide(
     from_pos: QPoint,
     to_pos: QPoint,
     *,
-    dur: int = DUR_SHORT,
-    easing: QEasingCurve = EASE_OUT_QUAD,
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
     on_done: Optional[Callable[[], None]] = None,
 ) -> Optional[QPropertyAnimation]:
     """Animate ``widget.pos`` between two points. Caller is responsible for
@@ -342,6 +488,8 @@ def slide(
         if on_done:
             on_done()
         return None
+    dur = _dur("short") if dur is None else dur
+    easing = _ease("out") if easing is None else easing
     anim = QPropertyAnimation(widget, b"pos", widget)
     anim.setDuration(dur)
     anim.setStartValue(from_pos)
@@ -369,8 +517,8 @@ def color_lerp(
     end: QColor,
     *,
     on_update: Callable[[QColor], None],
-    dur: int = DUR_MED,
-    easing: QEasingCurve = EASE_OUT_CUBIC,
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
     on_done: Optional[Callable[[], None]] = None,
     owner: Optional[QObject] = None,
     kind: str = "color",
@@ -386,6 +534,8 @@ def color_lerp(
         if on_done:
             on_done()
         return None
+    dur = _dur("med") if dur is None else dur
+    easing = _ease("out_strong") if easing is None else easing
     anim = QVariantAnimation(owner)
     anim.setDuration(dur)
     anim.setStartValue(QColor(start))
@@ -412,6 +562,128 @@ def color_lerp(
     return anim
 
 
+# ---------- numeric lerp ----------
+
+
+def value_lerp(
+    start: float,
+    end: float,
+    *,
+    on_update: Callable[[float], None],
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
+    on_done: Optional[Callable[[], None]] = None,
+    owner: Optional[QObject] = None,
+    kind: str = "value",
+) -> Optional[QVariantAnimation]:
+    """Interpolate a float from ``start`` to ``end``, calling ``on_update``
+    per frame. The numeric sibling of ``color_lerp`` — scroll positions,
+    heights, handle offsets. OFF snaps: ``on_update(end)`` synchronously."""
+    _cancel_prior(owner, kind)
+    if intensity() == Intensity.OFF:
+        on_update(float(end))
+        if on_done:
+            on_done()
+        return None
+    dur = _dur("short") if dur is None else dur
+    easing = _ease("out") if easing is None else easing
+    anim = QVariantAnimation(owner)
+    anim.setDuration(dur)
+    anim.setStartValue(float(start))
+    anim.setEndValue(float(end))
+    anim.setEasingCurve(easing)
+
+    def _frame(v) -> None:
+        try:
+            on_update(float(v))
+        except (TypeError, ValueError):
+            pass
+
+    anim.valueChanged.connect(_frame)
+
+    def _finish() -> None:
+        if owner is not None:
+            table = getattr(owner, "_motion_anims", None)
+            if table is not None and table.get(kind) is anim:
+                table.pop(kind, None)
+        if on_done:
+            on_done()
+
+    anim.finished.connect(_finish)
+    _register(owner, kind, anim)
+    anim.start()
+    return anim
+
+
+def spring_settle(
+    start: float,
+    end: float,
+    *,
+    on_update: Callable[[float], None],
+    dur: Optional[int] = None,
+    on_done: Optional[Callable[[], None]] = None,
+    owner: Optional[QObject] = None,
+    kind: str = "spring",
+) -> Optional[QVariantAnimation]:
+    """Settle a numeric value into place with the profile's ``spring``
+    curve — the SpringSlider's release/jump animation. Gated by
+    construction: OFF snaps synchronously; LITE settles on the mechanical
+    curve (decisive, no bounce); FULL overshoots and springs back.
+    ``on_update`` may receive values past ``end`` mid-flight (that IS the
+    overshoot) — only use for positions/values, never opacity."""
+    return value_lerp(
+        start,
+        end,
+        on_update=on_update,
+        dur=_dur("short") if dur is None else dur,
+        easing=_ease("spring"),
+        on_done=on_done,
+        owner=owner,
+        kind=kind,
+    )
+
+
+def nudge(
+    widget: QWidget,
+    *,
+    dx: int = 0,
+    dy: int = 3,
+    dur: Optional[int] = None,
+    on_done: Optional[Callable[[], None]] = None,
+) -> Optional[QPropertyAnimation]:
+    """Purely decorative press-feedback bump: shifts ``widget`` by
+    ``(dx, dy)`` and springs it straight back to where it started.
+    Atmospheric tier — a no-op below FULL (``on_done`` still fires), so
+    callers can sprinkle it without their own gating. The widget ends
+    exactly where it began, so layouts stay honest."""
+    _cancel_prior(widget, "nudge")
+    if intensity() != Intensity.FULL:
+        if on_done:
+            on_done()
+        return None
+    dur = _dur("micro") * 2 if dur is None else dur
+    home = widget.pos()
+    anim = QPropertyAnimation(widget, b"pos", widget)
+    anim.setDuration(dur)
+    anim.setKeyValueAt(0.0, home)
+    anim.setKeyValueAt(0.35, home + QPoint(dx, dy))
+    anim.setKeyValueAt(1.0, home)
+    anim.setEasingCurve(_ease("out"))
+
+    def _finish() -> None:
+        widget.move(home)   # belt + suspenders: land exactly home
+        table = getattr(widget, "_motion_anims", None)
+        if table is not None and table.get("nudge") is anim:
+            table.pop("nudge", None)
+        if on_done:
+            on_done()
+
+    anim.finished.connect(_finish)
+    _register(widget, "nudge", anim)
+    anim.start()
+    return anim
+
+
 # ---------- pixmap crossfade ----------
 
 
@@ -420,8 +692,8 @@ def crossfade_pixmap(
     old_pixmap: Optional[QPixmap],
     new_pixmap: QPixmap,
     *,
-    dur: int = DUR_MED,
-    easing: QEasingCurve = EASE_OUT_QUAD,
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
     on_done: Optional[Callable[[], None]] = None,
     owner: Optional[QObject] = None,
 ) -> Optional[QVariantAnimation]:
@@ -440,6 +712,8 @@ def crossfade_pixmap(
         if on_done:
             on_done()
         return None
+    dur = _dur("med") if dur is None else dur
+    easing = _ease("out") if easing is None else easing
     # Match sizes so the blend lines up. Scale the older to the new size —
     # the new pixmap defines the final visual.
     if old_pixmap.size() != new_pixmap.size():
@@ -497,8 +771,9 @@ def crossfade_stack(
     stack: QStackedWidget,
     target_idx: int,
     *,
-    dur: int = DUR_SHORT,
-    easing: QEasingCurve = EASE_OUT_QUAD,
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
+    overshoot: bool = False,
     on_done: Optional[Callable[[], None]] = None,
 ) -> Optional[QPropertyAnimation]:
     """Crossfade between two pages of a ``QStackedWidget``. The current page
@@ -506,6 +781,12 @@ def crossfade_stack(
     page, and the snapshot fades out over it. Cheap (one snapshot, one
     opacity animation) and works for any QStackedWidget children — no
     requirement that pages implement a paint-friendly base class.
+
+    ``overshoot=True`` opts into the springy dialect's flourish: the
+    outgoing snapshot lifts away with a spring while it fades. Gated by
+    construction — it only exists when the active profile is springy
+    (i.e. FULL intensity, not reduced-motion-clamped); mechanical gets
+    the plain crossfade regardless.
     """
     if stack.currentIndex() == target_idx:
         if on_done:
@@ -523,6 +804,8 @@ def crossfade_stack(
         if on_done:
             on_done()
         return None
+    dur = _dur("short") if dur is None else dur
+    easing = _ease("out") if easing is None else easing
     snap = current.grab()
     stack.setCurrentIndex(target_idx)
     overlay = QLabel(target)
@@ -539,6 +822,17 @@ def crossfade_stack(
     anim.setStartValue(1.0)
     anim.setEndValue(0.0)
     anim.setEasingCurve(easing)
+
+    if overshoot and profile() == "springy":
+        lift = QPropertyAnimation(overlay, b"pos", overlay)
+        lift.setDuration(dur)
+        lift.setStartValue(overlay.pos())
+        lift.setEndValue(overlay.pos() - QPoint(0, max(8, overlay.height() // 12)))
+        lift.setEasingCurve(_ease("spring"))
+        # Parented to the overlay: Qt keeps it alive for the overlay's
+        # lifetime and tears both down together in _finish's deleteLater.
+        overlay._motion_overshoot_anim = lift
+        lift.start()
 
     def _finish() -> None:
         overlay.hide()
@@ -641,7 +935,7 @@ def scramble_text(
     setter: Callable[[str], None],
     new_text: str,
     *,
-    dur: int = DUR_MED,
+    dur: Optional[int] = None,
     glyphs: str = DEFAULT_SCRAMBLE_GLYPHS,
     on_done: Optional[Callable[[], None]] = None,
     owner: Optional[QObject] = None,
@@ -663,6 +957,7 @@ def scramble_text(
         if on_done:
             on_done()
         return None
+    dur = _dur("med") if dur is None else dur
     anim = _ScrambleAnim(setter, new_text, dur, glyphs, on_done, owner)
     _register(owner, kind, anim)
     anim.start()

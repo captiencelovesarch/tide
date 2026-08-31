@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "modern"
+uses_base= true
 
 [tokens]
+banner    = "undertow (modern · indigo depths)"
 bg        = "#10121f"
 bg_alt    = "#181b2e"
 fg        = "#d6d9ea"

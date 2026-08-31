@@ -21,7 +21,7 @@ from __future__ import annotations
 import html
 
 from PySide6.QtCore import (
-    QEasingCurve, QObject, QThread, Qt, QVariantAnimation, Signal, QTimer,
+    QObject, QThread, Qt, QVariantAnimation, Signal, QTimer,
 )
 from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
@@ -461,13 +461,7 @@ class LyricsView(QWidget):
         lbl = self._line_widgets[idx]
         pt = max(1, round(13 * self._font_scale))
 
-        def _tick(t, lbl=lbl, fg=fg, accent=accent, pt=pt) -> None:
-            t = float(t)
-            c = QColor(
-                round(fg.red() + (accent.red() - fg.red()) * t),
-                round(fg.green() + (accent.green() - fg.green()) * t),
-                round(fg.blue() + (accent.blue() - fg.blue()) * t),
-            )
+        def _apply(c: QColor, lbl=lbl, pt=pt) -> None:
             try:
                 lbl.setStyleSheet(
                     f"color: {c.name()}; background: transparent; "
@@ -476,13 +470,12 @@ class LyricsView(QWidget):
             except RuntimeError:
                 pass   # line list rebuilt mid-fade; the stop is coming
 
-        anim = QVariantAnimation(self)
-        anim.setDuration(280)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.valueChanged.connect(_tick)
-        self._active_anim = anim
-        anim.start()
+        self._active_anim = motion_module.color_lerp(
+            fg, accent,
+            on_update=_apply,
+            owner=self,
+            kind="color/lyric_active",
+        )
 
     def _glide_to_active(self) -> None:
         """Teleprompter scroll: park the active line around a third from
@@ -511,14 +504,14 @@ class LyricsView(QWidget):
         goal = max(0, min(int(goal), bar.maximum()))
         if goal == bar.value():
             return
-        anim = QVariantAnimation(self)
-        anim.setDuration(motion_module.DUR_MED)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(int(bar.value()))
-        anim.setEndValue(goal)
-        anim.valueChanged.connect(lambda v, bar=bar: bar.setValue(int(v)))
-        self._scroll_anim = anim
-        anim.start()
+        self._scroll_anim = motion_module.value_lerp(
+            float(bar.value()), float(goal),
+            on_update=lambda v, bar=bar: bar.setValue(int(v)),
+            dur=motion_module.dur("med"),
+            easing=motion_module.ease("out_strong"),
+            owner=self,
+            kind="value/lyric_scroll",
+        )
 
     def _restyle_lines(self) -> None:
         theme = self._theme

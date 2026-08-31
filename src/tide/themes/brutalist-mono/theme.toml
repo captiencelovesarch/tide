@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "brutalist"
+uses_base= true
 
 [tokens]
+banner    = "brutalist-mono (brutalist · regenerated)"
 bg        = "#0b0b0b"
 bg_alt    = "#141414"
 fg        = "#e6e6e6"

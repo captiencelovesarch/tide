@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = false
 aesthetic= "modern"
+uses_base= true
 
 [tokens]
+banner    = "paper (modern · regenerated)"
 bg        = "#f4efe6"
 bg_alt    = "#ece6da"
 fg        = "#2a2622"

@@ -94,6 +94,12 @@ class _FakeManagersCase(_PatchCase):
         self._patch(layout_module, "manager", lambda: self.layout_mgr)
         self._patch(motion_module, "set_intensity",
                     lambda v: self.log.append(("set_intensity", v)))
+        # bind_preset is NOT faked — the dialect binding is part of what
+        # these tests pin — but its global is restored so an applied
+        # preset here can't decide another test file's dialect.
+        self._bound_profile = motion_module._preset_profile
+        self.addCleanup(
+            setattr, motion_module, "_preset_profile", self._bound_profile)
         # Field-scoped persistence recorded, not written.
         self.saved: list = []
         self._real_save_fields = settings_module.save_fields
@@ -295,6 +301,28 @@ class ApplyPresetTests(_FakeManagersCase):
             ("set_user_override", "radius", "6px"),   # soft = 6px
             ("window_visuals",),
         ])
+
+    def test_apply_binds_the_motion_dialect_to_the_personality(self) -> None:
+        # Bounce belongs to the personality, not the intensity: a
+        # brutalist user is free to turn motion up to full, and must
+        # still get mechanical curves.
+        s = _brutalist_customized()
+        apply_preset(s, "modern", persist=False)
+        self.assertEqual(motion_module.bound_profile(), "springy")
+        apply_preset(s, "brutalist", persist=False)
+        self.assertEqual(motion_module.bound_profile(), "mechanical")
+        prev_reduced = motion_module._reduced_motion
+        prev_override = motion_module._profile_override
+        prev_intensity = motion_module._user_intensity
+        self.addCleanup(setattr, motion_module, "_reduced_motion", prev_reduced)
+        self.addCleanup(
+            setattr, motion_module, "_profile_override", prev_override)
+        self.addCleanup(
+            setattr, motion_module, "_user_intensity", prev_intensity)
+        motion_module._reduced_motion = False
+        motion_module._profile_override = None
+        motion_module._user_intensity = motion_module.Intensity.FULL
+        self.assertEqual(motion_module.profile(), "mechanical")
 
     def test_sharp_corners_clear_the_radius_override(self) -> None:
         s = Settings()

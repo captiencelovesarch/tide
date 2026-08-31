@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "brutalist"
+uses_base= true
 
 [tokens]
+banner    = "gruvbox (brutalist · regenerated)"
 bg        = "#282828"
 bg_alt    = "#3c3836"
 fg        = "#ebdbb2"

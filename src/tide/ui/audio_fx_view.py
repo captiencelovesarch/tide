@@ -15,10 +15,39 @@ Sections, top to bottom:
 The view owns a single ``AudioFxState`` and emits ``state_changed``
 whenever any control flips. ``app.py`` wires that signal to the playback
 router + a debounced settings save.
+
+Two faces (v2.0 "two tides"): the continuous controls are hosted in
+``_FxControl`` wrappers that carry either the original ``_ShelfSlider``
+(bracket face — the brutalist personality, byte-for-byte today's
+behavior) or a ``_SpringShelfSlider`` built on the magnetic-detent
+SpringSlider (modern face). The face is picked from the hosting window's
+active personality on show (``showEvent`` → ``_ensure_face``) — the view
+is built before app.py attaches ``window._settings``, so construction
+itself always starts bracket and the first show lands the real face; a
+personality flip mid-session picks the new face the next time the rack
+page is shown, same "on next open" rule as the speed popover.
+
+Debounce discipline (the reverb-tail rule): one mpv filter-chain push
+costs 34-62 ms ON THE GUI THREAD and restarts the reverb tail, so drags
+must NEVER push per-tick. Live changes ride ``state_changed`` into the
+window's existing trailing-edge debounce (~120 ms push / ~250 ms save,
+window.py ``_schedule_audio_fx_push`` / ``_schedule_audio_fx_save``);
+a committed interaction (spring-slider release / EQ drag release under
+the modern face) SHORTENS that pending work via ``_commit_fx_debounce``
+so the final value lands promptly instead of waiting out the timer —
+shortens, never bypasses, because commits arrive per wheel notch and per
+key auto-repeat once motion is off (SpringSlider only coalesces commits
+while it has a settle animation to ride).
+
+The 10 EQ band sliders are vertical and SpringSlider is horizontal by
+contract, so the bands keep their QSlider face under both personalities;
+under the modern face they still join the commit discipline (release →
+flush). If a vertical SpringSlider ever lands, ``_EqBand`` is the one
+place to swap.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -46,6 +75,7 @@ from ..audio_fx import (
     detect_eq_preset,
 )
 from ..theming import styled_case
+from .spring_slider import SpringSlider
 
 
 def _format_hz(hz: int) -> str:
@@ -61,11 +91,119 @@ def _format_db(value: float) -> str:
     return f"{sign}{abs(value):.0f}"
 
 
+def _format_suffixed(v: float, suffix: str) -> str:
+    """The shared readout format for continuous rack controls — both
+    faces of a control must print values identically."""
+    if suffix == " dB":
+        return f"{_format_db(v)}{suffix}"
+    if suffix == "%":
+        return f"{int(round(v * 100))}%"
+    if suffix == "x":
+        return f"{v:.2f}×"
+    return f"{v:.1f}{suffix}"
+
+
+def _active_face(widget: QWidget) -> str:
+    """``"spring"`` when the hosting window's active personality is
+    modern, else ``"bracket"``. Same face rule as the speed popover
+    (speed.py ``_popover_face``): read from the window's settings at
+    face-build time; anything unknown (no settings attached, tests, a
+    third-party preset id) defaults to the bracket face."""
+    settings = getattr(widget.window(), "_settings", None)
+    preset = str(getattr(settings, "preset", "") or "")
+    return "spring" if preset == "modern" else "bracket"
+
+
+# How long a commit waits before draining the pending fx debounce.
+# Short enough to feel immediate on release (half the push debounce),
+# long enough to swallow a burst of commits — X11 key auto-repeat lands
+# every ~33 ms and a fast wheel spin is quicker still, and each of those
+# commits would otherwise cost a 34-62 ms mpv rebuild.
+COMMIT_DRAIN_MS = 60
+
+_FX_DEBOUNCE_TIMERS = (
+    ("_audio_fx_push_timer", "_flush_audio_fx_push"),
+    ("_audio_fx_save_timer", "_flush_audio_fx_state"),
+)
+
+
+def _fx_debounce_host(widget: QWidget):
+    """The MainWindow-ish object holding the fx debounce timers, or None.
+    Walks ``parent()`` past ``window()`` because Qt.Popup popovers are
+    their own window (the ``_refresh_hint`` pattern in
+    audio_fx_popover). Duck-typed: standalone widgets and tests simply
+    find nothing."""
+    w = widget.window()
+    while w is not None and not hasattr(w, "_flush_audio_fx_push"):
+        w = w.parent()
+    return w
+
+
+def _drain_fx_debounce(host) -> None:
+    """Cut short whatever the debounce still owes. Only ACTIVE timers are
+    drained: an idle timer means nothing is pending, and re-running a
+    flush then would just re-write the same TOML / rebuild the same
+    chain."""
+    for timer_attr, flush_attr in _FX_DEBOUNCE_TIMERS:
+        try:
+            timer = getattr(host, timer_attr, None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+                getattr(host, flush_attr)()
+        except Exception:
+            pass
+
+
+def _commit_fx_debounce(widget: QWidget) -> None:
+    """A committed interaction asks for the pending debounced fx work —
+    the ~120 ms mpv filter-chain push and the ~250 ms settings save — to
+    land now-ish rather than waiting out its timer.
+
+    It SHORTENS the debounce (a ``COMMIT_DRAIN_MS`` single-shot on the
+    host) instead of flushing inline, because commits are not rare. With
+    motion off there is no settle animation for SpringSlider to coalesce
+    against, so every wheel notch and every key auto-repeat commits — and
+    an inline flush there meant one synchronous ``af set`` (34-62 ms of
+    frozen GUI, reverb tail restarted) plus one settings TOML write per
+    notch. Restarting a short timer keeps the trailing-edge guarantee the
+    debounce exists for: during a burst nothing pushes, and one drain
+    lands the final value.
+
+    Nothing pending → nothing scheduled, so an idle rack costs no timer."""
+    host = _fx_debounce_host(widget)
+    if host is None:
+        return
+    try:
+        pending = any(
+            getattr(host, attr, None) is not None
+            and getattr(host, attr).isActive()
+            for attr, _flush in _FX_DEBOUNCE_TIMERS
+        )
+    except RuntimeError:
+        return
+    if not pending:
+        return
+    timer = getattr(host, "_audio_fx_commit_timer", None)
+    if timer is None:
+        timer = QTimer(host)    # child of the host: dies with the window
+        timer.setSingleShot(True)
+        timer.setInterval(COMMIT_DRAIN_MS)
+        timer.timeout.connect(lambda t=timer: _drain_fx_debounce(t.parent()))
+        host._audio_fx_commit_timer = timer
+    timer.start()
+
+
 class _EqBand(QWidget):
     """One slider + frequency label + live gain readout. Emits the new
     gain in dB on each user-driven change."""
 
     gain_changed = Signal(int, float)   # band index, gain dB
+    # Fired when a mouse drag on the band releases. Unconnected under the
+    # brutalist face (zero behavior change); the modern face wires it to
+    # flush the debounced filter-chain push on release. The bands stay
+    # QSliders under both personalities — they're vertical, SpringSlider
+    # is horizontal by contract.
+    gain_committed = Signal(int)        # band index
 
     SLIDER_SCALE = 10   # 0.1 dB resolution under the int slider
 
@@ -89,6 +227,8 @@ class _EqBand(QWidget):
         self._slider.setFixedHeight(170)
         self._slider.setMinimumWidth(28)
         self._slider.valueChanged.connect(self._on_slider)
+        self._slider.sliderReleased.connect(
+            lambda: self.gain_committed.emit(self._index))
 
         # Double-click the readout to reset that band to 0 dB.
         self._readout.setCursor(Qt.PointingHandCursor)
@@ -194,19 +334,135 @@ class _ShelfSlider(QWidget):
         self._readout.setText(self._format(clamped))
 
     def _format(self, v: float) -> str:
-        if self._suffix == " dB":
-            return f"{_format_db(v)}{self._suffix}"
-        if self._suffix == "%":
-            return f"{int(round(v * 100))}%"
-        if self._suffix == "x":
-            return f"{v:.2f}×"
-        return f"{v:.1f}{self._suffix}"
+        return _format_suffixed(v, self._suffix)
 
     def _on_slider(self, value: int) -> None:
         v = value / self._scale
         self._readout.setText(self._format(v))
         if not self._silent:
             self.value_changed.emit(v)
+
+
+class _SpringShelfSlider(QWidget):
+    """The modern face for a continuous rack control: same row shape as
+    ``_ShelfSlider`` (label / groove / live readout, same widths, same
+    formats) with the magnetic-detent SpringSlider in the groove seat.
+    Each control carries one detent on its stock value ("snap back to
+    neutral"). The settle is motion-gated by SpringSlider's construction:
+    intensity OFF lands synchronously with zero animation objects.
+
+    Signals: ``value_changed(float)`` fires live during the interaction
+    (already final logical values — only the display springs), and
+    ``value_committed(float)`` when the interaction lands, which the view
+    uses to flush the window's debounced push/save. Programmatic
+    ``set_value`` never emits (SpringSlider's contract)."""
+
+    value_changed = Signal(float)
+    value_committed = Signal(float)
+
+    def __init__(self, label: str, vmin: float, vmax: float, step: float = 0.1,
+                 suffix: str = " dB", detents: tuple = (),
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._vmin = float(vmin)
+        self._vmax = float(vmax)
+        self._suffix = suffix
+
+        self._label = QLabel(styled_case(label))
+        self._label.setMinimumWidth(110)
+        self._readout = QLabel("0")
+        self._readout.setMinimumWidth(56)
+        self._readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        self._slider = SpringSlider()
+        self._slider.set_range(vmin, vmax, step)
+        self._slider.set_detents(detents)
+        self._slider.set_formatter(self._format)
+        self._slider.value_changed.connect(self._on_changed)
+        self._slider.value_committed.connect(self.value_committed)
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        row.addWidget(self._label)
+        row.addWidget(self._slider, stretch=1)
+        row.addWidget(self._readout)
+
+        self._readout.setText(self._format(self._slider.value()))
+
+    def value(self) -> float:
+        return self._slider.value()
+
+    def set_value(self, v: float) -> None:
+        clamped = max(self._vmin, min(self._vmax, float(v)))
+        self._slider.set_value(clamped)     # programmatic — never emits
+        self._readout.setText(self._format(self._slider.value()))
+
+    def _format(self, v: float) -> str:
+        return _format_suffixed(v, self._suffix)
+
+    def _on_changed(self, v: float) -> None:
+        self._readout.setText(self._format(v))
+        self.value_changed.emit(v)
+
+
+class _FxControl(QWidget):
+    """Hosts one continuous rack control and swaps its face in place:
+    bracket (``_ShelfSlider`` — brutalist, the verbatim original) or
+    spring (``_SpringShelfSlider`` — modern). The wrapper is the stable
+    thing the view wires signals to and the layouts hold, so a face swap
+    never touches layout positions, stretch factors, or external
+    connections. ``value_committed`` only ever fires from the spring
+    face — the bracket face has no commit notion, by design."""
+
+    value_changed = Signal(float)
+    value_committed = Signal(float)
+
+    def __init__(self, label: str, vmin: float, vmax: float, step: float = 0.1,
+                 suffix: str = " dB", detents: tuple = (),
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._spec = (label, vmin, vmax, step, suffix)
+        self._detents = tuple(detents)
+        self._face = ""
+        self._inner: QWidget | None = None
+        self._box = QVBoxLayout(self)
+        self._box.setContentsMargins(0, 0, 0, 0)
+        self._box.setSpacing(0)
+        self.set_face("bracket")
+
+    def face(self) -> str:
+        return self._face
+
+    def set_face(self, face: str) -> None:
+        face = "spring" if face == "spring" else "bracket"
+        if face == self._face:
+            return
+        old = self._inner
+        carried = old.value() if old is not None else None
+        label, vmin, vmax, step, suffix = self._spec
+        if face == "spring":
+            inner = _SpringShelfSlider(label, vmin, vmax, step, suffix=suffix,
+                                       detents=self._detents)
+            inner.value_committed.connect(self.value_committed)
+        else:
+            inner = _ShelfSlider(label, vmin, vmax, step, suffix=suffix)
+        inner.value_changed.connect(self.value_changed)
+        self._face = face
+        self._inner = inner
+        self._box.addWidget(inner)
+        if old is not None:
+            old.hide()
+            self._box.removeWidget(old)
+            old.deleteLater()
+            if carried is not None:
+                inner.set_value(carried)    # silent on both faces
+
+    def value(self) -> float:
+        return self._inner.value()
+
+    def set_value(self, v: float) -> None:
+        self._inner.set_value(v)
 
 
 class _SlotRow(QFrame):
@@ -258,6 +514,10 @@ class AudioFxView(QWidget):
     def __init__(self, state: AudioFxState | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state = state if state is not None else AudioFxState()
+        # Continuous-control face. Construction always builds bracket —
+        # window._settings doesn't exist yet at window-build time — and
+        # showEvent lands the personality's real face (see module doc).
+        self._face = "bracket"
 
         heading = QLabel(styled_case("audio fx"))
         heading.setObjectName("sectionHeading")
@@ -293,6 +553,7 @@ class AudioFxView(QWidget):
         for idx, freq in enumerate(EQ_FREQUENCIES_HZ):
             band = _EqBand(idx, freq)
             band.gain_changed.connect(self._on_band_changed)
+            band.gain_committed.connect(self._on_band_committed)
             eq_row.addWidget(band)
             self._eq_bands.append(band)
         eq_row.addStretch(1)
@@ -319,7 +580,8 @@ class AudioFxView(QWidget):
         for name in REVERB_PRESETS:
             self._reverb_combo.addItem(styled_case(name), name)
         self._reverb_combo.currentIndexChanged.connect(self._on_reverb_changed)
-        self._reverb_wet = _ShelfSlider("wet", 0.0, 1.0, 0.05, suffix="%")
+        self._reverb_wet = _FxControl("wet", 0.0, 1.0, 0.05, suffix="%",
+                                      detents=(0.5,))
         self._reverb_wet.value_changed.connect(self._on_reverb_wet)
         reverb_row = QHBoxLayout()
         reverb_row.setContentsMargins(0, 0, 0, 0)
@@ -347,24 +609,38 @@ class AudioFxView(QWidget):
         self._lofi_box = QCheckBox(styled_case("lofi (tape + crush)"))
         self._lofi_box.toggled.connect(self._on_lofi)
 
-        self._tremolo_speed_slider = _ShelfSlider(
-            "tremolo speed", 0.5, 10.0, 0.5, suffix=" Hz"
+        self._tremolo_speed_slider = _FxControl(
+            "tremolo speed", 0.5, 10.0, 0.5, suffix=" Hz", detents=(5.0,)
         )
         self._tremolo_speed_slider.value_changed.connect(self._on_tremolo_speed)
-        self._exciter_slider = _ShelfSlider("exciter amount", 0.0, 5.0, 0.5, suffix="")
+        self._exciter_slider = _FxControl("exciter amount", 0.0, 5.0, 0.5,
+                                          suffix="", detents=(2.0,))
         self._exciter_slider.value_changed.connect(self._on_exciter_amount)
-        self._crossfeed_slider = _ShelfSlider(
-            "crossfeed amount", 0.0, 1.0, 0.05, suffix="%"
+        self._crossfeed_slider = _FxControl(
+            "crossfeed amount", 0.0, 1.0, 0.05, suffix="%", detents=(0.4,)
         )
         self._crossfeed_slider.value_changed.connect(self._on_crossfeed_strength)
 
         # 6. Shelves + glue.
-        self._bass_slider = _ShelfSlider("bass shelf", EQ_GAIN_MIN_DB, EQ_GAIN_MAX_DB, 0.5)
+        self._bass_slider = _FxControl("bass shelf", EQ_GAIN_MIN_DB,
+                                       EQ_GAIN_MAX_DB, 0.5, detents=(0.0,))
         self._bass_slider.value_changed.connect(self._on_bass)
-        self._treble_slider = _ShelfSlider("treble shelf", EQ_GAIN_MIN_DB, EQ_GAIN_MAX_DB, 0.5)
+        self._treble_slider = _FxControl("treble shelf", EQ_GAIN_MIN_DB,
+                                         EQ_GAIN_MAX_DB, 0.5, detents=(0.0,))
         self._treble_slider.value_changed.connect(self._on_treble)
-        self._stereo_slider = _ShelfSlider("stereo width", 0.0, 2.5, 0.1, suffix="x")
+        self._stereo_slider = _FxControl("stereo width", 0.0, 2.5, 0.1,
+                                         suffix="x", detents=(1.0,))
         self._stereo_slider.value_changed.connect(self._on_stereo)
+
+        # Commit → shorten the window's pending debounced push/save
+        # (never an inline push — see _commit_fx_debounce). Only the
+        # spring face ever emits value_committed, so the brutalist rack
+        # never takes this path.
+        for _ctrl in (self._reverb_wet, self._tremolo_speed_slider,
+                      self._exciter_slider, self._crossfeed_slider,
+                      self._bass_slider, self._treble_slider,
+                      self._stereo_slider):
+            _ctrl.value_committed.connect(self._on_fx_commit)
 
         self._loudness_box = QCheckBox(styled_case("loudness normalize (-14 lufs)"))
         self._loudness_box.toggled.connect(self._on_loudness)
@@ -458,6 +734,9 @@ class AudioFxView(QWidget):
 
     # ---------- public ----------
 
+    def face(self) -> str:
+        return self._face
+
     def state(self) -> AudioFxState:
         return self._state
 
@@ -512,6 +791,33 @@ class AudioFxView(QWidget):
             row.set_state(occupied, summary)
         self._refresh_preset_highlight()
 
+    # ---------- face ----------
+
+    def showEvent(self, ev) -> None:  # noqa: N802 (Qt override)
+        super().showEvent(ev)
+        self._ensure_face()
+
+    def _fx_controls(self) -> tuple:
+        return (self._reverb_wet, self._tremolo_speed_slider,
+                self._exciter_slider, self._crossfeed_slider,
+                self._bass_slider, self._treble_slider, self._stereo_slider)
+
+    def _ensure_face(self) -> None:
+        """Land the personality's face on the continuous controls. Runs
+        on every show, so a mid-session preset flip takes effect the next
+        time the rack page is opened — never mid-view. Cheap when the
+        face already matches (the common case: one string compare)."""
+        face = _active_face(self)
+        if face == self._face:
+            return
+        self._face = face
+        for ctrl in self._fx_controls():
+            ctrl.set_face(face)
+        # Re-land the full state on the fresh faces — set_face carried
+        # each control's value over, but this also refreshes readouts,
+        # preset highlight and everything else, without emitting.
+        self.sync_from_state()
+
     # ---------- handlers ----------
 
     def _ui_sound(self, key: str) -> None:
@@ -533,6 +839,20 @@ class AudioFxView(QWidget):
             self._state.eq_bands[idx] = float(db)
             self._refresh_preset_highlight()
             self._emit()
+
+    def _on_band_committed(self, _idx: int) -> None:
+        # EQ drag released. Modern face only: committing on release would
+        # change the brutalist rack's push timing, and brutalist keeps
+        # today's behavior verbatim (product contract).
+        if self._face == "spring":
+            _commit_fx_debounce(self)
+
+    def _on_fx_commit(self, _value: float) -> None:
+        # A spring-slider interaction landed — shorten the pending
+        # debounced push/save so the final value reaches mpv promptly,
+        # without paying an af set per wheel notch.
+        # Fires only from the spring face (see _FxControl).
+        _commit_fx_debounce(self)
 
     def _on_preset_picked(self, name: str) -> None:
         self._state.apply_eq_preset(name)

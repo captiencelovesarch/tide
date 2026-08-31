@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "modern"
+uses_base= true
 
 [tokens]
+banner    = "adaptive (modern · regenerated)"
 bg        = "#0a0a0a"
 bg_alt    = "#1a1a1a"
 fg        = "#f0f0f0"
@@ -39,7 +41,7 @@ visualizer    = "bars-filled"
 
 [slots]
 progress = "bar"
-volume   = "knob"
+volume   = "spring"
 album_art= "square"
 controls = "large"
 now_label= "inline"

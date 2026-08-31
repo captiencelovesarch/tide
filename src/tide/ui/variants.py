@@ -53,6 +53,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import glyphs, theming
+from . import scale
+from .spring_slider import SpringSlider
 from .widgets import (
     AlbumArt,
     BracketButton,
@@ -482,6 +484,74 @@ class WedgeVolume(QWidget):
             p.drawPath(outline)
 
 
+class _VolumeSpringSlider(SpringSlider):
+    """Volume-flavored SpringSlider: a wheel notch steps ±5 like every
+    other volume face (the raw one-step would make a notch a 1% crawl).
+    Same accumulate-then-nudge shape as the base wheelEvent."""
+
+    WHEEL_STEPS = 5
+
+    def wheelEvent(self, ev) -> None:
+        self._wheel_accum += ev.angleDelta().y()
+        notches = int(self._wheel_accum / 120)
+        if notches == 0:
+            ev.ignore()
+            return
+        self._wheel_accum -= notches * 120
+        # Same accept-only-if-it-moved rule as the base: a dead notch at
+        # 0% / 100% belongs to whatever scrolls behind us.
+        if self._nudge(notches * self.WHEEL_STEPS):
+            ev.accept()
+        else:
+            ev.ignore()
+
+
+class SpringVolume(QWidget):
+    """SpringSlider-backed volume — the modern personality's face.
+
+    Magnetic detents at 0 / 50 / 100, springy settle on release (motion
+    OFF snaps synchronously — the slider is gated by construction). Same
+    surface as the other volume variants (``setVolume`` / ``volume`` /
+    ``volume_changed``) so window wiring doesn't care which it got.
+    """
+
+    volume_changed = Signal(int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._volume = 80
+        self._slider = _VolumeSpringSlider(self)
+        self._slider.set_range(0, 100, 1)
+        self._slider.set_detents([0, 50, 100])
+        self._slider.set_formatter(lambda v: f"{int(round(v))}%")
+        self._slider.set_value(self._volume)
+        self._slider.value_changed.connect(self._on_slider_changed)
+        self.setFixedSize(scale.px(160), scale.px(26))
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._slider)
+
+    def _on_slider_changed(self, value: float) -> None:
+        v = int(round(float(value)))
+        if v == self._volume:
+            return
+        self._volume = v
+        self.volume_changed.emit(v)
+
+    def setVolume(self, value: int, *, emit: bool = True) -> None:
+        v = max(0, min(100, int(value)))
+        if v == self._volume:
+            return
+        self._volume = v
+        self._slider.set_value(v)   # programmatic — never re-emits
+        if emit:
+            self.volume_changed.emit(v)
+
+    def volume(self) -> int:
+        return self._volume
+
+
 def make_volume(slug: str) -> QWidget:
     slug = (slug or "blocks").lower()
     if slug == "slider":
@@ -490,6 +560,8 @@ def make_volume(slug: str) -> QWidget:
         return KnobVolume()
     if slug == "wedge":
         return WedgeVolume()
+    if slug == "spring":
+        return SpringVolume()
     return MonoVolume()
 
 
@@ -753,7 +825,7 @@ def make_now_label(slug: str) -> NowPlayingLabel:
 
 
 PROGRESS_VARIANTS = ["blocks", "bar", "thin", "dotted"]
-VOLUME_VARIANTS = ["blocks", "slider", "knob", "wedge"]
+VOLUME_VARIANTS = ["blocks", "slider", "knob", "wedge", "spring"]
 ALBUM_ART_VARIANTS = ["square", "circle", "polaroid"]
 CONTROLS_VARIANTS = ["bracket", "large", "compact"]
 NOW_LABEL_VARIANTS = ["stacked", "inline", "centered"]

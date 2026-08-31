@@ -94,6 +94,7 @@ BUILTINS: dict[str, PresetDef] = {
         fullscreen_pulse=True,
         ui_sounds_enabled=False,
         show_thumbnails="theme",
+        sound_pack="modern",
     ),
 }
 
@@ -228,6 +229,10 @@ def apply_preset(settings: Settings, preset_id: str, window=None,
     )
     from .ui import motion as motion_module
     motion_module.set_intensity(settings.motion)
+    # The personality picks the motion dialect; intensity only picks how
+    # much of it runs. Binding here (not to FULL) is what keeps OutBack
+    # overshoot out of brutalist when someone turns motion up.
+    motion_module.bind_preset(preset_id)
     # Corner style rides the same sticky @radius override the settings
     # dialog pushes (window._do_open_settings) so every QSS widget that
     # reads @radius matches the personality's softness.

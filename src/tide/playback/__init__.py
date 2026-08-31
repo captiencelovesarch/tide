@@ -209,6 +209,14 @@ class PlaybackRouter(QObject):
                 return slug
         return ""
 
+    def active_supports_speed(self) -> bool:
+        """Whether the ACTIVE backend honors ``set_speed``. True when no
+        backend is active yet (mpv registers first and supports it) — the
+        UI greys the speed control only on a positive "can't"."""
+        if self._active is None:
+            return True
+        return bool(getattr(self._active, "supports_speed", True))
+
     # ---------- internals ----------
 
     def _activate(self, slug: str) -> None:

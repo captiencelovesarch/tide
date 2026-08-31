@@ -90,6 +90,11 @@ class LibrespotBackend(PlaybackBackend):
 
     slug = "librespot"
 
+    # librespot renders Spotify's audio itself — set_speed stays the base
+    # no-op, and this flag lets the UI grey the speed control instead of
+    # pretending the nudges did something.
+    supports_speed = False
+
     # Name we register the librespot device under. Suffix avoids colliding
     # with tide's own org.mpris.MediaPlayer2.tide bus name.
     DEVICE_NAME = "tide"

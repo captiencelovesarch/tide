@@ -335,10 +335,12 @@ class SaveTests(_EditorCase):
         self.assertEqual(data["layout"]["list_marker"],
                          base.layout["list_marker"])
         self.assertEqual(data["slots"], dict(base.slots))
-        # QSS: verbatim copy of the base theme's stylesheet.
+        # QSS: a standalone copy of the base theme's full stylesheet.
+        # Bundled themes no longer ship a theme.qss file (they compose
+        # from themes/_base.qss at load — see test_qss_split), so the
+        # copy comes from Theme.qss and must never depend on _base.qss.
         self.assertEqual(
-            (dest / "theme.qss").read_text(encoding="utf-8"),
-            (base.path / "theme.qss").read_text(encoding="utf-8"))
+            (dest / "theme.qss").read_text(encoding="utf-8"), base.qss)
         # The manager refreshed and landed on the new theme…
         mgr = theming.manager()
         self.assertIn("my-waves", {t.slug for t in mgr.list_themes()})

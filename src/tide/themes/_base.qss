@@ -1,7 +1,31 @@
-/* tide :: storm (brutalist · slate + lightning) */
+/*[if doc]*/
+/* tide :: _base.qss — the one structural stylesheet behind every bundled  */
+/* theme. A theme.toml that declares `uses_base = true` under [meta] gets  */
+/* this file (dialect-resolved, see below) prepended to whatever its own   */
+/* theme.qss holds — for the bundled themes that overlay is empty, because */
+/* their entire palette lives in [tokens] and @token substitution does the */
+/* rest. Third-party themes may declare uses_base too and append palette   */
+/* overrides after these rules; themes WITHOUT the flag keep shipping a    */
+/* full standalone theme.qss exactly as before.                            */
+/*                                                                         */
+/* Dialect markers: a whole line reading [if brutalist] or [if modern]     */
+/* (each wrapped in its own comment, like the markers around this block)   */
+/* keeps the lines up to the next [endif] line only when the theme's       */
+/* [meta] aesthetic matches; marker lines themselves never reach Qt. No    */
+/* nesting. This header block is tagged "doc" — no aesthetic is called     */
+/* that, so the loader always strips it.                                   */
+/*                                                                         */
+/* @banner on the next line resolves from each theme's [tokens] banner.    */
+/*[endif]*/
+/* tide :: @banner */
 
 * {
+/*[if brutalist]*/
     font-family: "@font_family";
+/*[endif]*/
+/*[if modern]*/
+    font-family: "@font_family", "IBM Plex Sans", sans-serif;
+/*[endif]*/
     font-size: @font_size;
     color: @fg;
 }
@@ -18,57 +42,140 @@ QLabel#accent, QLabel.accent { color: @accent; }
 
 /* ---------- inputs ---------- */
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
     color: @fg;
+/*[if brutalist]*/
     border: @border solid @border_col;
+/*[endif]*/
+/*[if modern]*/
+    border: @border solid @border_dim;
+/*[endif]*/
     border-radius: @radius;
+/*[if brutalist]*/
     padding: 6px 10px;
     selection-background-color: @sel_bg;
     selection-color: @sel_fg;
+/*[endif]*/
+/*[if modern]*/
+    padding: 8px 14px;
+    selection-background-color: @accent;
+    selection-color: @bg;
+/*[endif]*/
 }
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus,
 QSpinBox:focus, QDoubleSpinBox:focus { border-color: @accent; }
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+/*[if brutalist]*/
 QSpinBox:disabled, QDoubleSpinBox:disabled { color: @dim; border-color: @border_dim; }
+/*[endif]*/
+/*[if modern]*/
+QSpinBox:disabled, QDoubleSpinBox:disabled { color: @dim; }
+/*[endif]*/
 
 QSpinBox::up-button, QDoubleSpinBox::up-button,
 QSpinBox::down-button, QDoubleSpinBox::down-button {
     background: transparent;
     border: none;
+/*[if brutalist]*/
     width: 14px;
+/*[endif]*/
+/*[if modern]*/
+    width: 16px;
+/*[endif]*/
 }
 
 /* ---------- buttons ---------- */
 QPushButton, QToolButton {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
     color: @fg;
+/*[if brutalist]*/
     border: @border solid @border_col;
+/*[endif]*/
+/*[if modern]*/
+    border: @border solid @border_dim;
+/*[endif]*/
     border-radius: @radius;
+/*[if brutalist]*/
     padding: 4px 12px;
+/*[endif]*/
+/*[if modern]*/
+    padding: 6px 14px;
+/*[endif]*/
 }
+/*[if brutalist]*/
 QPushButton:hover, QToolButton:hover { background: @sel_bg; color: @sel_fg; }
 QPushButton:pressed, QToolButton:pressed { background: @accent; color: @bg; }
 QPushButton:disabled, QToolButton:disabled { color: @dim; border-color: @border_dim; }
+/*[endif]*/
+/*[if modern]*/
+QPushButton:hover, QToolButton:hover { background: @hover_bg; color: @hover_fg; border-color: @border_col; }
+QPushButton:pressed, QToolButton:pressed { background: @sel_bg; color: @sel_fg; }
+QPushButton:disabled, QToolButton:disabled { color: @dim; }
+/*[endif]*/
 QPushButton:focus, QToolButton:focus { border-color: @accent; }
 QToolButton::menu-indicator { image: none; }
 
+/*[if brutalist]*/
 QDialogButtonBox QPushButton { min-width: 80px; }
+/*[endif]*/
+/*[if modern]*/
+QDialogButtonBox QPushButton { min-width: 90px; }
+/*[endif]*/
 
 /* ---------- checkbox / radio ---------- */
 QCheckBox, QRadioButton {
     background: transparent;
     color: @fg;
+/*[if brutalist]*/
     spacing: 8px;
+/*[endif]*/
+/*[if modern]*/
+    spacing: 10px;
+/*[endif]*/
     padding: 2px 0;
 }
+/*[if brutalist]*/
 QCheckBox::indicator, QRadioButton::indicator {
     width: 14px;
     height: 14px;
+/*[endif]*/
+/*[if modern]*/
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+/*[endif]*/
     border: @border solid @border_col;
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+    border-radius: 4px;
+/*[endif]*/
 }
+/*[if brutalist]*/
 QCheckBox::indicator { border-radius: 0; }
 QRadioButton::indicator { border-radius: 0; }
+/*[endif]*/
+/*[if modern]*/
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: @border solid @border_col;
+    background: @bg_alt;
+    border-radius: 8px;
+}
+/*[endif]*/
 QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: @accent; }
 QCheckBox::indicator:checked {
     background: @accent;
@@ -80,51 +187,118 @@ QRadioButton::indicator:checked {
 }
 QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
     border-color: @border_dim;
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
 }
 QCheckBox:disabled, QRadioButton:disabled { color: @dim; }
 
 /* ---------- combo box ---------- */
 QComboBox {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
     color: @fg;
+/*[if brutalist]*/
     border: @border solid @border_col;
+/*[endif]*/
+/*[if modern]*/
+    border: @border solid @border_dim;
+/*[endif]*/
     border-radius: @radius;
+/*[if brutalist]*/
     padding: 4px 8px;
+/*[endif]*/
+/*[if modern]*/
+    padding: 6px 10px;
+/*[endif]*/
 }
+/*[if brutalist]*/
 QComboBox:hover { border-color: @accent; }
+/*[endif]*/
+/*[if modern]*/
+QComboBox:hover { border-color: @border_col; }
+/*[endif]*/
 QComboBox:focus { border-color: @accent; }
 QComboBox::drop-down {
     subcontrol-origin: padding;
     subcontrol-position: top right;
+/*[if brutalist]*/
     width: 18px;
     border-left: @border solid @border_col;
+/*[endif]*/
+/*[if modern]*/
+    width: 22px;
+    border-left: 0;
+/*[endif]*/
 }
 QComboBox::down-arrow { image: none; }
 QComboBox QAbstractItemView {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
     color: @fg;
     selection-background-color: @sel_bg;
     selection-color: @sel_fg;
     border: @border solid @border_col;
+/*[if modern]*/
+    border-radius: @radius;
+/*[endif]*/
     outline: 0;
+/*[if brutalist]*/
     padding: 2px 0;
+/*[endif]*/
+/*[if modern]*/
+    padding: 4px 0;
+/*[endif]*/
 }
+/*[if modern]*/
+QComboBox QAbstractItemView::item { padding: 6px 12px; }
+/*[endif]*/
 
 /* ---------- slider ---------- */
 QSlider::groove:horizontal {
     height: 4px;
     background: @border_dim;
+/*[if brutalist]*/
     border: 0;
+/*[endif]*/
+/*[if modern]*/
+    border-radius: 2px;
+/*[endif]*/
 }
 QSlider::handle:horizontal {
     background: @fg;
+/*[if brutalist]*/
     border: @border solid @border_col;
     width: 10px;
+/*[endif]*/
+/*[if modern]*/
+    border: 0;
+    width: 14px;
+    height: 14px;
+/*[endif]*/
     margin: -6px 0;
+/*[if modern]*/
+    border-radius: 7px;
+/*[endif]*/
 }
 QSlider::handle:horizontal:hover { background: @accent; }
+/*[if brutalist]*/
 QSlider::sub-page:horizontal { background: @accent; }
+/*[endif]*/
+/*[if modern]*/
+QSlider::sub-page:horizontal { background: @accent; border-radius: 2px; }
+/*[endif]*/
 
 /* ---------- group box ---------- */
 QGroupBox {
@@ -132,28 +306,56 @@ QGroupBox {
     border: @border solid @border_dim;
     border-radius: @radius;
     margin-top: 14px;
+/*[if brutalist]*/
     padding: 8px;
+/*[endif]*/
+/*[if modern]*/
+    padding: 10px;
+/*[endif]*/
 }
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
+/*[if brutalist]*/
     padding: 0 6px;
+/*[endif]*/
+/*[if modern]*/
+    padding: 0 8px;
+/*[endif]*/
     color: @dim;
 }
 
 /* ---------- tabs ---------- */
 QTabWidget::pane {
     background: @bg;
+/*[if brutalist]*/
     border: @border solid @border_col;
+/*[endif]*/
+/*[if modern]*/
+    border: @border solid @border_dim;
+/*[endif]*/
     border-radius: @radius;
 }
 QTabBar::tab {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: transparent;
+/*[endif]*/
     color: @dim;
+/*[if brutalist]*/
     border: @border solid @border_col;
     border-bottom: 0;
     padding: 6px 14px;
     margin-right: 2px;
+/*[endif]*/
+/*[if modern]*/
+    border: 0;
+    padding: 8px 16px;
+    margin-right: 4px;
+    border-radius: @radius;
+/*[endif]*/
 }
 QTabBar::tab:selected { color: @fg; background: @bg_alt; }
 QTabBar::tab:hover { color: @fg; }
@@ -162,14 +364,27 @@ QTabBar::tab:hover { color: @fg; }
 QListView, QListWidget, QTreeView {
     background: @bg;
     color: @fg;
+/*[if brutalist]*/
     border: @border solid @border_col;
     border-radius: @radius;
+/*[endif]*/
+/*[if modern]*/
+    border: 0;
+/*[endif]*/
     outline: 0;
     padding: 4px 0;
 }
 QListView::item, QListWidget::item, QTreeView::item {
+/*[if brutalist]*/
     padding: 4px 10px;
     border: none;
+/*[endif]*/
+/*[if modern]*/
+    padding: 8px 14px;
+    border-radius: 6px;
+    margin: 2px 4px;
+    border: 0;
+/*[endif]*/
 }
 QListView::item:hover, QListWidget::item:hover, QTreeView::item:hover {
     background: @hover_bg;
@@ -181,11 +396,21 @@ QListView::item:selected, QListWidget::item:selected, QTreeView::item:selected {
 QListView::item:focus { border: 0; }
 
 QHeaderView::section {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: transparent;
+/*[endif]*/
     color: @dim;
     border: 0;
     border-bottom: @border solid @border_dim;
+/*[if brutalist]*/
     padding: 6px 10px;
+/*[endif]*/
+/*[if modern]*/
+    padding: 8px 12px;
+/*[endif]*/
 }
 
 /* ---------- scroll area + scrollbars ---------- */
@@ -195,17 +420,35 @@ QScrollArea {
 }
 QAbstractScrollArea > QWidget > QWidget { background: @bg; }
 
+/*[if brutalist]*/
 QScrollBar:vertical {
     background: @bg;
     width: 8px;
+/*[endif]*/
+/*[if modern]*/
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: transparent;
+    width: 10px;
+    height: 10px;
+/*[endif]*/
     margin: 0;
     border: 0;
 }
+/*[if brutalist]*/
 QScrollBar::handle:vertical {
     background: @border_dim;
     min-height: 24px;
     border-radius: 0;
+/*[endif]*/
+/*[if modern]*/
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: @border_col;
+    border-radius: 5px;
+    min-height: 30px;
+    min-width: 30px;
+/*[endif]*/
 }
+/*[if brutalist]*/
 QScrollBar::handle:vertical:hover { background: @dim; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; background: transparent; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
@@ -224,6 +467,12 @@ QScrollBar::handle:horizontal {
 QScrollBar::handle:horizontal:hover { background: @dim; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; background: transparent; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+/*[endif]*/
+/*[if modern]*/
+QScrollBar::handle:hover { background: @dim; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; background: transparent; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+/*[endif]*/
 
 /* ---------- status bar ---------- */
 QStatusBar { background: @bg; color: @dim; border: 0; }
@@ -231,32 +480,75 @@ QStatusBar::item { border: 0; }
 
 /* ---------- tooltips ---------- */
 QToolTip {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
     color: @fg;
     border: @border solid @border_col;
+/*[if brutalist]*/
     padding: 4px 6px;
     border-radius: 0;
+/*[endif]*/
+/*[if modern]*/
+    padding: 6px 10px;
+    border-radius: @radius;
+/*[endif]*/
 }
 
 /* ---------- right-click menus ---------- */
 QMenu {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
     color: @fg;
     border: @border solid @border_col;
     border-radius: @radius;
+/*[if brutalist]*/
     padding: 4px 0;
+/*[endif]*/
+/*[if modern]*/
+    padding: 6px 0;
+/*[endif]*/
 }
+/*[if brutalist]*/
 QMenu::item { padding: 5px 16px; background: transparent; }
+/*[endif]*/
+/*[if modern]*/
+QMenu::item { padding: 7px 22px; background: transparent; border-radius: 0; }
+/*[endif]*/
 QMenu::item:selected { background: @sel_bg; color: @sel_fg; }
+/*[if brutalist]*/
 QMenu::separator { height: 1px; background: @border_dim; margin: 4px 0; }
 QMenu::icon { padding-left: 6px; }
+/*[endif]*/
+/*[if modern]*/
+QMenu::separator { height: 1px; background: @border_dim; margin: 4px 8px; }
+QMenu::icon { padding-left: 8px; }
+/*[endif]*/
 
 /* ---------- now-playing strip + nav rail ---------- */
 QFrame#now_playing {
+/*[if brutalist]*/
     background: @bg;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+/*[endif]*/
     border-top: @border solid @border_col;
 }
 QFrame#nav {
+/*[if brutalist]*/
     background: @bg;
     border-right: @border solid @border_col;
+/*[endif]*/
+/*[if modern]*/
+    background: @bg_alt;
+    border-right: 0;   /* modern themes: no nav divider */
+/*[endif]*/
 }

@@ -683,7 +683,7 @@ class NowPlayingLabel(QWidget):
         motion_module.scramble_text(
             lambda s: self._scramble_frame("title", s),
             title,
-            dur=motion_module.DUR_MED,
+            dur=motion_module.dur("med"),
             owner=self,
             kind="scramble/title",
         )
@@ -695,14 +695,14 @@ class NowPlayingLabel(QWidget):
             motion_module.scramble_text(
                 lambda s: self._scramble_frame("artist", s),
                 artist,
-                dur=motion_module.DUR_MED + 150,
+                dur=motion_module.dur("med") + 150,
                 owner=self,
                 kind="scramble/artist",
             )
             motion_module.scramble_text(
                 lambda s: self._scramble_frame("album", s),
                 album,
-                dur=motion_module.DUR_MED + 300,
+                dur=motion_module.dur("med") + 300,
                 owner=self,
                 kind="scramble/album",
             )

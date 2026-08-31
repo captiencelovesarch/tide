@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "brutalist"
+uses_base= true
 
 [tokens]
+banner    = "storm (brutalist · slate + lightning)"
 bg        = "#14171a"
 bg_alt    = "#1d2126"
 fg        = "#dde3e8"

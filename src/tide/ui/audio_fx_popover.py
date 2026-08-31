@@ -8,7 +8,13 @@ full rack. Right-clicking the button toggles master enable inline.
 
 Mirrors the SpeedButton / SpeedPopover pattern in ``speed.py``:
 ``Qt.Popup`` so external clicks auto-close, ``show_above(anchor)`` for
-placement, theme-aware repaint.
+placement, theme-aware repaint. Like the speed popover, it has two faces
+picked at popover build from the window's active personality: bracket
+(this class, behaviorally verbatim — the brutalist personality) and
+``SpringAudioFxPopover`` (modern — the wet/bass/treble sliders become
+magnetic-detent SpringSliders whose release shortens the window's
+debounced filter-chain push). A personality flip mid-session picks the
+new face on the next open; the cached popover is rebuilt.
 """
 from __future__ import annotations
 
@@ -33,6 +39,8 @@ from ..audio_fx import (
     EQ_PRESETS,
     REVERB_PRESETS,
 )
+from .audio_fx_view import _commit_fx_debounce
+from .spring_slider import SpringSlider
 from .widgets import BracketButton
 
 
@@ -70,6 +78,7 @@ class AudioFxButton(BracketButton):
         super().__init__("fx", parent=parent)
         self._state = state if state is not None else AudioFxState()
         self._popover: AudioFxPopover | None = None
+        self._popover_face_built: str = ""
         self.clicked.connect(self._open_popover)
         self.setToolTip("audio fx — right-click to toggle the rack on/off")
         self._refresh_label()
@@ -97,10 +106,29 @@ class AudioFxButton(BracketButton):
     def _refresh_label(self) -> None:
         self.setLabel("fx" if self._state.master_enabled else "fx·off")
 
+    def _popover_face(self) -> str:
+        """``"spring"`` when the window's active personality is modern,
+        else ``"bracket"``. Read from the window's settings at popover
+        build time (the speed button's exact rule); anything unknown —
+        no settings attached, tests, a third-party preset id — defaults
+        to the bracket face."""
+        settings = getattr(self.window(), "_settings", None)
+        preset = str(getattr(settings, "preset", "") or "")
+        return "spring" if preset == "modern" else "bracket"
+
     def _open_popover(self) -> None:
+        face = self._popover_face()
+        if self._popover is not None and self._popover_face_built != face:
+            # The personality flipped since this popover was built —
+            # rebuild so the new face shows on this open. Cheap: the
+            # popover carries no state beyond what sync() pushes.
+            self._popover.deleteLater()
+            self._popover = None
         if self._popover is None:
-            self._popover = AudioFxPopover(self.window())
+            cls = SpringAudioFxPopover if face == "spring" else AudioFxPopover
+            self._popover = cls(self.window())
             self._popover.state_changed.connect(self._on_pop_changed)
+            self._popover_face_built = face
         self._popover.sync(self._state)
         self._popover.show_above(self)
 
@@ -125,9 +153,6 @@ class AudioFxPopover(QFrame):
         self.setObjectName("AudioFxPopover")
         self._state: AudioFxState | None = None
         self._silent = False
-
-        self._apply_theme(theming.manager().current())
-        theming.manager().theme_changed.connect(self._apply_theme)
 
         # master toggle pill at top
         self._master_btn = BracketButton("rack on")
@@ -155,22 +180,10 @@ class AudioFxPopover(QFrame):
         reverb_row.addWidget(QLabel("reverb"))
         reverb_row.addWidget(self._reverb_combo, stretch=1)
 
-        # reverb wet slider (5% steps)
-        self._wet_slider = QSlider(Qt.Horizontal)
-        self._wet_slider.setMinimum(0)
-        self._wet_slider.setMaximum(self.WET_SCALE)
-        self._wet_slider.setSingleStep(1)
-        self._wet_slider.valueChanged.connect(self._on_wet)
-        self._wet_read = QLabel("50%")
-        self._wet_read.setMinimumWidth(52)
-        self._wet_read.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        wet_row = QHBoxLayout()
-        wet_row.setSpacing(8)
-        wet_lbl = QLabel("wet")
-        wet_lbl.setMinimumWidth(50)
-        wet_row.addWidget(wet_lbl)
-        wet_row.addWidget(self._wet_slider, stretch=1)
-        wet_row.addWidget(self._wet_read)
+        # reverb wet slider (5% steps) — face-specific construction; the
+        # spring subclass overrides _make_wet_row / _make_shelf /
+        # _wire_sliders / _sync_sliders and nothing else touches them.
+        wet_row = self._make_wet_row()
 
         # quick fx toggles — just the two that fit the popover's job;
         # the rest live in the full rack
@@ -189,16 +202,18 @@ class AudioFxPopover(QFrame):
         # bass + treble shelf sliders (compact)
         self._bass_slider, bass_row = self._make_shelf("bass", "_bass_read")
         self._treble_slider, treble_row = self._make_shelf("treble", "_treble_read")
-        self._bass_slider.valueChanged.connect(self._on_bass)
-        self._treble_slider.valueChanged.connect(self._on_treble)
+        self._wire_sliders()
 
         # full-panel hint at bottom — the key name derives from the live
         # keymap (v2.0), not a hardcoded "ctrl+8"; refreshed on every
-        # sync() so a rebind shows up on the next open.
+        # sync() so a rebind shows up on the next open. Colored by
+        # _apply_theme (the dim token — palette(mid) ignored theming).
         self._hint = QLabel()
         self._hint.setAlignment(Qt.AlignCenter)
-        self._hint.setStyleSheet("color: palette(mid);")
         self._refresh_hint()
+
+        self._apply_theme(theming.manager().current())
+        theming.manager().theme_changed.connect(self._apply_theme)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 10)
@@ -264,12 +279,7 @@ class AudioFxPopover(QFrame):
             self._reverb_combo.setCurrentIndex(
                 max(0, self._reverb_combo.findData(state.reverb_preset))
             )
-            self._wet_slider.setValue(int(round(state.reverb_wet * self.WET_SCALE)))
-            self._wet_read.setText(f"{int(round(state.reverb_wet * 100))}%")
-            self._bass_slider.setValue(int(round(state.bass_db * self.SHELF_SCALE)))
-            self._treble_slider.setValue(int(round(state.treble_db * self.SHELF_SCALE)))
-            self._bass_read.setText(f"{_format_db(state.bass_db)} dB")
-            self._treble_read.setText(f"{_format_db(state.treble_db)} dB")
+            self._sync_sliders(state)
             self._lofi_btn.setChecked(state.lofi)
             self._crossfeed_btn.setChecked(state.crossfeed)
         finally:
@@ -350,7 +360,24 @@ class AudioFxPopover(QFrame):
         self._treble_read.setText(f"{_format_db(db)} dB")
         self._emit()
 
-    # ---------- internals ----------
+    # ---------- internals (the spring subclass overrides these) ----------
+
+    def _make_wet_row(self) -> QHBoxLayout:
+        self._wet_slider = QSlider(Qt.Horizontal)
+        self._wet_slider.setMinimum(0)
+        self._wet_slider.setMaximum(self.WET_SCALE)
+        self._wet_slider.setSingleStep(1)
+        self._wet_read = QLabel("50%")
+        self._wet_read.setMinimumWidth(52)
+        self._wet_read.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        wet_row = QHBoxLayout()
+        wet_row.setSpacing(8)
+        wet_lbl = QLabel("wet")
+        wet_lbl.setMinimumWidth(50)
+        wet_row.addWidget(wet_lbl)
+        wet_row.addWidget(self._wet_slider, stretch=1)
+        wet_row.addWidget(self._wet_read)
+        return wet_row
 
     def _make_shelf(self, label: str, readout_attr: str) -> tuple[QSlider, QHBoxLayout]:
         slider = QSlider(Qt.Horizontal)
@@ -370,6 +397,19 @@ class AudioFxPopover(QFrame):
         row.addWidget(readout)
         return slider, row
 
+    def _wire_sliders(self) -> None:
+        self._wet_slider.valueChanged.connect(self._on_wet)
+        self._bass_slider.valueChanged.connect(self._on_bass)
+        self._treble_slider.valueChanged.connect(self._on_treble)
+
+    def _sync_sliders(self, state: AudioFxState) -> None:
+        self._wet_slider.setValue(int(round(state.reverb_wet * self.WET_SCALE)))
+        self._wet_read.setText(f"{int(round(state.reverb_wet * 100))}%")
+        self._bass_slider.setValue(int(round(state.bass_db * self.SHELF_SCALE)))
+        self._treble_slider.setValue(int(round(state.treble_db * self.SHELF_SCALE)))
+        self._bass_read.setText(f"{_format_db(state.bass_db)} dB")
+        self._treble_read.setText(f"{_format_db(state.treble_db)} dB")
+
     def _emit(self) -> None:
         if self._state is not None:
             self.state_changed.emit(self._state)
@@ -377,6 +417,123 @@ class AudioFxPopover(QFrame):
     def _apply_theme(self, theme) -> None:
         bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        dim = theme.token("dim", "#666666") if theme else "#666666"
         self.setStyleSheet(
             f"QFrame#AudioFxPopover {{ background: {bg}; border: 1px solid {fg}; }}"
         )
+        # The hint used to hardcode palette(mid), which ignores theming
+        # entirely — route it through the dim token (hex fallback, same
+        # pattern as SpringSlider's paint tokens).
+        self._hint.setStyleSheet(f"color: {dim};")
+
+
+class SpringAudioFxPopover(AudioFxPopover):
+    """The modern face: wet / bass / treble become magnetic-detent
+    SpringSliders (wet magnetized at 50%, the shelves at 0 dB). Same
+    external surface as AudioFxPopover (``state_changed`` / ``sync`` /
+    ``show_above``) so AudioFxButton can't tell the faces apart; the
+    bracket base stays behaviorally verbatim because this class only
+    overrides the four construction/wiring/sync seams plus its own
+    float handlers.
+
+    Debounce discipline: live drag values mutate the shared state and
+    ride ``state_changed`` into the window's ~120 ms push / ~250 ms save
+    debounce exactly like every other rack control — never a direct
+    push. A committed interaction (release / wheel / keys settling)
+    shortens that pending work so the final chain lands promptly
+    instead of waiting out the timer — shortens, never bypasses. The
+    settle itself is motion-gated by SpringSlider's construction
+    (intensity OFF = synchronous snap)."""
+
+    def _make_wet_row(self) -> QHBoxLayout:
+        self._wet_slider = SpringSlider()
+        self._wet_slider.set_range(0.0, 1.0, 1.0 / self.WET_SCALE)
+        self._wet_slider.set_detents((0.5,))
+        self._wet_slider.set_formatter(lambda v: f"{int(round(v * 100))}%")
+        self._wet_read = QLabel("50%")
+        self._wet_read.setMinimumWidth(52)
+        self._wet_read.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        wet_row = QHBoxLayout()
+        wet_row.setSpacing(8)
+        wet_lbl = QLabel("wet")
+        wet_lbl.setMinimumWidth(50)
+        wet_row.addWidget(wet_lbl)
+        wet_row.addWidget(self._wet_slider, stretch=1)
+        wet_row.addWidget(self._wet_read)
+        return wet_row
+
+    def _make_shelf(self, label: str, readout_attr: str) -> tuple[SpringSlider, QHBoxLayout]:
+        slider = SpringSlider()
+        slider.set_range(EQ_GAIN_MIN_DB, EQ_GAIN_MAX_DB, 1.0 / self.SHELF_SCALE)
+        slider.set_detents((0.0,))
+        slider.set_formatter(lambda v: f"{_format_db(v)} dB")
+        readout = QLabel("0 dB")
+        readout.setMinimumWidth(52)
+        readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        setattr(self, readout_attr, readout)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        lbl = QLabel(label)
+        lbl.setMinimumWidth(50)
+        row.addWidget(lbl)
+        row.addWidget(slider, stretch=1)
+        row.addWidget(readout)
+        return slider, row
+
+    def _wire_sliders(self) -> None:
+        self._wet_slider.value_changed.connect(self._on_wet_f)
+        self._wet_slider.value_committed.connect(self._on_commit)
+        self._bass_slider.value_changed.connect(self._on_bass_f)
+        self._bass_slider.value_committed.connect(self._on_commit)
+        self._treble_slider.value_changed.connect(self._on_treble_f)
+        self._treble_slider.value_committed.connect(self._on_commit)
+
+    def _sync_sliders(self, state: AudioFxState) -> None:
+        # Only move a handle when the value really differs — during a
+        # drag the slider itself originated the change, and a set_value
+        # here would snap the display out from under the finger (the
+        # spring speed popover's exact rule). External changes settle
+        # springily while the popover is up; the pre-show sync snaps.
+        wet = max(0.0, min(1.0, float(state.reverb_wet)))
+        self._wet_read.setText(f"{int(round(wet * 100))}%")
+        if abs(self._wet_slider.value() - wet) > 1e-9:
+            self._wet_slider.set_value(wet, animate=self.isVisible())
+        bass = max(EQ_GAIN_MIN_DB, min(EQ_GAIN_MAX_DB, float(state.bass_db)))
+        self._bass_read.setText(f"{_format_db(bass)} dB")
+        if abs(self._bass_slider.value() - bass) > 1e-9:
+            self._bass_slider.set_value(bass, animate=self.isVisible())
+        treble = max(EQ_GAIN_MIN_DB, min(EQ_GAIN_MAX_DB, float(state.treble_db)))
+        self._treble_read.setText(f"{_format_db(treble)} dB")
+        if abs(self._treble_slider.value() - treble) > 1e-9:
+            self._treble_slider.set_value(treble, animate=self.isVisible())
+
+    # ---------- spring handlers (floats straight off the sliders) ----------
+
+    def _on_wet_f(self, value: float) -> None:
+        if self._state is None or self._silent:
+            return
+        wet = max(0.0, min(1.0, float(value)))
+        self._state.reverb_wet = wet
+        self._wet_read.setText(f"{int(round(wet * 100))}%")
+        self._emit()
+
+    def _on_bass_f(self, value: float) -> None:
+        if self._state is None or self._silent:
+            return
+        self._state.bass_db = float(value)
+        self._bass_read.setText(f"{_format_db(value)} dB")
+        self._emit()
+
+    def _on_treble_f(self, value: float) -> None:
+        if self._state is None or self._silent:
+            return
+        self._state.treble_db = float(value)
+        self._treble_read.setText(f"{_format_db(value)} dB")
+        self._emit()
+
+    def _on_commit(self, _value: float) -> None:
+        # The settle landed — shorten the window's pending debounced
+        # push/save (never an inline push: with motion off every wheel
+        # notch commits). The popover is a Qt.Popup (its own window()),
+        # so the helper walks parent()s to find the MainWindow.
+        _commit_fx_debounce(self)

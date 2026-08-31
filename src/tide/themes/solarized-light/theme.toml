@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = false
 aesthetic= "brutalist"
+uses_base= true
 
 [tokens]
+banner    = "solarized-light (brutalist · regenerated)"
 bg        = "#fdf6e3"
 bg_alt    = "#eee8d5"
 fg        = "#586e75"

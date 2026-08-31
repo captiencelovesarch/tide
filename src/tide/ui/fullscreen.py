@@ -25,9 +25,7 @@ compositor without the interface just means the usual screen timeout.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import (
-    QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation,
-)
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QAction, QColor, QFont, QFontMetrics, QGuiApplication, QKeySequence,
     QShortcut,
@@ -37,7 +35,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
-from .. import glyphs, theming
+from .. import backdrops, glyphs, theming
 from ..player import PlayState
 from ..queue import Role as QueueRole
 from . import art_cache, motion as motion_module, scale as _scale
@@ -182,8 +180,9 @@ class FullscreenPlayer(QWidget):
         # Which side pane is up: "lyrics" | "queue" | "off". showEvent
         # applies the remembered setting.
         self._pane = "off"
-        # Open/close geometry animation (host width + art size together).
-        self._pane_anim: QVariantAnimation | None = None
+        # Open/close geometry animation (host width + art size together) —
+        # an in-flight motion.value_lerp handle, or None.
+        self._pane_anim = None
         # Per-screen metrics, filled by prepare_for_screen.
         self._pane_w = 700
         self._art_base = 320
@@ -363,7 +362,8 @@ class FullscreenPlayer(QWidget):
         self._bottom_eff = QGraphicsOpacityEffect(self._bottom_bar)
         self._bottom_eff.setOpacity(1.0)
         self._bottom_bar.setGraphicsEffect(self._bottom_eff)
-        self._zen_anim: QVariantAnimation | None = None
+        # In-flight motion.value_lerp handle for the chrome fade, or None.
+        self._zen_anim = None
         self._zen_timer = QTimer(self)
         self._zen_timer.setSingleShot(True)
         self._zen_timer.setInterval(_ZEN_IDLE_MS)
@@ -513,18 +513,17 @@ class FullscreenPlayer(QWidget):
         self.apply_settings()
 
     def resolved_backdrop_style(self) -> str:
+        # backdrops.resolve owns the follow semantics: on THIS surface
+        # follow mirrors the main window's whole look, including whether
+        # the backdrop is on at all (the mini deliberately diverges —
+        # the rationale lives on resolve()'s docstring).
         s = self._settings()
-        style = s.fullscreen_backdrop_style or "follow"
-        if style == "follow":
-            # Follow means the main surface's whole look, including
-            # whether the backdrop is on at all. Forcing a gradient here
-            # (the mini's rule) painted the theme's bg_alt hue whenever
-            # no album palette was flowing — on nord/abyss/storm that is
-            # a plainly wrong blue the user's main window never shows.
-            if not bool(s.adaptive_background):
-                return "off"
-            style = s.adaptive_background_style or "field"
-        return style
+        return backdrops.resolve(
+            s.fullscreen_backdrop_style,
+            adaptive_on=bool(s.adaptive_background),
+            surface="fullscreen",
+            main_style=s.adaptive_background_style,
+        )
 
     def apply_settings(self) -> None:
         """Push fullscreen_* settings into the widgets. Called on every
@@ -582,9 +581,24 @@ class FullscreenPlayer(QWidget):
 
     # ---------- data slots (queue / player / theme) ----------
 
+    def refresh_glyphs(self) -> None:
+        """Re-derive the construction-time static glyphs from the
+        registry. Play/like/repeat re-resolve on every state refresh
+        already; these are set once in __init__ — without this, a
+        personality flip's glyph overrides (window.refresh_glyphs →
+        sync_now) would never reach this transport. The pane tabs and
+        exit (♫ / ≡ / ✕) are surface literals, not registry keys."""
+        _g = glyphs.glyph
+        # Glyph-only button: the glyph doubles as the bracket label.
+        self.shuffle_btn.setLabel(_g("shuffle"))
+        self.shuffle_btn.setGlyph(_g("shuffle"))
+        self.prev_btn.setGlyph(_g("prev"))
+        self.next_btn.setGlyph(_g("next"))
+
     def sync_now(self, track, duration, position, state, liked) -> None:
         """Full refresh, called right before every show so a fullscreen
         opened mid-song is correct on frame one."""
+        self.refresh_glyphs()
         self._apply_track(track, animate=False)
         self.progress.setDuration(duration or 0.0)
         self.progress.setPosition(position or 0.0)
@@ -845,15 +859,17 @@ class FullscreenPlayer(QWidget):
                 self._lyrics_host.hide()
             self._finish_pane_move()
 
-        anim = QVariantAnimation(self)
-        anim.setDuration(motion_module.DUR_MED)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.valueChanged.connect(_tick)
-        anim.finished.connect(_done)
-        self._pane_anim = anim
-        anim.start()
+        # out_strong (mechanical OutCubic — the pre-P3 curve verbatim;
+        # springy OutQuint), never the spring: this width drives the art
+        # size, and an overshoot would poke the art past its band.
+        self._pane_anim = motion_module.value_lerp(
+            0.0, 1.0,
+            on_update=_tick,
+            dur=motion_module.dur("med"),
+            easing=motion_module.ease("out_strong"),
+            on_done=_done,
+            owner=self, kind="pane",
+        )
 
     def _finish_pane_move(self) -> None:
         # Re-pin and re-elide against the settled art width.
@@ -899,20 +915,15 @@ class FullscreenPlayer(QWidget):
         return super().eventFilter(obj, event)
 
     def _animate_chrome(self, to: float) -> None:
-        if self._zen_anim is not None:
-            self._zen_anim.stop()
-            self._zen_anim = None
-        if motion_module.intensity() == motion_module.Intensity.OFF:
-            self._top_eff.setOpacity(to)
-            self._bottom_eff.setOpacity(to)
-            return
-        anim = QVariantAnimation(self)
-        anim.setDuration(motion_module.DUR_MED)
-        anim.setStartValue(float(self._top_eff.opacity()))
-        anim.setEndValue(float(to))
-        anim.valueChanged.connect(self._on_chrome_opacity)
-        self._zen_anim = anim
-        anim.start()
+        # value_lerp cancels the prior in-flight fade (same owner+kind)
+        # and snaps synchronously at intensity OFF — brutalist zero-anim.
+        # Opacity: the profile's plain "out" ease, never the spring.
+        self._zen_anim = motion_module.value_lerp(
+            float(self._top_eff.opacity()), float(to),
+            on_update=self._on_chrome_opacity,
+            dur=motion_module.dur("med"),
+            owner=self, kind="chrome",
+        )
 
     def _on_chrome_opacity(self, value) -> None:
         self._top_eff.setOpacity(float(value))

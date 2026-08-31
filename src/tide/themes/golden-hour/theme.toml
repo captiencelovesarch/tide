@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = false
 aesthetic= "modern"
+uses_base= true
 
 [tokens]
+banner    = "golden hour (modern · sunset light)"
 bg        = "#f6e8d1"
 bg_alt    = "#efdcbd"
 fg        = "#46311f"

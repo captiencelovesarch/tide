@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "modern"
+uses_base= true
 
 [tokens]
+banner    = "blackwater (modern · oled true-black)"
 bg        = "#000000"
 bg_alt    = "#0a0c0d"
 fg        = "#e6edf0"

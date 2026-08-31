@@ -5,6 +5,18 @@ and layout flags. `theme.qss` is a Qt stylesheet using @token placeholders
 that the loader substitutes at apply-time. Optional `fonts/*.ttf` files are
 auto-registered into the Qt font database.
 
+A theme.toml may declare ``uses_base = true`` under ``[meta]``: its final
+stylesheet is then the shared ``themes/_base.qss`` (with ``/*[if
+brutalist]*/`` / ``/*[if modern]*/`` … ``/*[endif]*/`` dialect blocks
+resolved against the theme's aesthetic) followed by the theme's own
+theme.qss as a palette overlay — later rules win, so an overlay can
+override anything structural. Every bundled theme does this with an EMPTY
+overlay: the whole palette lives in ``[tokens]`` (including the ``banner``
+token the base's header comment resolves from). Themes without the flag
+keep shipping a full standalone theme.qss, so third-party and
+theme-editor-saved themes are untouched by the split. Composition happens
+at load time, so ``Theme.qss`` is always the complete stylesheet.
+
 Themes are discovered from three sources (later wins):
   1. bundled       — src/tide/themes/
   2. system        — /usr/share/tide/themes/
@@ -31,6 +43,52 @@ from . import config
 
 BUNDLED_THEMES_DIR = Path(__file__).parent / "themes"
 SYSTEM_THEMES_DIR = Path("/usr/share/tide/themes")
+
+# The shared structural stylesheet uses_base themes compose over. Always
+# the bundled copy — a palette-only theme in the user dir composes against
+# the structure that ships with the app, never a stray local fork.
+BASE_QSS_PATH = BUNDLED_THEMES_DIR / "_base.qss"
+
+# Dialect markers inside _base.qss. A whole-line `/*[if <name>]*/` keeps
+# the lines up to the matching whole-line `/*[endif]*/` only when <name>
+# equals the theme's aesthetic; marker lines are never emitted. Anchored
+# to the full line so prose that merely MENTIONS the syntax can't trip it.
+_DIALECT_IF_RE = re.compile(r"^\s*/\*\[if ([a-z][a-z0-9_-]*)\]\*/\s*$")
+_DIALECT_ENDIF_RE = re.compile(r"^\s*/\*\[endif\]\*/\s*$")
+
+
+def _select_dialect(text: str, aesthetic: str) -> str:
+    """Resolve _base.qss dialect blocks for one aesthetic.
+
+    Total by design (never raises): unknown block names simply don't
+    match, a missing endif runs its block to EOF, and a stray endif
+    resets to keep — a malformed base degrades to odd styling, not a
+    theme that fails to load.
+    """
+    out: list[str] = []
+    keep = True
+    for line in text.split("\n"):
+        m = _DIALECT_IF_RE.match(line)
+        if m:
+            keep = m.group(1) == aesthetic
+            continue
+        if _DIALECT_ENDIF_RE.match(line):
+            keep = True
+            continue
+        if keep:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _compose_with_base(overlay_qss: str, aesthetic: str) -> str:
+    """Base (dialect-resolved) + the theme's palette overlay, in that
+    order — overlay rules follow the base so they win the cascade. A
+    missing/unreadable base degrades to the overlay alone."""
+    try:
+        base = BASE_QSS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        base = ""
+    return _select_dialect(base, aesthetic) + overlay_qss
 
 
 @dataclass(frozen=True)
@@ -84,6 +142,8 @@ def _read_theme(path: Path) -> Theme | None:
     if aesthetic not in ("brutalist", "modern"):
         typography = data.get("typography", {}) or {}
         aesthetic = "brutalist" if bool(typography.get("mono", False)) else "modern"
+    if bool(meta.get("uses_base", False)):
+        qss_text = _compose_with_base(qss_text, aesthetic)
     return Theme(
         slug=slug,
         name=meta.get("name", slug),

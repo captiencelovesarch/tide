@@ -12,18 +12,13 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import (
-    QEasingCurve,
     QEvent,
     QPoint,
-    QPropertyAnimation,
-    QRect,
     QTimer,
     Qt,
 )
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
-    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -32,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import theming
+from . import motion as motion_module
 
 
 DEFAULT_LIFETIME_MS = 4500
@@ -114,10 +110,6 @@ class Toast(QFrame):
         self._dismiss_btn.clicked.connect(self.dismiss)
         layout.addWidget(self._dismiss_btn)
 
-        self._opacity = QGraphicsOpacityEffect(self)
-        self._opacity.setOpacity(0.0)
-        self.setGraphicsEffect(self._opacity)
-
         self.adjustSize()
         # Cap width so long messages wrap nicely.
         parent_w = parent.width() if parent else 800
@@ -135,41 +127,34 @@ class Toast(QFrame):
         if parent is not None:
             parent.installEventFilter(self)
 
-        self.show()
         self._slide_in()
 
         if self._lifetime_ms > 0:
             QTimer.singleShot(self._lifetime_ms, self.dismiss)
 
     # ---------- animation ----------
+    # Everything routes through the motion module: intensity OFF means the
+    # toast appears at its resting spot and vanishes on dismiss — zero
+    # animation objects, which is the brutalist contract.
 
     def _slide_in(self) -> None:
-        self._place_offscreen_right()
         target = self._target_position()
-        self._anim = QPropertyAnimation(self, b"pos")
-        self._anim.setDuration(240)
-        self._anim.setStartValue(self.pos())
-        self._anim.setEndValue(target)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.start()
-
-        self._fade = QPropertyAnimation(self._opacity, b"opacity")
-        self._fade.setDuration(240)
-        self._fade.setStartValue(0.0)
-        self._fade.setEndValue(1.0)
-        self._fade.start()
+        start = QPoint(target.x() + self.width() + 40, target.y())
+        # Not shown yet (motion.fade_in calls show), so this pre-placement
+        # never paints — at OFF the slide immediately re-moves to target.
+        self.move(start)
+        # "spring" easing: mechanical profile lands decisively; springy
+        # pops a touch past the resting spot and settles — the modern
+        # dialect's hello.
+        motion_module.slide(
+            self, start, target, easing=motion_module.ease("spring"),
+        )
+        motion_module.fade_in(self)
 
     def _slide_out(self) -> None:
-        self._fade_out = QPropertyAnimation(self._opacity, b"opacity")
-        self._fade_out.setDuration(220)
-        self._fade_out.setStartValue(self._opacity.opacity())
-        self._fade_out.setEndValue(0.0)
-        self._fade_out.finished.connect(self.deleteLater)
-        self._fade_out.start()
-
-    def _place_offscreen_right(self) -> None:
-        target = self._target_position()
-        self.move(target.x() + self.width() + 40, target.y())
+        motion_module.fade_out(
+            self, hide_on_done=False, on_done=self.deleteLater,
+        )
 
     def _target_position(self) -> QPoint:
         parent = self.parent()

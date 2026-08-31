@@ -6,9 +6,13 @@ when the master toggle is off, when music is playing (set via ``set_muted``),
 or when the key has no WAV registered.
 
 WAVs live in ``tide/sounds/`` inside the package and ship with the wheel.
-The loader is lenient: any missing file silently disables that key, so the
-feature degrades cleanly on a fresh checkout where the user hasn't
-authored every sound yet.
+Sound packs are subdirectories of that dir: ``set_pack("modern")`` resolves
+each key against ``sounds/modern/`` first and falls back to the default
+pack per key, so a pack only has to author the sounds it wants to change.
+``"default"`` (the initial pack) is the sounds dir itself. The loader is
+lenient: any missing file silently disables that key, so the feature
+degrades cleanly on a fresh checkout where the user hasn't authored every
+sound yet.
 
 Music-playing detection: ``app.py`` connects the playback router's
 ``state_changed`` signal to ``set_muted(state == PlayState.PLAYING)``,
@@ -75,6 +79,7 @@ class UiSoundPlayer(QObject):
         self._enabled = False
         self._muted = False
         self._volume = DEFAULT_VOLUME
+        self._pack = "default"
         self._sounds: dict[str, Path] = {}
         self._sounds_dir = Path(sounds_dir) if sounds_dir else _default_sounds_dir()
         self._player = self._find_player()
@@ -90,8 +95,18 @@ class UiSoundPlayer(QObject):
         return None
 
     def _load(self) -> None:
-        """Register each WAV present. Missing files are skipped."""
+        """Register each WAV present. The active pack's file wins per key,
+        the default pack fills the gaps, missing files are skipped."""
+        self._sounds = {}
+        pack_dir = None
+        if self._pack and self._pack != "default":
+            pack_dir = self._sounds_dir / self._pack
         for key, filename in SOUND_KEYS.items():
+            if pack_dir is not None:
+                packed = pack_dir / filename
+                if packed.is_file():
+                    self._sounds[key] = packed
+                    continue
             path = self._sounds_dir / filename
             if not path.is_file():
                 continue
@@ -111,6 +126,16 @@ class UiSoundPlayer(QObject):
 
     def set_volume(self, volume: float) -> None:
         self._volume = max(0.0, min(1.0, float(volume)))
+
+    @Slot(str)
+    def set_pack(self, name: str) -> None:
+        """Switch the active sound pack. ``"default"`` (or empty) is the
+        bundled sounds dir itself; any other name resolves against
+        ``sounds/<name>/`` with per-key fallback to default. Unknown pack
+        names just fall back everywhere — lenient like the rest of the
+        loader."""
+        self._pack = str(name or "default")
+        self._load()
 
     # ---------- the API call sites use ----------
 
@@ -149,6 +174,10 @@ class UiSoundPlayer(QObject):
 
     def available_keys(self) -> list[str]:
         return list(self._sounds.keys())
+
+    @property
+    def pack(self) -> str:
+        return self._pack
 
     @property
     def enabled(self) -> bool:

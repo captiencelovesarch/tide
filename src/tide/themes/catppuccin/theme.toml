@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "modern"
+uses_base= true
 
 [tokens]
+banner    = "catppuccin (modern · regenerated)"
 bg        = "#1e1e2e"
 bg_alt    = "#313244"
 fg        = "#cdd6f4"

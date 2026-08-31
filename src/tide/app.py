@@ -696,6 +696,11 @@ def run(argv: list[str] | None = None) -> int:
     ui_sounds = ui_sounds_module.UiSoundPlayer(parent=window)
     ui_sounds.set_enabled(bool(user_settings.ui_sounds_enabled))
     window.ui_sounds = ui_sounds
+    # The startup apply_preset_visuals above ran before this player
+    # existed — land the personality's sound pack now that it does
+    # (modern → the watery "modern" pack, everything else → default).
+    if hasattr(window, "_apply_sound_pack"):
+        window._apply_sound_pack()
 
     # Everything set_mini_mode needs (window._settings, window._adaptive,
     # window._ambient) is attached above — safe to open the mini now. The

@@ -1252,7 +1252,7 @@ class OnboardingDialog(QDialog):
         from . import motion as motion_module
         try:
             motion_module.crossfade_stack(
-                self._stack, idx, dur=motion_module.DUR_SHORT,
+                self._stack, idx, dur=motion_module.dur("short"),
                 on_done=lambda: self._on_step_entered(idx),
             )
         except Exception:

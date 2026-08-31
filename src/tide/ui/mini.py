@@ -23,10 +23,7 @@ Wayland rules (KDE): never self-position — moving is only ever
 """
 from __future__ import annotations
 
-from PySide6.QtCore import (
-    QEasingCurve, QEvent, QPointF, QPropertyAnimation, QRectF, Qt, QTimer,
-    QVariantAnimation,
-)
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QAction, QFontMetrics, QKeySequence, QPainter, QPainterPath, QPen,
     QShortcut,
@@ -276,7 +273,8 @@ class MiniPlayer(QWidget):
         self.ticker_lbl.setWordWrap(True)
         self.ticker_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.ticker_lbl.setProperty("class", "dim")
-        self._ticker_h_anim: QVariantAnimation | None = None
+        # In-flight motion.value_lerp handle (or None) — see _set_ticker_height.
+        self._ticker_h_anim = None
         fg.addWidget(self.title_lbl)
         fg.addWidget(self.artist_lbl)
         fg.addWidget(self.ticker_lbl)
@@ -345,8 +343,10 @@ class MiniPlayer(QWidget):
         self._zen_eff = QGraphicsOpacityEffect(self._fade_group)
         self._zen_eff.setOpacity(1.0)
         self._fade_group.setGraphicsEffect(self._zen_eff)
-        self._zen_anim: QPropertyAnimation | None = None
-        self._zen_h_anim: QVariantAnimation | None = None
+        # In-flight motion.value_lerp handles (or None) — zen's opacity
+        # fade and the collapse-to-art-card height glide.
+        self._zen_anim = None
+        self._zen_h_anim = None
         self._zen_timer = QTimer(self)
         self._zen_timer.setSingleShot(True)
         self._zen_timer.setInterval(_ZEN_IDLE_MS)
@@ -463,11 +463,15 @@ class MiniPlayer(QWidget):
         self.apply_settings()
 
     def resolved_backdrop_style(self) -> str:
+        # backdrops.resolve owns the follow semantics (and documents why
+        # the mini keeps its gradient even when the main backdrop is off).
         s = self._settings()
-        style = s.mini_backdrop_style or "follow"
-        if style == "follow":
-            style = s.adaptive_background_style or "field"
-        return style
+        return backdrops.resolve(
+            s.mini_backdrop_style,
+            adaptive_on=bool(s.adaptive_background),
+            surface="mini",
+            main_style=s.adaptive_background_style,
+        )
 
     def apply_settings(self) -> None:
         """Push the current mini_* settings into the widgets. Called on every
@@ -559,9 +563,25 @@ class MiniPlayer(QWidget):
 
     # ---------- data slots (queue / player / theme) ----------
 
+    def refresh_glyphs(self) -> None:
+        """Re-derive the construction-time static glyphs from the
+        registry. Play/like/repeat re-resolve on every state refresh
+        already; these four are set once in __init__ — without this, a
+        personality flip's glyph overrides (window.refresh_glyphs →
+        sync_now) would never reach the mini's shuffle/prev/next/expand
+        buttons. Cheap and idempotent, same contract as the window's."""
+        _g = glyphs.glyph
+        # Glyph-only button: the glyph doubles as the bracket label.
+        self.shuffle_btn.setLabel(_g("shuffle"))
+        self.shuffle_btn.setGlyph(_g("shuffle"))
+        self.prev_btn.setGlyph(_g("prev"))
+        self.next_btn.setGlyph(_g("next"))
+        self.exit_btn.setGlyph(_g("fullscreen"))
+
     def sync_now(self, track, duration, position, state, liked) -> None:
         """Full refresh, called right before every show so a mini opened
         mid-song is correct on frame one."""
+        self.refresh_glyphs()
         self._apply_track(track, animate=False)
         self.progress.setDuration(duration or 0.0)
         self.progress.setPosition(position or 0.0)
@@ -679,13 +699,12 @@ class MiniPlayer(QWidget):
                 or motion_module.intensity() == motion_module.Intensity.OFF):
             self.ticker_lbl.setFixedHeight(h)
             return
-        anim = QVariantAnimation(self)
-        anim.setDuration(motion_module.DUR_SHORT)
-        anim.setStartValue(int(self.ticker_lbl.height()))
-        anim.setEndValue(int(h))
-        anim.valueChanged.connect(self._on_ticker_h_value)
-        self._ticker_h_anim = anim
-        anim.start()
+        self._ticker_h_anim = motion_module.value_lerp(
+            float(self.ticker_lbl.height()), float(h),
+            on_update=self._on_ticker_h_value,
+            dur=motion_module.dur("short"),
+            owner=self, kind="ticker_h",
+        )
 
     def _on_ticker_h_value(self, value) -> None:
         self.ticker_lbl.setFixedHeight(int(value))
@@ -876,15 +895,15 @@ class MiniPlayer(QWidget):
             if not want:
                 panel.hide()
         else:
-            anim = QVariantAnimation(self)
-            anim.setDuration(motion_module.DUR_SHORT)
-            anim.setStartValue(start)
-            anim.setEndValue(target)
-            anim.valueChanged.connect(self._on_lyrics_anim_value)
-            if not want:
-                anim.finished.connect(self._on_lyrics_anim_closed)
-            self._lyrics_anim = anim
-            anim.start()
+            # owner+kind: a rapid re-toggle cancels the prior glide
+            # instead of two anims fighting over the panel height.
+            self._lyrics_anim = motion_module.value_lerp(
+                float(start), float(target),
+                on_update=self._on_lyrics_anim_value,
+                dur=motion_module.dur("short"),
+                on_done=None if want else self._on_lyrics_anim_closed,
+                owner=self, kind="lyrics_h",
+            )
         if want and squeeze:
             self._zen_sleep(force=True)
         else:
@@ -922,18 +941,15 @@ class MiniPlayer(QWidget):
         return super().eventFilter(obj, event)
 
     def _animate_zen(self, to: float) -> None:
-        if self._zen_anim is not None:
-            self._zen_anim.stop()
-            self._zen_anim = None
-        if motion_module.intensity() == motion_module.Intensity.OFF:
-            self._zen_eff.setOpacity(to)
-            return
-        anim = QPropertyAnimation(self._zen_eff, b"opacity", self)
-        anim.setDuration(motion_module.DUR_MED)
-        anim.setStartValue(self._zen_eff.opacity())
-        anim.setEndValue(to)
-        self._zen_anim = anim
-        anim.start()
+        # value_lerp cancels the prior in-flight fade (same owner+kind)
+        # and snaps synchronously at intensity OFF — brutalist zero-anim.
+        # Opacity: the profile's plain "out" ease, never the spring.
+        self._zen_anim = motion_module.value_lerp(
+            float(self._zen_eff.opacity()), float(to),
+            on_update=self._zen_eff.setOpacity,
+            dur=motion_module.dur("med"),
+            owner=self, kind="zen/opacity",
+        )
 
     # -- zen height: the window shrinks until only the art card is left.
     # The fade group's height animates to 0 and the SetFixedSize layout
@@ -956,18 +972,17 @@ class MiniPlayer(QWidget):
 
     def _animate_group_height(self, end: int, on_done=None) -> None:
         self._stop_zen_h_anim()
-        anim = QVariantAnimation(self)
-        anim.setDuration(motion_module.DUR_MED)
-        # Deliberately linear — the collapse should read as one steady
-        # mechanical motion, in step with the opacity fade.
-        anim.setEasingCurve(QEasingCurve.Linear)
-        anim.setStartValue(int(self._fade_group.height()))
-        anim.setEndValue(int(end))
-        anim.valueChanged.connect(self._on_zen_h_value)
-        if on_done is not None:
-            anim.finished.connect(on_done)
-        self._zen_h_anim = anim
-        anim.start()
+        # Deliberately linear (in both profiles) — the collapse should
+        # read as one steady mechanical motion, in step with the opacity
+        # fade. A spring here would bounce the window geometry itself.
+        self._zen_h_anim = motion_module.value_lerp(
+            float(self._fade_group.height()), float(end),
+            on_update=self._on_zen_h_value,
+            dur=motion_module.dur("med"),
+            easing=motion_module.ease("linear"),
+            on_done=on_done,
+            owner=self, kind="zen/height",
+        )
 
     def _on_zen_h_value(self, value) -> None:
         self._fade_group.setFixedHeight(int(value))

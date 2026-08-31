@@ -1087,6 +1087,7 @@ class MainWindow(QMainWindow):
         from .speed import SpeedButton
         self.speed_btn = SpeedButton()
         self.speed_btn.speed_changed.connect(self._on_speed_changed)
+        self._refresh_speed_support()
 
         # Audio FX rack quick-access button — opens the small popover with
         # preset / reverb / bass / treble. Right-click toggles the master
@@ -1191,6 +1192,9 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._refresh_search_placeholder()
+        # Speed support may differ on the new source's backend (spotify →
+        # librespot can't do variable speed) — re-grey honestly.
+        self._refresh_speed_support()
         self.statusBar().showMessage(f"active source: {new_source.name}")
 
     def _enter_home_mode(self) -> None:
@@ -1747,8 +1751,13 @@ class MainWindow(QMainWindow):
             return
         from . import motion as motion_module
         try:
+            # dur() is profile-aware (mechanical vs springy); overshoot is
+            # the springy dialect's snapshot lift on view switches — gated
+            # by construction inside crossfade_stack, so mechanical and
+            # OFF get exactly the old behavior.
             motion_module.crossfade_stack(
-                self.stack, target, dur=motion_module.DUR_SHORT,
+                self.stack, target, dur=motion_module.dur("short"),
+                overshoot=True,
             )
         except Exception:
             self.stack.setCurrentIndex(target)
@@ -2325,6 +2334,9 @@ class MainWindow(QMainWindow):
         else:
             # Defensive: handle a bare URL if some path still emits one.
             self.player.load_url(str(ref))
+        # The active backend flips inside load_ref (router._activate) —
+        # re-evaluate whether the speed control is honest for it.
+        self._refresh_speed_support()
         self.now_label.setStatus("")
         # Resolve done — switch the indicator's leading text. PLAYING state
         # (which fires when mpv actually starts audio) finishes the indicator.
@@ -3557,16 +3569,41 @@ class MainWindow(QMainWindow):
         # content, not chrome).
         from .track_row import set_thumbnail_override
         set_thumbnail_override(s.show_thumbnails or "theme")
-        # UI-sounds master toggle. Not built yet at the startup call site.
+        # UI-sounds master toggle + pack. Not built yet at the startup
+        # call site (app.py re-runs _apply_sound_pack once it binds one).
         ui_sounds = getattr(self, "ui_sounds", None)
         if ui_sounds is not None:
             ui_sounds.set_enabled(bool(s.ui_sounds_enabled))
+        self._apply_sound_pack()
         # Per-glyph overrides are a STASH_FIELD — glyphs are chrome, and
         # chrome is personality. Re-push the incoming set into the
         # registry and repaint every transport label so a brutalist ▶
         # swap can't leak into modern (and vice versa).
         glyphs.set_overrides(dict(s.glyph_overrides or {}))
         self.refresh_glyphs()
+
+    def _apply_sound_pack(self) -> None:
+        """Point the UI-sound player at the active personality's pack.
+
+        The pack is preset-owned data straight off the builtin def —
+        modern wears the watery "modern" blips, brutalist the default
+        clicks. Deliberately NOT a Settings/STASH field: there is no GUI
+        knob for it, and deriving it from the preset id keeps a flip
+        atomic (nothing extra to stash or migrate). Unknown/pre-adoption
+        preset ids wear the default pack — lenient like the loader.
+        No-op when app.py hasn't bound ui_sounds yet; set_pack itself is
+        cheap (re-stats six files) and skipped when nothing changed."""
+        ui_sounds = getattr(self, "ui_sounds", None)
+        if ui_sounds is None:
+            return
+        from .. import presets
+        s = getattr(self, "_settings", None)
+        try:
+            pack = presets.builtin(getattr(s, "preset", "") or "").sound_pack
+        except KeyError:
+            pack = "default"
+        if ui_sounds.pack != pack:
+            ui_sounds.set_pack(pack)
 
     def refresh_glyphs(self) -> None:
         """Re-push current state to every transport label so a changed
@@ -3780,9 +3817,21 @@ class MainWindow(QMainWindow):
         self.volume.setVolume(value, emit=False)
         self.player.set_volume(value)
 
+    def _refresh_speed_support(self) -> None:
+        """Grey the speed button whenever the active backend can't do
+        variable speed (librespot no-ops set_speed — pretending the
+        nudges work would be a lie). The active backend flips inside
+        player.load_ref, so this re-runs after every track load and on
+        an active-source switch. A plain Player (tests, back-compat) has
+        no probe and counts as supporting."""
+        probe = getattr(self.player, "active_supports_speed", None)
+        supported = True if probe is None else bool(probe())
+        self.speed_btn.set_backend_supported(supported)
+
     def _on_speed_changed(self, value: float) -> None:
         # Push to the playback router → mpv. Backends that don't support
-        # variable speed (future Librespot/MusicKit) silently no-op.
+        # variable speed (Librespot / future MusicKit) no-op; the button
+        # greys via _refresh_speed_support when one of those is active.
         self.player.set_speed(value)
         # Persist debounced, same shared timer as volume — a held [ or ]
         # key repeats fast enough to matter. Gracefully skipped if settings
@@ -4772,9 +4821,14 @@ class MainWindow(QMainWindow):
 
     def apply_motion_setting(self) -> None:
         """Motion intensity — helpers consult the cached value every
-        call, so animations queued after this point pick up the level."""
+        call, so animations queued after this point pick up the level.
+
+        Re-binds the dialect from the active personality too: intensity is
+        an independent setting, so a brutalist user raising motion to full
+        must get more mechanical motion, never the modern bounce."""
         from . import motion as motion_module
         motion_module.set_intensity(self._settings.motion or "lite")
+        motion_module.bind_preset(getattr(self._settings, "preset", "") or "")
         if hasattr(self, "central_bg"):
             self.central_bg.set_motion(self._settings.motion or "lite")
 
@@ -4966,6 +5020,7 @@ class MainWindow(QMainWindow):
                     self.player.load_ref(ref)
                 else:
                     self.player.load_url(str(ref))
+                self._refresh_speed_support()
                 self.player.pause()
                 if saved_pos > 1.0:
                     QTimer.singleShot(300, lambda: self.player.seek(saved_pos))
@@ -5017,8 +5072,13 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 pass
         # Flush the debounced settings savers — the last volume/speed/FX
-        # tick before quit must land, not die on a stopped timer.
-        for timer_attr in ("_settings_save_timer", "_audio_fx_save_timer"):
+        # tick before quit must land, not die on a stopped timer. The fx
+        # commit drain is stopped rather than run: the explicit
+        # _flush_audio_fx_state below already saves the pending state,
+        # and its other half would push a filter chain at a player that's
+        # going down.
+        for timer_attr in ("_settings_save_timer", "_audio_fx_save_timer",
+                           "_audio_fx_commit_timer"):
             timer = getattr(self, timer_attr, None)
             if timer is not None and timer.isActive():
                 timer.stop()

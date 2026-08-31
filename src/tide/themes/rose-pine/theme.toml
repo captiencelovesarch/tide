@@ -5,8 +5,10 @@ author   = "tide"
 version  = 1
 dark     = true
 aesthetic= "modern"
+uses_base= true
 
 [tokens]
+banner    = "rose-pine (modern · regenerated)"
 bg        = "#191724"
 bg_alt    = "#1f1d2e"
 fg        = "#e0def4"
