@@ -6,7 +6,7 @@ from collections import deque
 import math
 import time
 
-from PySide6.QtCore import QCoreApplication, QObject, Slot
+from PySide6.QtCore import QCoreApplication, QObject, Qt, QTimer, Slot
 
 from .. import audio_capture, settings as settings_module
 from ..pulse_map import (
@@ -19,6 +19,7 @@ _CONSUMER = "ambient"
 # buffered audio around a seek/resume still belongs to the old detector baseline.
 _SETTLE_SECONDS = 0.15
 _CHECKPOINT_SECONDS = 30.0
+_RENDER_INTERVAL_MS = 20
 
 
 class AmbientController(QObject):
@@ -51,6 +52,10 @@ class AmbientController(QObject):
         self._accept_after = 0.0
         self._anchors = deque(maxlen=64)
         self._frames = deque(maxlen=64)
+        self._render_timer = QTimer(self)
+        self._render_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._render_timer.setInterval(_RENDER_INTERVAL_MS)
+        self._render_timer.timeout.connect(self._on_render_tick)
 
         self._player.state_changed.connect(self._on_state)
         self._player.position_changed.connect(self._on_position_changed)
@@ -162,8 +167,10 @@ class AmbientController(QObject):
             pass
         self._feed.add_consumer(_CONSUMER, source=source)
         self._holding = True
+        self._render_timer.start()
 
     def _release(self) -> None:
+        self._render_timer.stop()
         if not self._holding:
             return
         self._holding = False
@@ -227,13 +234,29 @@ class AmbientController(QObject):
                 self._clock_gap(now)
         self._anchors.append((now, seconds))
         self._drain_frames()
-        value = self._scheduler.value_at(seconds)
-        usable = (value is not None and self._scoped
-                  and now - self._frame_seen <= MAX_CLOCK_GAP
-                  and now >= self._accept_after)
-        self._output(value if usable else self._live_value(now), usable, now)
+        self._render_pulse(now)
         if now - self._last_save >= _CHECKPOINT_SECONDS:
             self._checkpoint()
+
+    @Slot()
+    def _on_render_tick(self) -> None:
+        if self._holding and self._wants_pulse() and self._is_playing():
+            self._render_pulse(time.monotonic())
+
+    def _render_pulse(self, now: float) -> None:
+        value = None
+        if (len(self._anchors) >= 2 and self._scoped
+                and now - self._frame_seen <= MAX_CLOCK_GAP
+                and now >= self._accept_after):
+            wall, position = self._anchors[-1]
+            elapsed = now - wall
+            if 0 <= elapsed <= MAX_CLOCK_GAP:
+                # spotify reports every 250 ms. sample between reports, always
+                # from their latest anchor; recording keeps exact brackets.
+                speed = self._speed()
+                value = self._scheduler.value_at(position + elapsed * speed, speed)
+        self._output(value if value is not None else self._live_value(now),
+                     value is not None, now)
 
     @Slot(float)
     def _on_pulse(self, level: float) -> None:
@@ -283,7 +306,7 @@ class AmbientController(QObject):
             right_wall, right_pos = self._anchors[index + 1]
             rate = (right_pos - left_pos) / (right_wall - left_wall)
             # the frame carries its emission timestamp, so GUI delivery delay
-            # is removed without guessing. The capture correction is in wall
+            # is removed without guessing. the capture correction is in wall
             # seconds; normalize it at the rate used for this listen.
             position = (left_pos + (frame.captured_at - left_wall) * rate
                         - frame.latency * self._speed())
@@ -293,6 +316,9 @@ class AmbientController(QObject):
                 self._scheduler.gap()
             self._last_recorded_at = frame.captured_at
             if self._key is not None:
-                self._recorder.record(position, frame.level, frame.kind)
+                self._recorder.record(position, frame.level, frame.kind,
+                                      onset=frame.onset, energy=frame.energy,
+                                      speed=self._speed())
                 self._dirty = True
-            self._scheduler.observe(position, frame.level, self._speed())
+            self._scheduler.observe(position, frame.level, self._speed(),
+                                    onset=frame.onset)
