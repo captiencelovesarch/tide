@@ -558,7 +558,7 @@ def run(argv: list[str] | None = None) -> int:
     # Ambient bass-pulse — drives the central gradient's swell from the audio
     # monitor while playing. App-wide, gated by the adaptive_pulse setting.
     from .ui.ambient import AmbientController
-    ambient = AmbientController(player, window.central_bg)
+    ambient = AmbientController(player, window.central_bg, track_provider=lambda: window._current)
     ambient.set_pulse_enabled(
         user_settings.adaptive_pulse and user_settings.adaptive_background
     )
