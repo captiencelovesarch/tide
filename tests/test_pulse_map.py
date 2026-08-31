@@ -31,7 +31,7 @@ def _map(rows, coverage=None):
 
 def _payload(rows, coverage):
     raw = json.dumps(rows).encode()
-    return {"version": 1, "coverage": coverage,
+    return {"version": 2, "coverage": coverage,
             "trace": base64.b64encode(zlib.compress(raw)).decode("ascii")}
 
 
@@ -175,7 +175,7 @@ class PulsePayloadTest(unittest.TestCase):
 
     def test_corrupt_or_unknown_payload_is_a_cache_miss(self):
         valid = _map([(0.0, 0.0), (1.0, 1.0)]).payload()
-        payloads = [None, [], {}, {**valid, "version": 2},
+        payloads = [None, [], {}, {**valid, "version": 99},
                     {**valid, "trace": "not-base64"},
                     {**valid, "trace": base64.b64encode(b"not-zlib").decode()},
                     {**valid, "coverage": [[0.0, math.inf]]},
