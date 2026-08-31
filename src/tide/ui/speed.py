@@ -303,6 +303,10 @@ class SpringSpeedPopover(QFrame):
         super().__init__(parent)
         self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
         self.setObjectName("SpeedPopover")
+        # Rounded corners on a top-level popup need this, or the pixels
+        # outside the radius are unpainted window buffer (same pattern as
+        # the mini player's frameless card).
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._apply_theme(theming.manager().current())
         theming.manager().theme_changed.connect(self._apply_theme)
 
@@ -406,8 +410,14 @@ class SpringSpeedPopover(QFrame):
         self.speed_changed.emit(self._current + SPEED_STEP)
 
     def _apply_theme(self, theme) -> None:
+        # Not the bracket popover's frame: this face follows the modern
+        # personality, so the border is the quiet border_col (not fg) and
+        # the corners take the active radius. Translucency in __init__
+        # keeps the rounded corners from leaving unpainted window pixels.
         bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
-        fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        border = theme.token("border_col", "#2a2a2a") if theme else "#2a2a2a"
+        radius = theme.token("radius", "0px") if theme else "0px"
         self.setStyleSheet(
-            f"QFrame#SpeedPopover {{ background: {bg}; border: 1px solid {fg}; }}"
+            f"QFrame#SpeedPopover {{ background: {bg}; "
+            f"border: 1px solid {border}; border-radius: {radius}; }}"
         )

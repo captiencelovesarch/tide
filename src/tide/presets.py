@@ -130,6 +130,29 @@ STASH_FIELDS: tuple[str, ...] = (
 )
 
 
+# What a FIRST answer to "choose your tide" leaves alone — everything
+# else in STASH_FIELDS resets to the chosen personality's builtin. See
+# claim_builtin() for why a first answer resets anything at all.
+#
+# The split is "the look you brought" vs "the feel you just picked". A
+# 1.x upgrader arrives with a theme, a layout, their slot variants and
+# their typography/glyph tweaks; all of that is compatible with either
+# personality, they chose it on purpose, and wiping it would be exactly
+# the unexplained change the migration invariant forbids. Motion,
+# corners, backdrops, nav icons and the rest are what the PANE promised
+# — the whole point of the side that reads "nothing moves. ever." is
+# that clicking it stops the motion.
+FIRST_ANSWER_KEEPS: tuple[str, ...] = (
+    "theme",
+    "layout",
+    "layout_overrides",
+    "text_case_override",
+    "font_family_override",
+    "font_size_override_pt",
+    "glyph_overrides",
+)
+
+
 def builtin(preset_id: str) -> PresetDef:
     """The builtin definition for ``preset_id``. KeyError on unknown ids."""
     return BUILTINS[preset_id]
@@ -157,6 +180,38 @@ def _fresh_value(preset_id: str, name: str):
     if d is not None and hasattr(d, name):
         return getattr(d, name)
     return _settings_default(name)
+
+
+def claim_builtin(settings: Settings, preset_id: str) -> None:
+    """Make an ALREADY-ACTIVE personality actually wear its builtin — the
+    first answer to "choose your tide", when the answer is the side the
+    silent migration already filed the user under.
+
+    ``adopt_current`` runs long before the chooser opens, so by the time
+    the panes are on screen ``settings.preset`` is one of them. Without
+    this, that pane is a dead button: ``apply_preset``'s same-id path
+    only refreshes the stash, so a 1.5 user on a mono theme with
+    ``motion=full`` and rounded corners could click the side that
+    advertises "monospace type, hard edges" and "nothing moves. ever."
+    and keep every bounce and every rounded corner — the zero-animation
+    product contract quietly unmet. The OTHER pane meanwhile delivered
+    its builtin in full (first visit → restore), so which pane changed
+    anything depended on a theme-aesthetic guess the user never saw.
+
+    Only the archetype's own fields move; ``FIRST_ANSWER_KEEPS`` stays.
+    A pick made after the question has been answered is a RE-PICK, not a
+    first answer, and must never reset the user's tweaks — which is why
+    the caller (app.commit_personality_choice) gates this on
+    ``preset_chosen`` rather than on the id.
+
+    KeyError on an unknown preset id, like :func:`builtin`.
+    """
+    if preset_id not in BUILTINS:
+        raise KeyError(preset_id)
+    for name in STASH_FIELDS:
+        if name in FIRST_ANSWER_KEEPS:
+            continue
+        setattr(settings, name, copy.deepcopy(_fresh_value(preset_id, name)))
 
 
 def stash(settings: Settings) -> None:

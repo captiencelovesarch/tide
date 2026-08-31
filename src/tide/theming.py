@@ -106,6 +106,12 @@ class Theme:
     # "brutalist" or "modern" — drives the rule above plus a couple of
     # widget choices (BracketButton's bracket-vs-icon render, etc).
     aesthetic: str = "modern"
+    # Did [meta] aesthetic actually SAY that, or did _read_theme guess it
+    # from typography.mono? Rendering only ever needs the resolved value,
+    # but the v2.0 personality-aware theme picker needs the difference:
+    # a guess is not grounds for hiding somebody's hand-installed theme
+    # from half the app (see settings_schema.theme_choices_for).
+    aesthetic_declared: bool = False
     qss: str = ""
     dark: bool = True
 
@@ -137,9 +143,12 @@ def _read_theme(path: Path) -> Theme | None:
     qss_text = qss_path.read_text(encoding="utf-8") if qss_path.is_file() else ""
     # Auto-classify aesthetic when [meta] aesthetic is absent: mono font →
     # brutalist, anything else → modern. Keeps backwards compatibility with
-    # third-party themes that pre-date this field.
+    # third-party themes that pre-date this field. The GUESS is recorded as
+    # a guess (aesthetic_declared) so surfaces that would act against the
+    # user on it — the personality-aware theme picker — can decline to.
     aesthetic = str(meta.get("aesthetic", "")).strip().lower()
-    if aesthetic not in ("brutalist", "modern"):
+    declared = aesthetic in ("brutalist", "modern")
+    if not declared:
         typography = data.get("typography", {}) or {}
         aesthetic = "brutalist" if bool(typography.get("mono", False)) else "modern"
     if bool(meta.get("uses_base", False)):
@@ -153,6 +162,7 @@ def _read_theme(path: Path) -> Theme | None:
         layout=dict(data.get("layout", {})),
         slots=dict(data.get("slots", {})),
         aesthetic=aesthetic,
+        aesthetic_declared=declared,
         qss=qss_text,
         dark=bool(meta.get("dark", True)),
     )
@@ -561,6 +571,7 @@ class ThemeManager(QObject):
             slug=theme.slug, name=theme.name, path=theme.path,
             tokens=merged, typography=theme.typography, layout=theme.layout,
             slots=theme.slots, aesthetic=theme.aesthetic,
+            aesthetic_declared=theme.aesthetic_declared,
             qss=theme.qss, dark=theme.dark,
         )
 
@@ -751,7 +762,8 @@ def _to_zalgo(s: str, intensity: int = 2) -> str:
     return "".join(out)
 
 
-def styled_case(text: str, theme: "Theme | None" = None) -> str:
+def styled_case(text: str, theme: "Theme | None" = None, *,
+                allow_override: bool = True) -> str:
     """Apply the active theme's typography.case to ``text``. A user
     override set via :func:`set_case_override` beats the theme.
 
@@ -761,10 +773,17 @@ def styled_case(text: str, theme: "Theme | None" = None) -> str:
       - "normal" → keep input casing
       - "leet"   → L1K3 TH1Z!1
       - "zalgo"  → text with combining diacritics
+
+    ``allow_override=False`` ignores the sticky user override and takes
+    the case from ``theme`` alone — what a PREVIEW of some other theme
+    needs. The chooser's panes each render a personality as it SHIPS, so
+    the live user's casing there would be a lie about the product being
+    previewed (a 1.x upgrader with "upper" on would meet a brutalist
+    pane shouting NOW PLAYING over a bullet promising lowercase mono).
     """
     if not text:
         return text
-    case = _CASE_OVERRIDE
+    case = _CASE_OVERRIDE if allow_override else ""
     if not case:
         t = theme if theme is not None else manager().current()
         case = "lower"

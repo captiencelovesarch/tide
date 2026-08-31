@@ -3653,6 +3653,31 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def rebase_settings_snapshot(self, settings) -> None:
+        """The open settings dialog just COMMITTED a personality flip
+        (v2.0 route b3: the appearance tab's picker, or its [choose your
+        tide] button). Re-base the pre-dialog snapshot _do_open_settings
+        is holding for the accept-time reconcile.
+
+        The dialog re-bases every snapshot IT holds for the same reason
+        (SettingsDialog._rebase_after_personality_flip); this is the
+        window's half, and without it the two disagree. The reconcile's
+        cross-personality branch hands ``before.theme`` back to the
+        outgoing personality — and before phase 4 the personality could
+        not move while the dialog was up, so "the personality the dialog
+        opened on" and "the outgoing personality" were the same thing.
+        They aren't any more: flip brutalist→modern in the dialog, tick
+        "show all themes", pick a brutalist theme, accept, and the stale
+        snapshot files the BRUTALIST slug as modern's remembered theme.
+
+        A flip is a commit, so the post-flip values are the new baseline.
+        No-op when no dialog is open (nothing to re-base).
+        """
+        if getattr(self, "_settings_before_dialog", None) is None:
+            return
+        import copy as _copy
+        self._settings_before_dialog = _copy.copy(settings)
+
     def _reconcile_preset_after_dialog(self, before, new) -> None:
         """Preset bookkeeping for an ACCEPTED settings dialog. Cross-
         personality previews are suppressed while the dialog is open
@@ -3673,6 +3698,9 @@ class MainWindow(QMainWindow):
           bundle as the target's state wholesale — that persists a
           preset wearing the other personality's look and clobbers the
           target's remembered tweaks.
+
+        ``before`` must describe the personality the dialog CLOSED on,
+        not merely the one it opened on — see rebase_settings_snapshot.
         """
         from .. import presets
         if new is None or not getattr(new, "preset", ""):
@@ -4934,8 +4962,14 @@ class MainWindow(QMainWindow):
             from .. import settings as settings_module
             current = settings_module.load()
         # Pre-dialog values for the preset reconcile (shallow copy: it
-        # only reads scalar fields like .theme).
+        # only reads scalar fields like .theme). Parked on the window,
+        # not just in this frame: route (b3) lets the user flip the
+        # personality from INSIDE the dialog, and the dialog re-bases
+        # this snapshot when that happens (rebase_settings_snapshot) so
+        # the reconcile below describes the personality the dialog
+        # closed on rather than the one it opened on.
         before = _copy.copy(current)
+        self._settings_before_dialog = before
         dlg = SettingsDialog(current, parent=self)
         self._ui_sound("modal_open")
         # While the dialog is up, its pickers preview through the live
@@ -4948,6 +4982,10 @@ class MainWindow(QMainWindow):
         finally:
             self._settings_dialog_open = False
             self._ui_sound("modal_close")
+            rebased = getattr(self, "_settings_before_dialog", None)
+            if rebased is not None:
+                before = rebased
+            self._settings_before_dialog = None
         if result != dlg.DialogCode.Accepted:
             dlg.deleteLater()
             return

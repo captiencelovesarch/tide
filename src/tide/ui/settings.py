@@ -54,6 +54,7 @@ DISCORD_HELP_URL = "https://discord.com/developers/applications"
 # engine tests) so a new descriptor can't ship an anonymous widget.
 _WIDGET_ATTRS: dict[str, str] = {
     "theme": "theme_picker",
+    "theme_picker_show_all": "theme_show_all_toggle",
     "font_family_override": "font_picker",
     "font_size_override_pt": "font_size_spin",
     "text_case_override": "case_picker",
@@ -135,6 +136,15 @@ _ENABLE_RULES: dict[str, tuple[str, ...]] = {
         "discord_state_template",
     ),
     "listenbrainz_enabled": ("listenbrainz_token",),
+}
+
+# Descriptor keys whose change reshapes the DIALOG rather than the app:
+# key → a niladic method run right after the pending diff is recorded.
+# (App-side effects are `live` appliers and `preview` flags; these are
+# neither — the show-all tick only decides which rows the theme combo
+# holds.) Kept as data so the change handler stays generic.
+_CHANGE_HOOKS: dict[str, str] = {
+    "theme_picker_show_all": "refresh_theme_choices",
 }
 
 # kind == "custom" descriptors resolve their widget builder here:
@@ -262,6 +272,9 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
+        # documentMode's tab-bar base line is drawn by Fusion from the
+        # unthemed palette — a pure-white hairline on dark themes.
+        tabs.tabBar().setDrawBase(False)
         for tab in settings_schema.TABS:
             items: list = list(self._tab_prelude(tab))
             for section in section_order[tab]:
@@ -299,7 +312,7 @@ class SettingsDialog(QDialog):
                 lambda _on=False, k=desc.key: self._on_option_changed(k))
         elif kind == "choice":
             w = QComboBox()
-            for value, label in settings_schema.resolve_choices(desc):
+            for value, label in self._choice_rows(desc):
                 w.addItem(label, value)
             w.currentIndexChanged.connect(
                 lambda _i=0, k=desc.key: self._on_option_changed(k))
@@ -335,6 +348,83 @@ class SettingsDialog(QDialog):
         if desc.tooltip:
             w.setToolTip(desc.tooltip)
         return w
+
+    # ---------- personality-aware theme picking ----------
+
+    def _choice_rows(self, desc: settings_schema.OptionDesc):
+        """The rows one choice descriptor renders with.
+
+        Identical to ``settings_schema.resolve_choices`` for every
+        descriptor but ``theme``, which is narrowed to the active
+        personality's aesthetic (the schema keeps the whole catalog —
+        it's the layer the coverage/pickable meta-tests read, and the
+        narrowing needs a Settings object the schema doesn't have)."""
+        if desc.key == "theme":
+            return self._theme_rows()
+        return settings_schema.resolve_choices(desc)
+
+    def _show_all_themes(self) -> bool:
+        """The escape hatch's live state — the checkbox once it exists,
+        the stored preference while the theme combo is being built (the
+        descriptors build in registry order, and theme comes first)."""
+        w = self._widgets.get("theme_picker_show_all")
+        if w is not None:
+            return bool(w.isChecked())
+        return bool(getattr(self._settings, "theme_picker_show_all", False))
+
+    def _theme_rows(self, selected: str = ""):
+        """The theme combo's rows for the current personality + show-all
+        state.
+
+        Two slugs are listed whatever their aesthetic: the theme this
+        dialog opened on, and an unaccepted pick in flight
+        (``_pending``). A picker that can't display the value it holds
+        would re-write the setting to another theme on the next accept.
+        The pick in flight is read from the pending diff rather than
+        from the combo itself, so a personality flip mid-dialog — which
+        clears the diff and re-bases the snapshot before rebuilding
+        (_rebase_after_personality_flip) — doesn't drag the outgoing
+        personality's theme into the incoming one's list.
+        """
+        return settings_schema.theme_choices_for(
+            str(getattr(self._settings, "preset", "") or ""),
+            show_all=self._show_all_themes(),
+            keep=(self._initial_theme,
+                  str(self._pending.get("theme") or ""),
+                  selected),
+        )
+
+    def refresh_theme_choices(self, select: str = "") -> None:
+        """Rebuild the theme combo's rows in place — the show-all tick's
+        hook, and the way a freshly saved theme joins the list.
+
+        ``select`` names a slug to end up on (a theme the editor just
+        wrote); otherwise the current pick is kept. Repopulation runs
+        under the populate guard so re-adding rows can never fire a
+        theme preview — previews are user picks, not bookkeeping."""
+        combo = self._widgets.get("theme")
+        if combo is None:
+            return
+        pending = str(self._pending.get("theme") or "")
+        rows = self._theme_rows(selected=select)
+        self._populating = True
+        try:
+            combo.clear()
+            for value, label in rows:
+                combo.addItem(label, value)
+            # Land on the requested slug, else back on the pick in
+            # flight, else the theme the dialog opened with. Silently
+            # ending up on some other row would turn a list rebuild into
+            # a theme change nobody asked for.
+            idx = -1
+            for candidate in (select, pending, self._initial_theme):
+                idx = combo.findData(candidate) if candidate else -1
+                if idx >= 0:
+                    break
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        finally:
+            self._populating = False
 
     def _compose_row(self, desc: settings_schema.OptionDesc,
                      widget: QWidget) -> QWidget:
@@ -433,7 +523,12 @@ class SettingsDialog(QDialog):
 
     # ---------- dialog chrome (hand-built, non-descriptor surfaces) ----------
 
-    def _tab_prelude(self, tab: str) -> list[QWidget]:
+    def _tab_prelude(self, tab: str) -> list:
+        if tab == "appearance":
+            # The personality section leads the appearance tab: everything
+            # below it (theme, layout, chrome, backdrop, motion) is a
+            # detail OF the personality that owns it.
+            return self._personality_chrome()
         if tab == "sources":
             return [_dim(QLabel(
                 "credentials, folders and per-source on/off switches live "
@@ -583,6 +678,211 @@ class SettingsDialog(QDialog):
         sc_col.addWidget(self.keymap_btn, alignment=Qt.AlignLeft)
         return [tools_heading, tools_col, shortcuts_heading, sc_col]
 
+    # ---------- personality (v2.0 phase 4 — the settings re-pick route) ----
+
+    def _personality_chrome(self) -> list:
+        """The appearance tab's "personality" section: a quick flip and
+        the front door back to the chooser.
+
+        Deliberately NOT a descriptor. Every OptionDesc names a Settings
+        field that the accept-time diff writes with a plain setattr +
+        save_fields; ``preset`` is in INTERNAL_FIELDS on purpose
+        ("chooser/switcher owns it") because it can only move through
+        presets.apply_preset — which stashes the outgoing personality,
+        restores the incoming one and pushes four managers in contract
+        order. A generic setattr would leave ``settings.preset`` naming a
+        personality nothing ever applied, holding the other one's stash.
+        So this is dialog chrome, like power tools and shortcuts (its
+        neighbours on this tab), and it commits through the very same
+        app.commit_personality_choice as the wizard and the chooser.
+        """
+        heading = _dim(QLabel(line_heading("personality", 34)))
+        blurb = _dim(QLabel(
+            "tide is two players sharing one library. each side remembers "
+            "its own theme, layout, glyphs and tweaks — flipping back "
+            "brings yours back exactly as you left them."
+        ))
+        self.personality_picker = QComboBox()
+        self.personality_picker.setToolTip(
+            "flips the whole look at once: theme, layout, motion, corners, "
+            "nav icons, backdrops, sounds and glyphs.")
+        self.personality_picker.activated.connect(self._on_personality_picked)
+        self._sync_personality_picker()
+        self.chooser_btn = QPushButton("choose your tide  →")
+        self.chooser_btn.setToolTip(
+            "reopen the full-screen chooser — a live preview of both, "
+            "side by side.")
+        self.chooser_btn.clicked.connect(self._on_open_chooser)
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(self.personality_picker)
+        row.addWidget(self.chooser_btn)
+        row.addStretch(1)
+        col = QVBoxLayout()
+        col.setSpacing(6)
+        col.addWidget(blurb)
+        col.addLayout(row)
+        return [heading, col]
+
+    def _sync_personality_picker(self) -> None:
+        """(Re)build the flip picker's rows and point it at the active
+        personality. Signals stay blocked: this is bookkeeping, and only
+        a user activation may start a flip."""
+        from .. import presets
+        from .chooser import PANE_ORDER
+        picker = self.personality_picker
+        blocked = picker.blockSignals(True)
+        try:
+            picker.clear()
+            for preset_id in PANE_ORDER:
+                definition = presets.BUILTINS[preset_id]
+                picker.addItem(f"{definition.label} · {definition.blurb}",
+                               preset_id)
+            active = str(getattr(self._settings, "preset", "") or "")
+            idx = picker.findData(active)
+            if idx < 0:
+                # Pre-adoption / hand-edited config: don't claim a
+                # personality the app never applied. The row disappears
+                # on the first real pick (this runs again after a flip).
+                picker.insertItem(0, "— not picked yet —", "")
+                idx = 0
+            picker.setCurrentIndex(idx)
+        finally:
+            picker.blockSignals(blocked)
+
+    def _on_personality_picked(self, index: int) -> None:
+        preset_id = str(self.personality_picker.itemData(index) or "")
+        if not preset_id or preset_id == str(
+                getattr(self._settings, "preset", "") or ""):
+            return      # re-picking what's already on is not a flip
+        # A flip re-applies the theme bundle and rebuilds the window's
+        # slots. Get off the combo's activated emission first — the same
+        # deferral every restyle/modal path in this dialog takes.
+        QTimer.singleShot(0, lambda: self._flip_personality(preset_id))
+
+    def _flip_personality(self, preset_id: str) -> None:
+        """Commit a personality flip from inside the open dialog.
+
+        Routed through app.commit_personality_choice — the ONE commit
+        path the wizard and the chooser take too — so the stamp, the
+        first-visit slot seeding, the manager ordering and the
+        field-scoped save are identical whichever door the user came
+        through. With the MainWindow in reach it lands live via
+        switch_preset (one queued restyle, one slot rebuild).
+        """
+        from .. import app as app_module
+        win = self._find_main_window()
+        if not app_module.commit_personality_choice(
+                self._settings, preset_id, window=win):
+            self._sync_personality_picker()     # unknown id: put it back
+            return
+        self._tool_sound("toggle_on")
+        self._rebase_after_personality_flip()
+
+    def _on_open_chooser(self) -> None:
+        # Deferred out of the click emission — opening a modal
+        # synchronously from a click inside an already-modal dialog is
+        # the PySide6 + py3.14 segfault pattern ([[feedback-pyside-modal]]).
+        self._tool_sound("modal_open")
+        QTimer.singleShot(0, self._do_open_chooser)
+
+    def _do_open_chooser(self) -> None:
+        """Reopen "choose your tide" over the settings dialog.
+        app.run_chooser owns the modal and the commit; a dismissal
+        resolves to nothing and leaves the personality untouched."""
+        from .. import app as app_module
+        win = self._find_main_window()
+        choice = app_module.run_chooser(self._settings, parent=self,
+                                        window=win)
+        self._tool_sound("modal_close")
+        if choice:
+            # Even a re-pick of the personality already on re-applies the
+            # preset (and so drops any open theme preview) — re-base so
+            # the dialog and the app agree about what's on screen.
+            self._rebase_after_personality_flip()
+
+    def _rebase_after_personality_flip(self) -> None:
+        """Re-open this dialog onto the personality that just landed.
+
+        A flip is a COMMIT, not a preview: apply_preset already pushed
+        the managers and persisted the fields. Every snapshot this dialog
+        holds was taken against the OUTGOING personality, so without a
+        re-base (a) accept would diff the new values against the old ones
+        and write the outgoing look straight back over the flip, and (b)
+        cancel would "revert" to the pre-flip theme and layout — undoing
+        a commit, which is rule 8 in the mirror.
+
+        Unsaved edits survive where they can: per-personality fields are
+        by definition replaced by the flip, but everything shared
+        (integrations, playback, sources …) is re-staged afterwards, so
+        a half-typed token isn't lost to a look change.
+
+        The WINDOW holds a snapshot too (MainWindow._do_open_settings
+        takes one for its accept-time preset reconcile), so it gets the
+        same re-base. Skipping it left the reconcile handing the theme
+        of a personality the user had already flipped away from to the
+        one they flipped TO — modern remembering a brutalist slug.
+        """
+        keep = {
+            key: value for key, value in self._pending.items()
+            if key in self._by_key and not self._by_key[key].per_preset
+        }
+        self._pending.clear()
+        # A parked strip pick describes the OUTGOING personality's layout.
+        self._pending_strip_overrides = None
+        self._pending_strip_base = ""
+        s = self._settings
+        self._initial_theme = s.theme
+        self._initial_thumbnails = s.show_thumbnails or "theme"
+        self._initial_font = s.font_family_override or ""
+        self._initial_font_size = int(s.font_size_override_pt or 0)
+        self._initial_case = s.text_case_override or ""
+        self._initial_layout = s.layout or "classic"
+        self._initial_overrides = dict(s.layout_overrides or {})
+        win = self._find_main_window()
+        if win is not None and hasattr(win, "rebase_settings_snapshot"):
+            win.rebase_settings_snapshot(s)
+        # Rebuild the theme rows BEFORE _populate re-selects: they are
+        # personality-aware, so the combo would otherwise still hold the
+        # outgoing personality's catalog and _populate would fall back to
+        # a theme the user never picked. refresh_theme_choices' one
+        # precondition — cleared _pending, re-based _initial_theme — is
+        # met by the block above, so the outgoing theme can't ride along
+        # as a keeper row.
+        self.refresh_theme_choices()
+        self._populate()
+        self._sync_personality_picker()
+        for key, value in keep.items():
+            # Re-staging goes through the widgets, so the pending diff is
+            # rebuilt by the normal change handler (nothing here previews:
+            # every preview descriptor is per-personality and was dropped).
+            self._set_widget_value(self._by_key[key], value)
+
+    def _set_widget_value(self, desc: settings_schema.OptionDesc,
+                          value) -> None:
+        """Push one explicit value into its widget (the re-stage half of
+        a personality re-base). _populate_widget's twin — that one reads
+        the settings object, this one takes what it's given."""
+        w = self._widgets.get(desc.key)
+        if w is None:
+            return
+        if desc.kind == "bool":
+            w.setChecked(bool(value))
+        elif desc.kind == "choice":
+            idx = w.findData(value)
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+        elif desc.kind == "int":
+            w.setValue(int(value or 0))
+        elif desc.kind == "str":
+            w.setText(str(value or ""))
+        elif desc.kind == "font":
+            idx = w.findData(str(value or ""))
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+            else:
+                w.setCurrentText(str(value or ""))
+
     def _about_items(self) -> list:
         from .. import __version__
         title = QLabel(f"tide  v{__version__}")
@@ -716,6 +1016,9 @@ class SettingsDialog(QDialog):
         self._pending[key] = value
         if key in _ENABLE_RULES:
             self._apply_enable_rule(key)
+        hook = _CHANGE_HOOKS.get(key)
+        if hook is not None:
+            getattr(self, hook)()
         if desc.preview:
             self._apply_preview(key, value)
 
@@ -1008,27 +1311,21 @@ class SettingsDialog(QDialog):
         pending-diff + accept path (save_fields, live-apply chain,
         _reconcile_preset_after_dialog). Cancel still reverts the applied
         theme — previews never commit; the saved theme dir simply stays
-        available in every picker."""
-        desc = self._by_key.get("theme")
+        available in every picker.
+
+        The rebuild routes through refresh_theme_choices, so the saved
+        slug is listed and selected even when it landed on the other
+        personality's side of the aesthetic filter.
+        """
         combo = self._widgets.get("theme")
-        if desc is None or combo is None:
+        if combo is None:
             return
-        self._populating = True
-        try:
-            combo.clear()
-            for value, label in settings_schema.resolve_choices(desc):
-                combo.addItem(label, value)
-        finally:
-            self._populating = False
-        idx = combo.findData(slug)
-        if idx < 0:
-            return
-        if combo.currentIndex() == idx:
-            # Repopulate already left the combo on this row — the signal
-            # won't fire, so file the pending change by hand.
-            self._on_option_changed("theme")
-        else:
-            combo.setCurrentIndex(idx)
+        self.refresh_theme_choices(select=slug)
+        if combo.currentData() != slug:
+            return      # not in the registry after all — nothing staged
+        # The rebuild runs under the populate guard, so no signal fired:
+        # file the pending change (and its preview) by hand.
+        self._on_option_changed("theme")
 
     def _on_open_strip_builder(self) -> None:
         """open_strip_builder defers construction internally — wiring it

@@ -84,14 +84,77 @@ class OptionDesc:
 # choice providers — the live registries, resolved at call time
 # ---------------------------------------------------------------------------
 
-def theme_choices() -> tuple[tuple[str, str], ...]:
-    """Every discovered theme (bundled + system + user), sorted by
-    display name — the same order the v1 picker shipped."""
+def _theme_rows() -> tuple[tuple[str, str, str], ...]:
+    """(slug, display name, aesthetic) for every discovered theme
+    (bundled + system + user), sorted by display name — the one disk
+    read both theme providers below are built from.
+
+    The aesthetic is blank for a theme that never DECLARED one: tide
+    guesses a value from typography.mono so the QSS dialect and the
+    widget shapes have something to go on, but a guess is not a claim,
+    and the picker below must not hide someone's theme on the strength
+    of one (see :func:`theme_choices_for`).
+    """
     from .. import theming
     themes = theming.discover_themes()
+    rows: list[tuple[str, str, str]] = []
+    for slug, theme in sorted(themes.items(), key=lambda kv: kv[1].name):
+        declared = bool(getattr(theme, "aesthetic_declared", True))
+        aesthetic = str(getattr(theme, "aesthetic", "") or "")
+        rows.append((slug, theme.name, aesthetic if declared else ""))
+    return tuple(rows)
+
+
+def theme_choices() -> tuple[tuple[str, str], ...]:
+    """Every discovered theme (bundled + system + user), sorted by
+    display name — the same order the v1 picker shipped.
+
+    This is the CATALOG, deliberately unfiltered: resolve_choices() is
+    what the schema meta-tests read (every Settings default must be a
+    pickable row), and the whole catalog is what the theme editor and
+    any non-personality surface want. The appearance tab narrows it to
+    the active personality through :func:`theme_choices_for` — a
+    provider can't do the narrowing itself because it takes no
+    arguments and the schema layer holds no Settings object.
+    """
+    return tuple((slug, name) for slug, name, _aesthetic in _theme_rows())
+
+
+def theme_choices_for(preset_id: str, show_all: bool = False,
+                      keep: tuple[str, ...] | list[str] | set[str] = (),
+                      ) -> tuple[tuple[str, str], ...]:
+    """The catalog narrowed to one personality's [meta] aesthetic.
+
+    ``show_all`` (the appearance tab's "show all themes" escape, stored
+    as ``Settings.theme_picker_show_all``) returns the catalog verbatim,
+    and so does an unknown/absent ``preset_id`` — a config that was
+    never adopted into a personality has nothing to filter by, so it
+    sees everything rather than an arbitrary half.
+
+    ``keep`` names slugs that stay listed whatever their aesthetic. The
+    picker always passes the theme it opened on and the theme it is
+    currently showing: a picker that can't display the value it holds
+    would silently re-write it to some other theme on the next accept.
+    Rows keep the catalog's order either way.
+
+    A theme that declares no ``[meta] aesthetic`` belongs to BOTH sides.
+    Every bundled theme declares one, but ``[meta] aesthetic`` is new in
+    2.0 and hand-installed themes long predate it — classifying those by
+    tide's mono guess would make a brutalist user's own themes look
+    deleted, which is a v1.x regression aimed squarely at the audience
+    brutalist exists for. Undeclared means unclaimed, not modern.
+    """
+    # Personality ids and theme aesthetics share one vocabulary by
+    # design ("brutalist" / "modern"), which is what lets adopt_current
+    # file a 1.x user by their theme — so the match below is ==, not a
+    # translation table.
+    rows = _theme_rows()
+    if show_all or preset_id not in presets.BUILTINS:
+        return tuple((slug, name) for slug, name, _a in rows)
+    keep_set = {str(slug) for slug in keep if slug}
     return tuple(
-        (slug, theme.name)
-        for slug, theme in sorted(themes.items(), key=lambda kv: kv[1].name)
+        (slug, name) for slug, name, aesthetic in rows
+        if not aesthetic or aesthetic == preset_id or slug in keep_set
     )
 
 
@@ -254,6 +317,19 @@ REGISTRY: tuple[OptionDesc, ...] = (
         live="apply_theme_bundle_setting", preview=True,
         tooltip="themes hot-swap while you browse. cancel puts the old "
                 "one back.",
+    ),
+    OptionDesc(
+        key="theme_picker_show_all",
+        label="show all themes · including the other personality's",
+        kind="bool", tab="appearance", section="theme",
+        # No live applier: this reshapes the PICKER above it, not the
+        # app. The dialog rebuilds the theme rows on the spot
+        # (SettingsDialog._CHANGE_HOOKS → refresh_theme_choices) and the
+        # accept path just persists the preference.
+        tooltip="the list above shows the themes built for the "
+                "personality you're wearing. tick this to see all of "
+                "them — picking one from the other side takes you to "
+                "that tide, with everything it remembers.",
     ),
     # ---- appearance · typography ----
     OptionDesc(

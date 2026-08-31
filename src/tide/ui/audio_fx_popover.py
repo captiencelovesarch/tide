@@ -445,6 +445,26 @@ class SpringAudioFxPopover(AudioFxPopover):
     settle itself is motion-gated by SpringSlider's construction
     (intensity OFF = synchronous snap)."""
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Rounded corners on a top-level popup need this, or the pixels
+        # outside the radius are unpainted window buffer. The base ctor
+        # already ran _apply_theme (virtual, lands here).
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+    def _apply_theme(self, theme) -> None:
+        # The modern face's frame: quiet border, active radius — the
+        # bracket base keeps its hard fg outline.
+        bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
+        border = theme.token("border_col", "#2a2a2a") if theme else "#2a2a2a"
+        radius = theme.token("radius", "0px") if theme else "0px"
+        dim = theme.token("dim", "#666666") if theme else "#666666"
+        self.setStyleSheet(
+            f"QFrame#AudioFxPopover {{ background: {bg}; "
+            f"border: 1px solid {border}; border-radius: {radius}; }}"
+        )
+        self._hint.setStyleSheet(f"color: {dim};")
+
     def _make_wet_row(self) -> QHBoxLayout:
         self._wet_slider = SpringSlider()
         self._wet_slider.set_range(0.0, 1.0, 1.0 / self.WET_SCALE)

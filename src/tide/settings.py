@@ -222,6 +222,15 @@ class Settings:
     # personalities round-trips through here so each side keeps its own
     # tweaks instead of resetting to the builtin defaults every time.
     preset_state: dict = field(default_factory=dict)
+    # v2.0 phase 4 — the theme picker's escape hatch. By default the
+    # appearance tab lists only themes whose [meta] aesthetic matches the
+    # active personality (5 brutalist / 11 modern today); ticking this
+    # shows the whole catalog. Picking across the line still means "take
+    # me to the other tide" — window._maybe_apply_theme_slot_prefs /
+    # _reconcile_preset_after_dialog own that flip, unchanged.
+    # Deliberately NOT a presets.STASH_FIELD: this is a preference about
+    # the PICKER, not part of either personality's look.
+    theme_picker_show_all: bool = False
     # Remembered main-window size per layout: layout slug -> [w, h].
     window_sizes: dict = field(default_factory=dict)
 

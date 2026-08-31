@@ -27,6 +27,7 @@ which gate ate (or invented) each hit.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
@@ -767,6 +768,7 @@ class AudioVisualizerFeed(QObject):
         # under the other.
         self._consumers: set[str] = set()
         self._preferred_source: str | None = None
+        self._atexit_registered = False
 
     @property
     def running(self) -> bool:
@@ -852,6 +854,16 @@ class AudioVisualizerFeed(QObject):
         self._thread = threading.Thread(target=self._process_loop, name="tide-fft", daemon=True)
         self._thread.start()
         self._running = True
+        # The worker emits Qt signals, so it must be joined before this
+        # QObject's C++ half can be deleted — otherwise a still-running loop
+        # raises "Signal source has been deleted" at interpreter teardown
+        # (seen when a test suite starts capture and never stops it). The
+        # bound method also pins this instance until exit, same retain-until-
+        # joined idea as qthreads.py; stop() is idempotent and runs on the
+        # main thread, where PySide teardown is safe.
+        if not self._atexit_registered:
+            atexit.register(self.stop)
+            self._atexit_registered = True
         return True
 
     def stop(self) -> None:
@@ -1003,6 +1015,11 @@ class AudioVisualizerFeed(QObject):
                         self._prev_bands = _compute_bands(samples, self._prev_bands)
                     except Exception:
                         continue
+                    # Re-check right before emitting: stop() may have been
+                    # called (possibly at teardown) since this chunk began,
+                    # and emitting from a deleted signal source raises.
+                    if self._stop.is_set():
+                        return
                     self.bands_updated.emit(self._prev_bands.copy())
                     self.waveform_updated.emit(samples.copy())
                     try:

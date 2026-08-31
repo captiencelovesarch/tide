@@ -8,7 +8,8 @@ the first frame already reflects the user's preferences.
 
 Steps:
   1. Welcome — logo + tagline + "get started"
-  2. Aesthetic — pick brutalist or modern (two big preview cards)
+  2. Aesthetic — "choose your tide": the two live chooser panes
+     (ui.chooser.PersonalityPane) in compact form
   3. Theme — grid of themes filtered to the chosen aesthetic
   4. Sources — toggle the 5 ready sources; YT cookie import + Local folder
      pick run inline as sub-flows
@@ -16,8 +17,11 @@ Steps:
   6. Integrations — discord rich presence + listenbrainz, both optional
   7. All set — summary + launch button
 
-The wizard is also reachable from Settings → "rerun onboarding" so the user
-can fly through it again at any time without nuking their config.
+The wizard itself only runs on a config-less first launch. Step 2 is the
+part worth revisiting, and as of v2.0 it has its own front door: Settings →
+appearance → "choose your tide" reopens ``ui.chooser.ChooserDialog``, which
+hosts these same panes and flips the personality without disturbing
+anything the user has set up since.
 """
 from __future__ import annotations
 
@@ -47,6 +51,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import theming
+from .chooser import PANE_ORDER, PersonalityPane
 from .widgets import BracketButton
 
 
@@ -156,12 +161,18 @@ class _ProgressDots(QWidget):
         p.end()
 
 
-# ---------- big card primitive used by aesthetic + theme steps ----------
+# ---------- big card primitive used by the theme step ----------
 
 
 class _PickCard(QFrame):
-    """Clickable card with title + subtitle + a small colored stripe. Used
-    for picking aesthetic + picking a theme. Single-select within a group."""
+    """Clickable card with title + subtitle + a small colored stripe.
+    Single-select within a group.
+
+    The theme grid's card. It used to double as the aesthetic step's
+    too, with hand-picked swatches standing in for each personality —
+    v2.0 replaced that with the real chooser panes
+    (``ui.chooser.PersonalityPane``), which preview live theme tokens
+    instead of guessing at them."""
 
     clicked_signal = Signal(str)
 
@@ -319,58 +330,78 @@ class _WelcomeStep(_Step):
 
 
 class _AestheticStep(_Step):
+    """"choose your tide", first-launch edition.
+
+    This step used to be two hand-painted cards with hardcoded swatches
+    that guessed at what the two personalities look like. It now hosts
+    the REAL chooser panes (``ui.chooser.PersonalityPane``) — the same
+    live previews the standalone ChooserDialog shows, built from each
+    personality's own theme tokens. One implementation of the pitch,
+    three hosts (wizard, update-into-2.0 dialog, settings re-pick); do
+    not fork the design.
+
+    ``compact=True`` because this canvas is fixed at 720×600 and the
+    roomy pane's minimum doesn't fit — same widget, same tokens, less
+    breathing room.
+
+    A click here SELECTS, it does not commit: the wizard's answer is
+    carried in ``OnboardingResult.aesthetic`` and only becomes a
+    personality once app.py's post-wizard handoff runs
+    (commit_personality_choice, route b1). The pane reports; the host
+    decides what a click means — which is why the pane's button is
+    relabelled here. In the dialog it says "choose" and closes the
+    dialog; here the wizard's own [next] is what advances, so a button
+    saying "choose" would look broken the moment it was pressed. It says
+    "this one", and flips to "picked" while the ring is on it.
+    """
+
+    CHOOSE_LABEL = "this one"
+    SELECTED_LABEL = "picked"
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._choice: str = "brutalist"
 
-        prompt = QLabel("pick a look.")
+        prompt = QLabel("choose your tide.")
         f = QFont(prompt.font())
         f.setBold(True)
-        f.setPointSize(f.pointSize() + 6)
+        f.setPointSize(f.pointSize() + 5)
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("you can change this anytime. each comes in several themes.")
+        sub = QLabel("same library, two completely different players. "
+                     "you'll fine-tune the theme next — all of it is "
+                     "changeable later in settings.")
         sub.setProperty("class", "dim")
+        sub.setWordWrap(True)
         sub.setAlignment(Qt.AlignCenter)
 
-        brutalist_card = _PickCard(
-            "brutalist",
-            "brutalist",
-            "sharp corners · monospace font · block characters · [bracket buttons] · inverted hover",
-            ["#0b0b0b", "#e6e6e6", "#d4b95e"],
-        )
-        modern_card = _PickCard(
-            "modern",
-            "modern",
-            "soft corners · sans font · smooth bars · glyph icons · airy padding · subtle hover",
-            ["#15151a", "#c79bff", "#f0eef0"],
-        )
-        self._cards = {"brutalist": brutalist_card, "modern": modern_card}
-        for c in self._cards.values():
-            c.clicked_signal.connect(self._on_picked)
+        self._panes: dict[str, PersonalityPane] = {}
+        panes_row = QHBoxLayout()
+        panes_row.setSpacing(14)
+        for preset_id in PANE_ORDER:
+            pane = PersonalityPane(preset_id, compact=True,
+                                   choose_label=self.CHOOSE_LABEL,
+                                   selected_label=self.SELECTED_LABEL)
+            pane.clicked.connect(self._on_picked)
+            self._panes[preset_id] = pane
+            panes_row.addWidget(pane, stretch=1)
 
-        # Default the brutalist card on entry.
-        brutalist_card.setSelected(True)
-
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(14)
-        cards_row.addWidget(brutalist_card, stretch=1)
-        cards_row.addWidget(modern_card, stretch=1)
+        # Default the brutalist pane on entry (matches the result's own
+        # default — a step the user walks straight past still answers).
+        self._panes[self._choice].set_selected(True)
 
         col = QVBoxLayout(self)
-        col.setSpacing(18)
-        col.addStretch(1)
+        col.setSpacing(10)
         col.addWidget(prompt)
         col.addWidget(sub)
-        col.addSpacing(8)
-        col.addLayout(cards_row)
-        col.addStretch(2)
+        col.addSpacing(4)
+        col.addLayout(panes_row, stretch=1)
 
     def _on_picked(self, key: str) -> None:
         self._choice = key
-        for k, card in self._cards.items():
-            card.setSelected(k == key)
+        for k, pane in self._panes.items():
+            pane.set_selected(k == key)
         self.state_changed.emit()
 
     def apply_to(self, result: OnboardingResult) -> None:
@@ -378,8 +409,8 @@ class _AestheticStep(_Step):
 
     def on_enter(self, result: OnboardingResult) -> None:
         self._choice = result.aesthetic
-        for k, card in self._cards.items():
-            card.setSelected(k == self._choice)
+        for k, pane in self._panes.items():
+            pane.set_selected(k == self._choice)
 
 
 class _ThemeStep(_Step):
