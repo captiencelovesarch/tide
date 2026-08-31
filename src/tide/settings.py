@@ -139,10 +139,10 @@ class Settings:
     local_music_dir: str = ""
     local_auto_index: bool = True
     # v1.2.1 — Spotify (Librespot backend)
-    # Empty client_id falls through to the tide-shipped default. Power users
-    # can paste their own dev-app client_id here (e.g. for higher rate
-    # limits or to avoid tide's shared app). PKCE means no secret needed.
-    spotify_client_id: str = ""
+    # (A spotify_client_id field lived here through v1.x but nothing ever
+    # read it — the sign-in dialog keeps its own field and auth_spotify
+    # resolves the effective id itself. Deleted in 2.0; load()'s
+    # unknown-key filter silently drops the stale key from old files.)
     # Audio quality: 96 / 160 / 320 kbps (320 requires Premium tier).
     spotify_bitrate: int = 320
     # Pulse/Pipe sink name passed to librespot. Empty = default sink.
@@ -198,6 +198,17 @@ class Settings:
     # Fullscreen backdrop swells with the bass envelope (shares the mini's
     # capture consumer; only runs while the window is up).
     fullscreen_pulse: bool = True
+    # v2.0 phase 2 — the keymap editor's bindings: action id -> key
+    # sequence string (e.g. "play_pause" -> "Space"). A missing action
+    # means "use the default binding". Global on purpose — muscle memory
+    # doesn't flip with the personality, so this is NOT a preset stash
+    # field.
+    keymap: dict = field(default_factory=dict)
+    # v2.0 phase 2 — the glyph editor's per-glyph overrides: glyph key
+    # (tide.glyphs.KEYS) -> replacement string (1-3 chars). Glyphs are
+    # chrome and chrome is personality, so this one IS in
+    # presets.STASH_FIELDS and round-trips on a flip.
+    glyph_overrides: dict = field(default_factory=dict)
     # v2.0 "two tides" — personality presets. ``preset`` is the active
     # personality id: "" (pre-2.0 config that was never adopted),
     # "brutalist", or "modern". ``preset_chosen`` flips True only on an

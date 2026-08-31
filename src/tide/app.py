@@ -203,6 +203,26 @@ def _bootstrap_preset(user_settings, cli_theme: str | None = None) -> None:
         theming.manager().apply(DEFAULT_THEME)
 
 
+def _boot_glyph_overrides(user_settings) -> None:
+    """Push the saved per-glyph overrides into the glyph registry BEFORE
+    the window is constructed — every transport label draws through
+    glyphs.glyph() at build time, so the first frame already wears them.
+    (Personality flips re-apply the incoming set via
+    window.apply_preset_visuals; this is the launch-time half.)"""
+    from . import glyphs
+    glyphs.set_overrides(dict(user_settings.glyph_overrides or {}))
+
+
+def _attach_settings(window, user_settings) -> None:
+    """Bind the live Settings object to the window and re-key the
+    shortcuts. _wire_shortcuts runs inside MainWindow's constructor —
+    before this attach — so a saved custom keymap only lands through
+    this rebind; without it, custom bindings would only apply after the
+    first keymap-editor accept."""
+    window._settings = user_settings
+    window.rebind_shortcuts()
+
+
 def _instance_message_handler(raise_target: list):
     """Command router for pokes from a second tide launch (instance.py).
 
@@ -432,6 +452,8 @@ def run(argv: list[str] | None = None) -> int:
         router.register(librespot)
     # v1.2.2+ will append MusicKitBackend here.
     player = router
+    # Saved glyph overrides go live before any transport label is built.
+    _boot_glyph_overrides(user_settings)
     window = MainWindow(api_obj, player)
     # Route second-launch "raise" pokes at the real window from here on,
     # and keep the instance guard alive (and findable) for the app's life.
@@ -452,9 +474,9 @@ def run(argv: list[str] | None = None) -> int:
     # Settings on the window before the first show: the translucency check
     # below reads corner_style from here, and WA_TranslucentBackground only
     # takes effect on map — deciding it now avoids a native-window rebuild
-    # (and its flicker) right after launch. Re-assigned further down with
+    # (and its flicker) right after launch. Re-attached further down with
     # the rest of the live-reconfigure refs; both point at the same object.
-    window._settings = user_settings
+    _attach_settings(window, user_settings)
     # CSD + rounded corners want an ARGB window so the corner arcs are
     # genuinely transparent instead of a dark bite of QSS bg.
     window._apply_window_translucency(theming.manager().current())
@@ -610,7 +632,7 @@ def run(argv: list[str] | None = None) -> int:
     # Expose so the (later) settings dialog can re-configure live.
     window._discord = discord
     window._lyric_tracker = lyric_tracker
-    window._settings = user_settings
+    _attach_settings(window, user_settings)
 
     # v1.5 play reporting, upgrader path: the choice lives in the wizard,
     # which existing users will never see again — so point at the setting

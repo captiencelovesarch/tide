@@ -121,6 +121,11 @@ STASH_FIELDS: tuple[str, ...] = (
     "fullscreen_pulse",
     "ui_sounds_enabled",
     "show_thumbnails",
+    # v2.0 phase 2 — the glyph editor's per-glyph overrides. Glyphs are
+    # chrome and chrome is personality: your brutalist ▶ swap shouldn't
+    # bleed into modern. (keymap is deliberately NOT here — key bindings
+    # are muscle memory, global across personalities.)
+    "glyph_overrides",
 )
 
 

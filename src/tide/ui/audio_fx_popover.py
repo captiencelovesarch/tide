@@ -13,7 +13,7 @@ placement, theme-aware repaint.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QKeySequence, QMouseEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -41,6 +41,21 @@ def _format_db(value: float) -> str:
         return "0"
     sign = "+" if value > 0 else "−"
     return f"{sign}{abs(value):.0f}"
+
+
+def _default_fx_panel_key() -> str:
+    """The shipped view_audio_fx binding, for popovers with no main
+    window to ask (tests / standalone). Imported lazily — window.py is
+    heavy and imports THIS module at runtime."""
+    try:
+        from .window import ACTIONS
+        for action in ACTIONS:
+            if action.id == "view_audio_fx":
+                seq = QKeySequence(action.default)
+                return seq.toString(QKeySequence.NativeText).lower()
+    except Exception:
+        pass
+    return "ctrl+8"
 
 
 class AudioFxButton(BracketButton):
@@ -177,10 +192,13 @@ class AudioFxPopover(QFrame):
         self._bass_slider.valueChanged.connect(self._on_bass)
         self._treble_slider.valueChanged.connect(self._on_treble)
 
-        # full-panel hint at bottom
-        self._hint = QLabel("ctrl+8 → full panel")
+        # full-panel hint at bottom — the key name derives from the live
+        # keymap (v2.0), not a hardcoded "ctrl+8"; refreshed on every
+        # sync() so a rebind shows up on the next open.
+        self._hint = QLabel()
         self._hint.setAlignment(Qt.AlignCenter)
         self._hint.setStyleSheet("color: palette(mid);")
+        self._refresh_hint()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 10)
@@ -199,7 +217,32 @@ class AudioFxPopover(QFrame):
 
     # ---------- bind + sync ----------
 
+    def _refresh_hint(self) -> None:
+        """Derive the full-panel pointer from the live keymap. The
+        popover is parented to the MainWindow (AudioFxButton passes its
+        window()), whose binding_display knows the current
+        view_audio_fx binding — walked via parent() because the Popup
+        window flag makes self.window() return the popover itself.
+        Standalone (tests, no main window) falls back to the shipped
+        default. An unbound action gets the nav-tab wording instead of
+        advertising a dead key."""
+        win = self.parent()
+        while win is not None and not hasattr(win, "binding_display"):
+            win = win.parent()
+        if win is not None:
+            try:
+                key = str(win.binding_display("view_audio_fx") or "")
+            except Exception:
+                key = ""
+        else:
+            key = _default_fx_panel_key()
+        if key:
+            self._hint.setText(f"{key} → full panel")
+        else:
+            self._hint.setText("full panel → the [fx] nav tab")
+
     def sync(self, state: AudioFxState) -> None:
+        self._refresh_hint()
         self._state = state
         self._silent = True
         try:

@@ -392,17 +392,34 @@ class FullscreenPlayer(QWidget):
         window.player.duration_changed.connect(self._on_duration)
         theming.manager().theme_changed.connect(self._on_theme)
 
+        # Escape is a fixed exit affordance on every companion window —
+        # deliberately NOT rebindable. L/Q/K are this surface's own
+        # pane keys, not ACTIONS ids, so they stay literal too.
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._request_exit)
-        QShortcut(QKeySequence("F11"), self, self._request_exit)
-        QShortcut(QKeySequence("Ctrl+M"), self, self._request_mini)
-        QShortcut(QKeySequence("Space"), self, window._on_play_clicked)
-        QShortcut(QKeySequence("Ctrl+Right"), self, window._on_next_clicked)
-        QShortcut(QKeySequence("Ctrl+Left"), self, window._on_prev_clicked)
-        QShortcut(QKeySequence("Ctrl+H"), self, window._on_like_clicked)
-        QShortcut(QKeySequence("Ctrl+Up"), self,
-                  lambda: window.volume.setVolume(window.volume.volume() + 5))
-        QShortcut(QKeySequence("Ctrl+Down"), self,
-                  lambda: window.volume.setVolume(window.volume.volume() - 5))
+        # The transport keys mirror rebindable ACTIONS ids. QShortcut
+        # context is per-window, so the main window's shortcuts can't
+        # fire here — these are built from the SAME effective keymap
+        # (and re-keyed by MainWindow.rebind_shortcuts' companion walk),
+        # so a rebind follows the user into fullscreen instead of the
+        # shipped defaults living on in it. Volume resolves at fire time
+        # (attribute access) so a strip rebuild can't strand it.
+        self._keymap_handlers = {
+            "fullscreen": self._request_exit,
+            "mini_mode": self._request_mini,
+            "play_pause": window._on_play_clicked,
+            "next_track": window._on_next_clicked,
+            "prev_track": window._on_prev_clicked,
+            "like": window._on_like_clicked,
+            "volume_up": lambda: window.volume.setVolume(
+                window.volume.volume() + 5),
+            "volume_down": lambda: window.volume.setVolume(
+                window.volume.volume() - 5),
+        }
+        self._keymap_shortcuts: dict[str, QShortcut] = {
+            action_id: QShortcut(QKeySequence(), self, handler)
+            for action_id, handler in self._keymap_handlers.items()
+        }
+        self.rebind_shortcuts()
         QShortcut(QKeySequence("L"), self, self._on_lyrics_btn)
         QShortcut(QKeySequence("Q"), self, self._on_queue_btn)
         QShortcut(QKeySequence("K"), self, self._toggle_karaoke)
@@ -415,6 +432,16 @@ class FullscreenPlayer(QWidget):
         self.prepare_for_screen(QGuiApplication.primaryScreen())
 
         self._install_wake_filters()
+
+    def rebind_shortcuts(self) -> None:
+        """Re-key the transport shortcuts from the effective keymap.
+        Runs at construction and from MainWindow.rebind_shortcuts (the
+        keymap editor's accept path) via the _companions walk. An
+        unbound action ("" sequence) leaves an inert QShortcut."""
+        from .window import effective_keymap
+        km = effective_keymap(getattr(self._window, "_settings", None))
+        for action_id, sc in self._keymap_shortcuts.items():
+            sc.setKey(QKeySequence(km.get(action_id, "")))
 
     def prepare_for_screen(self, screen) -> None:
         """Size the fixed pieces for the monitor we're about to fill.

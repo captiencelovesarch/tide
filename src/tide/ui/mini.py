@@ -401,17 +401,42 @@ class MiniPlayer(QWidget):
         self._tracker.start_wire()
         self._tracker.lyric_changed.connect(self._on_ticker_line)
 
+        # Escape is a fixed exit affordance on every companion window —
+        # deliberately NOT rebindable.
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._request_exit)
-        QShortcut(QKeySequence("Ctrl+M"), self, self._request_exit)
-        QShortcut(QKeySequence("Space"), self, window._on_play_clicked)
-        QShortcut(QKeySequence("Ctrl+Right"), self, window._on_next_clicked)
-        QShortcut(QKeySequence("Ctrl+Left"), self, window._on_prev_clicked)
-        QShortcut(QKeySequence("Ctrl+H"), self, window._on_like_clicked)
+        # The rest mirror rebindable ACTIONS ids. QShortcut context is
+        # per-window, so the main window's shortcuts can't fire here —
+        # these are built from the SAME effective keymap (and re-keyed
+        # by MainWindow.rebind_shortcuts' companion walk), so a rebind
+        # follows the user into the mini instead of the shipped
+        # defaults living on in it.
+        self._keymap_handlers = {
+            "mini_mode": self._request_exit,
+            "play_pause": window._on_play_clicked,
+            "next_track": window._on_next_clicked,
+            "prev_track": window._on_prev_clicked,
+            "like": window._on_like_clicked,
+        }
+        self._keymap_shortcuts: dict[str, QShortcut] = {
+            action_id: QShortcut(QKeySequence(), self, handler)
+            for action_id, handler in self._keymap_handlers.items()
+        }
+        self.rebind_shortcuts()
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_context_menu)
 
         self._install_wake_filters()
+
+    def rebind_shortcuts(self) -> None:
+        """Re-key the transport shortcuts from the effective keymap.
+        Runs at construction and from MainWindow.rebind_shortcuts (the
+        keymap editor's accept path) via the _companions walk. An
+        unbound action ("" sequence) leaves an inert QShortcut."""
+        from .window import effective_keymap
+        km = effective_keymap(getattr(self._window, "_settings", None))
+        for action_id, sc in self._keymap_shortcuts.items():
+            sc.setKey(QKeySequence(km.get(action_id, "")))
 
     # ---------- settings plumbing ----------
 

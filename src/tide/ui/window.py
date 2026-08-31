@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from PySide6.QtCore import (
     QObject,
@@ -345,6 +347,130 @@ class _InstrumentalSearchWorker(QObject):
             self.done.emit(self.vocal_track, match)
         except Exception as exc:
             self.failed.emit(self.vocal_track, str(exc))
+
+
+# ---------- keyboard shortcut actions ----------
+
+
+@dataclass(frozen=True)
+class ShortcutAction:
+    """One rebindable keyboard action.
+
+    ``run`` takes the MainWindow and resolves its targets at fire time
+    (attribute access, never captured widgets) so a strip rebuild can't
+    strand a binding on a dead button. ``default`` is the shipped key
+    sequence in Qt portable form; settings.keymap overrides it per
+    action id (missing id = default, empty string = unbound).
+    """
+    id: str
+    label: str
+    default: str
+    group: str
+    run: Callable[["MainWindow"], None]
+
+
+def _nudge_speed(w: "MainWindow", direction: int) -> None:
+    # Mirrors the popover's −/+; SpeedButton.set_speed handles clamping
+    # + persistence.
+    from .speed import SPEED_STEP
+    w.speed_btn.set_speed(w.speed_btn.speed() + direction * SPEED_STEP)
+
+
+# The single source of truth for every keyboard shortcut — v1 hand-wired
+# these as ~30 literal QShortcut lines. The keymap editor renders this
+# table, _wire_shortcuts builds from it, and every tooltip that
+# advertises a key derives from it (binding_display), so a rebind can't
+# leave stale key names in the chrome.
+ACTIONS: tuple[ShortcutAction, ...] = (
+    # -- navigation. Ctrl+digits mirror the rail's tab order exactly,
+    # [settings] included (Ctrl+6 was a ghost duplicate of home once —
+    # the explore→home merge; the digits must never skip a number
+    # relative to the rail again).
+    ShortcutAction("search", "focus search", "Ctrl+L", "navigation",
+                   lambda w: w.search.setFocus()),
+    ShortcutAction("search_alt", "focus search ·alt·", "Ctrl+F", "navigation",
+                   lambda w: w.search.setFocus()),
+    ShortcutAction("view_home", "go to home", "Ctrl+1", "navigation",
+                   lambda w: w._switch_view("home")),
+    ShortcutAction("view_library", "go to library", "Ctrl+2", "navigation",
+                   lambda w: w._switch_view("library")),
+    ShortcutAction("view_queue", "go to queue", "Ctrl+3", "navigation",
+                   lambda w: w._switch_view("queue")),
+    ShortcutAction("view_lyrics", "go to lyrics", "Ctrl+4", "navigation",
+                   lambda w: w._switch_view("lyrics")),
+    ShortcutAction("view_history", "go to history", "Ctrl+5", "navigation",
+                   lambda w: w._switch_view("history")),
+    ShortcutAction("view_visualizer", "go to visualizer", "Ctrl+6", "navigation",
+                   lambda w: w._switch_view("visualizer")),
+    ShortcutAction("view_source", "go to sources", "Ctrl+7", "navigation",
+                   lambda w: w._switch_view("source")),
+    ShortcutAction("view_audio_fx", "go to audio fx", "Ctrl+8", "navigation",
+                   lambda w: w._switch_view("audio_fx")),
+    ShortcutAction("open_settings", "open settings", "Ctrl+9", "navigation",
+                   lambda w: w.open_settings()),
+    ShortcutAction("open_settings_alt", "open settings ·alt·", "Ctrl+,",
+                   "navigation", lambda w: w.open_settings()),
+    # -- playback.
+    ShortcutAction("play_pause", "play / pause", "Space", "playback",
+                   lambda w: w.player.toggle()),
+    ShortcutAction("next_track", "next track", "Ctrl+Right", "playback",
+                   lambda w: w._on_next_clicked()),
+    ShortcutAction("prev_track", "previous track", "Ctrl+Left", "playback",
+                   lambda w: w._on_prev_clicked()),
+    ShortcutAction("volume_up", "volume up", "Ctrl+Up", "playback",
+                   lambda w: w.volume.setVolume(w.volume.volume() + 5)),
+    ShortcutAction("volume_down", "volume down", "Ctrl+Down", "playback",
+                   lambda w: w.volume.setVolume(w.volume.volume() - 5)),
+    ShortcutAction("like", "like current track", "Ctrl+H", "playback",
+                   lambda w: w._on_like_clicked()),
+    ShortcutAction("shuffle", "shuffle", "Ctrl+S", "playback",
+                   lambda w: w._on_shuffle_clicked()),
+    ShortcutAction("repeat", "repeat mode", "Ctrl+R", "playback",
+                   lambda w: w._on_repeat_clicked()),
+    # Playback speed: [ slower, ] faster, \ reset to 1.0×.
+    ShortcutAction("speed_slower", "speed −", "[", "playback",
+                   lambda w: _nudge_speed(w, -1)),
+    ShortcutAction("speed_faster", "speed +", "]", "playback",
+                   lambda w: _nudge_speed(w, +1)),
+    ShortcutAction("speed_reset", "speed reset", "\\", "playback",
+                   lambda w: w.speed_btn.reset()),
+    ShortcutAction("sleep_timer", "sleep timer", "Ctrl+I", "playback",
+                   lambda w: w.open_sleep_timer()),
+    # -- windows.
+    # F11 routes through _on_f11: on the visualizer view it keeps its
+    # original meaning (fullscreen the canvas), everywhere else it opens
+    # the fullscreen now-playing mode.
+    ShortcutAction("fullscreen", "fullscreen mode", "F11", "windows",
+                   lambda w: w._on_f11()),
+    ShortcutAction("mini_mode", "mini player", "Ctrl+M", "windows",
+                   lambda w: w.toggle_mini_mode()),
+    # -- session.
+    # Manual YT session refresh — same path as settings → sources →
+    # [refresh session], no dialog needed. Ctrl+R is taken by repeat;
+    # Shift makes it "the other refresh".
+    ShortcutAction("refresh_session", "refresh yt session", "Ctrl+Shift+R",
+                   "session", lambda w: w.refresh_session_manual()),
+)
+
+
+def default_keymap() -> dict[str, str]:
+    """Action id → shipped default key sequence, for every action."""
+    return {a.id: a.default for a in ACTIONS}
+
+
+def effective_keymap(settings) -> dict[str, str]:
+    """The defaults with settings.keymap overrides riding on top.
+
+    Unknown ids in the stored keymap (a binding for an action a later
+    version removed) are ignored rather than raised — a stale config
+    must never break shortcut wiring. ``settings`` may be None (window
+    construction happens before app.py attaches it)."""
+    km = default_keymap()
+    overrides = getattr(settings, "keymap", None) or {}
+    for action_id, seq in overrides.items():
+        if action_id in km:
+            km[action_id] = str(seq)
+    return km
 
 
 # ---------- main window ----------
@@ -942,8 +1068,12 @@ class MainWindow(QMainWindow):
         self.play_btn.setEnabled(False)
         self.like_btn.setEnabled(False)
         # Shuffle/repeat stay enabled — they're modes, not track actions.
-        self.shuffle_btn.setToolTip("shuffle (ctrl+s)")
-        self.repeat_btn.setToolTip("repeat: off / all / one (ctrl+r)")
+        # Tooltip key names derive from the keymap (v2.0) instead of
+        # hardcoding "ctrl+s"; _refresh_shortcut_tooltips re-derives them
+        # after a rebind.
+        self.shuffle_btn.setToolTip(self._shortcut_tip("shuffle", "shuffle"))
+        self.repeat_btn.setToolTip(
+            self._shortcut_tip("repeat: off / all / one", "repeat"))
 
         self.progress = make_progress(self._slot_progress)
         self.progress.seek_requested.connect(self.player.seek)
@@ -971,14 +1101,14 @@ class MainWindow(QMainWindow):
         # features don't exist. Label doubles as the armed indicator
         # ("zzz 12m" / "zzz song" / "zzz queue"), updated by the tick.
         self.sleep_btn = BracketButton(glyphs.glyph("sleep"))
-        self.sleep_btn.setToolTip("sleep timer (ctrl+i)")
+        self.sleep_btn.setToolTip(self._shortcut_tip("sleep timer", "sleep_timer"))
         self.sleep_btn.clicked.connect(self.open_sleep_timer)
 
         # Fullscreen mode entry point (v1.6). Keyboard-only features
         # don't exist (see sleep_btn's war story) — the glyph rides the
         # strip's right cluster next to it.
         self.fullscreen_btn = BracketButton("full", glyphs.glyph("fullscreen"))
-        self.fullscreen_btn.setToolTip("fullscreen (f11)")
+        self.fullscreen_btn.setToolTip(self._shortcut_tip("fullscreen", "fullscreen"))
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen_mode)
 
         self.time_label = QLabel("0:00 / 0:00")
@@ -3431,6 +3561,60 @@ class MainWindow(QMainWindow):
         ui_sounds = getattr(self, "ui_sounds", None)
         if ui_sounds is not None:
             ui_sounds.set_enabled(bool(s.ui_sounds_enabled))
+        # Per-glyph overrides are a STASH_FIELD — glyphs are chrome, and
+        # chrome is personality. Re-push the incoming set into the
+        # registry and repaint every transport label so a brutalist ▶
+        # swap can't leak into modern (and vice versa).
+        glyphs.set_overrides(dict(s.glyph_overrides or {}))
+        self.refresh_glyphs()
+
+    def refresh_glyphs(self) -> None:
+        """Re-push current state to every transport label so a changed
+        glyph (glyph-editor live edit, personality flip, boot-time
+        overrides) shows immediately.
+
+        Cheap and idempotent by contract — the glyph editor calls this
+        on EVERY live keystroke and on cancel-revert: existing refresh
+        paths only, no restyle, no status messages, no saves."""
+        # Static glyphs the controls bundle / strip set at construction.
+        for attr, key in (("shuffle_btn", "shuffle"),
+                          ("prev_btn", "prev"),
+                          ("next_btn", "next")):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setGlyph(glyphs.glyph(key))
+        fs_btn = getattr(self, "fullscreen_btn", None)
+        if fs_btn is not None:
+            fs_btn.setGlyph(glyphs.glyph("fullscreen"))
+        # Play/pause/loading — _on_state's glyph mapping without its side
+        # effects (loading-indicator finish, play-started reporting, perf
+        # summary), which must not re-fire on a cosmetic repaint.
+        play_btn = getattr(self, "play_btn", None)
+        if play_btn is not None:
+            state = self.player.state
+            if state == PlayState.PLAYING:
+                play_btn.setLabel("pause")
+                play_btn.setGlyph(glyphs.glyph("pause"))
+            elif state == PlayState.LOADING:
+                play_btn.setLabel(glyphs.glyph("loading"))
+                play_btn.setGlyph(glyphs.glyph("loading"))
+            else:
+                play_btn.setLabel("play")
+                play_btn.setGlyph(glyphs.glyph("play"))
+        # Shuffle/repeat/like ride their existing refresh paths (which
+        # also mirror mode state to the companions).
+        self._refresh_mode_buttons()
+        self._refresh_like_button()
+        self._refresh_sleep_label()
+        # Companions redraw their play/like glyphs through the same
+        # sync_now push that opening them performs.
+        for w in self._companions():
+            try:
+                w.sync_now(self._current, self.player.duration,
+                           self._last_position, self.player.state,
+                           self._liked_current)
+            except Exception:
+                pass
 
     def _reconcile_preset_after_dialog(self, before, new) -> None:
         """Preset bookkeeping for an ACCEPTED settings dialog. Cross-
@@ -3487,46 +3671,82 @@ class MainWindow(QMainWindow):
         return str(self._theme.t("layout", "list_marker", "> ")) if self._theme else "> "
 
     def _wire_shortcuts(self) -> None:
-        QShortcut(QKeySequence("Ctrl+L"), self, self.search.setFocus)
-        QShortcut(QKeySequence("Ctrl+F"), self, self.search.setFocus)
-        QShortcut(QKeySequence("Ctrl+1"), self, lambda: self._switch_view("home"))
-        QShortcut(QKeySequence("Ctrl+2"), self, lambda: self._switch_view("library"))
-        QShortcut(QKeySequence("Ctrl+3"), self, lambda: self._switch_view("queue"))
-        QShortcut(QKeySequence("Ctrl+4"), self, lambda: self._switch_view("lyrics"))
-        QShortcut(QKeySequence("Ctrl+5"), self, lambda: self._switch_view("history"))
-        # Ctrl+6 was "explore" until that view merged into home, after which
-        # it sat as a ghost duplicate of Ctrl+1 — so 6..9 visibly skipped a
-        # number relative to the rail. The digits now mirror the rail's tab
-        # order exactly, [settings] included.
-        QShortcut(QKeySequence("Ctrl+6"), self, lambda: self._switch_view("visualizer"))
-        QShortcut(QKeySequence("Ctrl+7"), self, lambda: self._switch_view("source"))
-        QShortcut(QKeySequence("Ctrl+8"), self, lambda: self._switch_view("audio_fx"))
-        QShortcut(QKeySequence("Ctrl+9"), self, self.open_settings)
-        QShortcut(QKeySequence("F11"), self, self._on_f11)
-        QShortcut(QKeySequence("Ctrl+,"), self, self.open_settings)
-        QShortcut(QKeySequence("Space"), self, self.player.toggle)
-        QShortcut(QKeySequence("Ctrl+Right"), self, self._on_next_clicked)
-        QShortcut(QKeySequence("Ctrl+Left"), self, self._on_prev_clicked)
-        QShortcut(QKeySequence("Ctrl+Up"), self, lambda: self.volume.setVolume(self.volume.volume() + 5))
-        QShortcut(QKeySequence("Ctrl+Down"), self, lambda: self.volume.setVolume(self.volume.volume() - 5))
-        QShortcut(QKeySequence("Ctrl+H"), self, self._on_like_clicked)
-        QShortcut(QKeySequence("Ctrl+S"), self, self._on_shuffle_clicked)
-        QShortcut(QKeySequence("Ctrl+R"), self, self._on_repeat_clicked)
-        QShortcut(QKeySequence("Ctrl+M"), self, self.toggle_mini_mode)
-        QShortcut(QKeySequence("Ctrl+I"), self, self.open_sleep_timer)
-        # Manual YT session refresh — same path as settings → integrations →
-        # [refresh session], no dialog needed. Ctrl+R is taken by repeat;
-        # Shift makes it "the other refresh".
-        QShortcut(QKeySequence("Ctrl+Shift+R"), self, self.refresh_session_manual)
-        # Playback speed shortcuts: [ slower, ] faster, \ reset to 1.0×.
-        # Mirrors the popover's −/+ and reset; the SpeedButton's set_speed
-        # handles clamping + persistence.
-        from .speed import SPEED_STEP
-        QShortcut(QKeySequence("["), self,
-                  lambda: self.speed_btn.set_speed(self.speed_btn.speed() - SPEED_STEP))
-        QShortcut(QKeySequence("]"), self,
-                  lambda: self.speed_btn.set_speed(self.speed_btn.speed() + SPEED_STEP))
-        QShortcut(QKeySequence("\\"), self, self.speed_btn.reset)
+        """Build one QShortcut per ShortcutAction from the effective
+        keymap (module-level ACTIONS table + settings.keymap overrides).
+        Kept on self._shortcuts so rebind_shortcuts can re-key them live.
+
+        Runs at construction, which is BEFORE app.py attaches
+        window._settings — so a saved custom keymap needs a
+        rebind_shortcuts() call after the attach (app boot does this)."""
+        old = getattr(self, "_shortcuts", None)
+        if old:
+            # Defensive idempotence: a rewire must not leave the previous
+            # generation alive as ambiguous duplicates.
+            for sc in old.values():
+                sc.setKey(QKeySequence())
+                sc.setParent(None)
+                sc.deleteLater()
+        self._shortcuts: dict[str, QShortcut] = {}
+        km = effective_keymap(getattr(self, "_settings", None))
+        for action in ACTIONS:
+            sc = QShortcut(QKeySequence(km.get(action.id, action.default)),
+                           self, lambda a=action: a.run(self))
+            self._shortcuts[action.id] = sc
+        self._refresh_shortcut_tooltips()
+
+    def rebind_shortcuts(self) -> None:
+        """Apply the current settings.keymap to the live QShortcuts — no
+        restart. Called by the keymap editor's accept path and by app
+        boot right after settings attach. Also refreshes every tooltip
+        that advertises a binding, and re-keys the companion windows
+        (mini/fullscreen) — their QShortcuts have per-window context, so
+        re-keying ours alone would leave the old defaults live there."""
+        shortcuts = getattr(self, "_shortcuts", None)
+        if not shortcuts:
+            return
+        km = effective_keymap(getattr(self, "_settings", None))
+        for action in ACTIONS:
+            sc = shortcuts.get(action.id)
+            if sc is not None:
+                sc.setKey(QKeySequence(km.get(action.id, action.default)))
+        self._refresh_shortcut_tooltips()
+        for w in self._companions():
+            if hasattr(w, "rebind_shortcuts"):
+                w.rebind_shortcuts()
+
+    def binding_display(self, action_id: str) -> str:
+        """Human text for the action's CURRENT binding ("" when unbound)
+        — lowercased to match the chrome voice ("ctrl+s", "f11").
+        Tooltips and the audio-fx popover hint derive from this instead
+        of hardcoding key names that a rebind would orphan."""
+        km = effective_keymap(getattr(self, "_settings", None))
+        seq = QKeySequence(km.get(action_id, ""))
+        if seq.isEmpty():
+            return ""
+        return seq.toString(QKeySequence.NativeText).lower()
+
+    def _shortcut_tip(self, base: str, action_id: str) -> str:
+        """``base (key)`` — or just ``base`` when the action is unbound,
+        so the chrome never advertises a key that does nothing."""
+        key = self.binding_display(action_id)
+        return f"{base} ({key})" if key else base
+
+    def _refresh_shortcut_tooltips(self) -> None:
+        """Re-derive every tooltip that advertises a key binding.
+        hasattr-guarded: runs from __init__ (right after _build_ui) and
+        from rebind_shortcuts; the strip rebuild's keep-list copies
+        tooltips onto replacement buttons, so the current attributes are
+        always the live ones."""
+        pairs = (
+            ("shuffle_btn", "shuffle", "shuffle"),
+            ("repeat_btn", "repeat: off / all / one", "repeat"),
+            ("sleep_btn", "sleep timer", "sleep_timer"),
+            ("fullscreen_btn", "fullscreen", "fullscreen"),
+        )
+        for attr, base, action_id in pairs:
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setToolTip(self._shortcut_tip(base, action_id))
 
     def apply_nav_icons(self, set_name: str) -> None:
         """Update every nav button's icon based on the named set. Called at
@@ -3753,6 +3973,30 @@ class MainWindow(QMainWindow):
         self.sleep_btn.setLabel(glyphs.glyph("sleep"))
         if was_active and not silent:
             self.statusBar().showMessage("sleep timer cancelled")
+
+    def _refresh_sleep_label(self) -> None:
+        """Repaint the sleep button's label from the current timer state
+        — the glyph-refresh path (refresh_glyphs). Mirrors the labels
+        _sleep_start/_on_sleep_tick/_sleep_cancel write, minus their
+        status-bar messages: a cosmetic repaint must stay silent."""
+        from .sleep_timer import SleepMode
+        btn = getattr(self, "sleep_btn", None)
+        if btn is None:
+            return
+        g = glyphs.glyph("sleep")
+        mode = getattr(self, "_sleep_mode", None)
+        deadline = getattr(self, "_sleep_deadline", None)
+        if mode == SleepMode.AFTER_SONG:
+            btn.setLabel(f"{g} song")
+        elif mode == SleepMode.AFTER_QUEUE:
+            btn.setLabel(f"{g} queue")
+        elif mode == SleepMode.MINUTES and deadline is not None:
+            import time as _t
+            mins, secs = divmod(max(0, int(deadline - _t.time())), 60)
+            # Ceil, same as the tick — never "zzz 0m" mid-minute.
+            btn.setLabel(f"{g} {mins + (1 if secs else 0)}m")
+        else:
+            btn.setLabel(g)
 
     def _on_sleep_tick(self) -> None:
         if self._sleep_deadline is None:
@@ -4028,6 +4272,26 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             theming.styled_case(f"layout · {layout.name}")
         )
+
+    def apply_strip_overrides(self, overrides: dict) -> None:
+        """The strip builder's accept path — the ONE sanctioned route for
+        its ``overrides_chosen`` payload (the dialog itself never applies
+        or persists). Adopts the chosen per-slot overrides wholesale: an
+        empty dict deliberately CLEARS back to the layout's defaults
+        (update_overrides replaces, never merges). The rebuild rides
+        apply_layout, where the _rebuild_strip keep-list rules live; the
+        save is field-scoped so it can't clobber a satellite saver."""
+        payload = {str(k): str(v) for k, v in dict(overrides or {}).items()}
+        settings = getattr(self, "_settings", None)
+        if settings is not None:
+            settings.layout_overrides = dict(payload)
+        self.apply_layout(layout_module.manager().update_overrides(payload))
+        if settings is not None:
+            try:
+                from .. import settings as settings_module
+                settings_module.save_fields(settings, "layout_overrides")
+            except Exception:
+                pass
 
     def _swap_progress(self, slug: str) -> None:
         new = make_progress(slug)
@@ -4352,6 +4616,248 @@ class MainWindow(QMainWindow):
             return self._mini
         return self
 
+    # ---------- the live-apply chain (v2.0 settings engine) ----------
+    #
+    # One named applier per settings axis. Every applier is NILADIC and
+    # reads self._settings — the accept path writes the accepted values
+    # onto the settings object first, then run_live_appliers runs the
+    # appliers whose descriptor keys changed, each once, in THIS order.
+    # The tuple encodes the ordering that was hand-sequenced in the v1
+    # _do_open_settings block, as data:
+    #
+    #   · apply_ui_scale_setting BEFORE apply_theme_bundle_setting — a
+    #     scale change re-applies the active theme at the new factor and
+    #     the final theme bundle must land after it (scale→theme);
+    #   · apply_corner_setting BEFORE apply_csd_setting, and the csd
+    #     applier ALSO runs when only corner_style changed
+    #     (LIVE_APPLY_EXTRA_TRIGGERS) — corners decide whether the
+    #     window needs an alpha channel, and the translucency re-check
+    #     must see the final frameless flag (CSD→translucency);
+    #   · apply_pitch_setting LAST — set_pitch_correction re-applies the
+    #     scaletempo filter chain the current speed rides on
+    #     (pitch→speed).
+    LIVE_APPLY_ORDER: tuple[str, ...] = (
+        "apply_ui_scale_setting",
+        "apply_theme_bundle_setting",
+        "apply_layout_setting",
+        "apply_thumbnails_setting",
+        "apply_adaptive_setting",
+        "apply_corner_setting",
+        "apply_csd_setting",
+        "apply_nav_icons_setting",
+        "apply_motion_setting",
+        "apply_loading_setting",
+        "apply_ui_sounds_setting",
+        "apply_mini_setting",
+        "apply_fullscreen_setting",
+        "apply_prefetch_setting",
+        "apply_discord_setting",
+        "apply_listenbrainz_setting",
+        "apply_audio_device_setting",
+        "apply_pitch_setting",
+    )
+
+    # Applier → extra trigger keys beyond the descriptors that name it as
+    # their `live` (settings_schema.REGISTRY). The one entry is the
+    # corner→csd dependency as data: a corner-only change still needs the
+    # window-translucency re-check that rides the csd applier.
+    LIVE_APPLY_EXTRA_TRIGGERS: dict[str, tuple[str, ...]] = {
+        "apply_csd_setting": ("corner_style",),
+    }
+
+    def run_live_appliers(self, changed) -> None:
+        """Run the appliers whose settings keys are in ``changed`` — each
+        once, in LIVE_APPLY_ORDER. Which keys feed which applier comes
+        from the descriptor table plus LIVE_APPLY_EXTRA_TRIGGERS; nothing
+        here re-derives ordering."""
+        changed = set(changed)
+        if not changed or getattr(self, "_settings", None) is None:
+            return
+        from . import settings_schema
+        triggers: dict[str, set[str]] = {}
+        for desc in settings_schema.REGISTRY:
+            if desc.live is not None:
+                triggers.setdefault(desc.live, set()).add(desc.key)
+        for name, extra in self.LIVE_APPLY_EXTRA_TRIGGERS.items():
+            triggers.setdefault(name, set()).update(extra)
+        for name in self.LIVE_APPLY_ORDER:
+            if triggers.get(name, set()) & changed:
+                getattr(self, name)()
+
+    def apply_ui_scale_setting(self) -> None:
+        """UI scale preset. Re-applies the active theme so the
+        QApplication font + QSS pick up the new size_pt and every
+        theme_changed listener (track row delegate, AlbumArt,
+        MonoProgress, …) re-derives its scaled pixel sizes in the same
+        beat. Must run BEFORE apply_theme_bundle_setting (scale→theme)."""
+        from . import scale as scale_module
+        s = self._settings
+        if scale_module.current().value != (s.ui_scale or "normal"):
+            scale_module.set_factor(s.ui_scale or "normal")
+            current_theme = theming.manager().current()
+            if current_theme is not None:
+                theming.manager().apply(current_theme.slug)
+
+    def apply_theme_bundle_setting(self) -> None:
+        """Theme + font family + font size + text case in ONE
+        theming.apply_bundle call — one queued restyle for all four axes,
+        never the serial set_user_font / set_user_font_size /
+        set_case_override pushes (each of which re-applies the theme)."""
+        s = self._settings
+        theming.manager().apply_bundle(
+            slug=s.theme,
+            font_family=s.font_family_override or "",
+            font_size=int(s.font_size_override_pt or 0),
+            case=s.text_case_override or "",
+        )
+
+    def apply_layout_setting(self) -> None:
+        """Layout preset (per-slot overrides ride along from settings —
+        the strip builder owns editing them)."""
+        s = self._settings
+        effective = layout_module.manager().apply(
+            s.layout or "classic", dict(s.layout_overrides or {})
+        )
+        if effective is not None:
+            self.apply_layout(effective)
+
+    def apply_thumbnails_setting(self) -> None:
+        """Track-row thumbnail mode; re-emits theme_changed so attached
+        delegates repaint with the new mode."""
+        from .track_row import set_thumbnail_override
+        set_thumbnail_override(self._settings.show_thumbnails or "theme")
+        current = theming.manager().current()
+        if current is not None:
+            theming.manager().theme_changed.emit(current)
+
+    def apply_adaptive_setting(self) -> None:
+        """Adaptive accent + backdrop drivers and the central-area
+        gradient (enabled/style), plus the ambient bass pulse."""
+        s = self._settings
+        adaptive = getattr(self, "_adaptive", None)
+        if adaptive is not None:
+            adaptive.set_enabled(s.adaptive_accent)
+            adaptive.set_background_enabled(s.adaptive_background)
+        if hasattr(self, "central_bg"):
+            self.central_bg.set_enabled(s.adaptive_background)
+            self.central_bg.set_style(s.adaptive_background_style or "field")
+        ambient = getattr(self, "_ambient", None)
+        if ambient is not None:
+            ambient.set_pulse_enabled(s.adaptive_pulse and s.adaptive_background)
+
+    def apply_corner_setting(self) -> None:
+        """Corner softness: the CentralBg paint radius plus the sticky
+        @radius token override on the theming manager so every QSS widget
+        matches. The window-translucency consequence rides
+        apply_csd_setting (extra-trigger on corner_style)."""
+        from .central_bg import corner_radius as _corner_radius
+        radius_px = _corner_radius(self._settings.corner_style)
+        if hasattr(self, "central_bg"):
+            self.central_bg.set_radius(radius_px)
+        theming.manager().set_user_override(
+            "radius", f"{radius_px}px" if radius_px > 0 else None
+        )
+
+    def apply_csd_setting(self) -> None:
+        """Titlebar mode (tide-drawn vs system decoration), THEN the
+        window-translucency re-check — csd→translucency ordering
+        contract: the re-check must read the final frameless flag. Also
+        runs when only corner_style changed (rounded corners on a CSD
+        window need an alpha channel)."""
+        self.set_csd_titlebar(bool(self._settings.csd_titlebar))
+        self._apply_window_translucency(self._theme)
+
+    def apply_nav_icons_setting(self) -> None:
+        self.apply_nav_icons(self._settings.nav_icon_set or "off")
+
+    def apply_motion_setting(self) -> None:
+        """Motion intensity — helpers consult the cached value every
+        call, so animations queued after this point pick up the level."""
+        from . import motion as motion_module
+        motion_module.set_intensity(self._settings.motion or "lite")
+        if hasattr(self, "central_bg"):
+            self.central_bg.set_motion(self._settings.motion or "lite")
+
+    def apply_loading_setting(self) -> None:
+        if hasattr(self, "_loading"):
+            self._loading.set_style(self._settings.loading_indicator_style)
+
+    def apply_ui_sounds_setting(self) -> None:
+        ui_sounds = getattr(self, "ui_sounds", None)
+        if ui_sounds is not None:
+            ui_sounds.set_enabled(bool(self._settings.ui_sounds_enabled))
+
+    def apply_mini_setting(self) -> None:
+        """Live-apply mini_* prefs to an open mini — its apply_settings
+        re-reads backdrop/progress/ticker/zen/pulse from settings."""
+        self._apply_mini_backdrop()
+
+    def apply_fullscreen_setting(self) -> None:
+        """Push backdrop/pulse prefs to a live fullscreen window (it
+        reads settings at open; a closed window is a no-op)."""
+        if self._fs is not None and self._fs_mode:
+            try:
+                self._fs.apply_settings()
+            except Exception:
+                pass
+
+    def apply_prefetch_setting(self) -> None:
+        """Hover/press prefetch is checked at fire time, so flipping the
+        attr is the whole live apply. warm_results is read per-search."""
+        self._prefetch.hover_enabled = bool(self._settings.prefetch_hover)
+
+    def apply_discord_setting(self) -> None:
+        """Push presence options to the live client; the presence lyric
+        feed follows both toggles (disabling emits None, which clears any
+        lyric already sitting on the profile)."""
+        s = self._settings
+        discord = getattr(self, "_discord", None)
+        if discord is not None:
+            discord.set_options(
+                details_template=s.discord_details_template,
+                state_template=s.discord_state_template,
+                show_paused=s.discord_show_paused,
+                show_progress=s.discord_show_progress,
+                activity_type=s.discord_activity_type,
+            )
+            discord.configure(s.discord_app_id, s.discord_enabled)
+        lyric_tracker = getattr(self, "_lyric_tracker", None)
+        if lyric_tracker is not None:
+            lyric_tracker.set_enabled(
+                s.discord_enabled and s.discord_lyrics_enabled
+            )
+
+    def apply_listenbrainz_setting(self) -> None:
+        scrobbler = getattr(self, "_scrobbler", None)
+        if scrobbler is not None:
+            scrobbler.configure(
+                self._settings.listenbrainz_token,
+                self._settings.listenbrainz_enabled,
+            )
+
+    def apply_audio_device_setting(self) -> None:
+        """Audio device override for the visualizer feed (restarts the
+        capture if it's running)."""
+        try:
+            self.visualizer_view._set_audio_source(
+                self._settings.audio_device or None
+            )
+        except Exception:
+            pass
+
+    def apply_pitch_setting(self) -> None:
+        """Pitch correction — re-applies the scaletempo filter immediately
+        so the change is audible without restarting mpv. Runs last in the
+        chain (pitch→speed ordering contract)."""
+        try:
+            self.player.set_pitch_correction(
+                bool(self._settings.preserve_pitch)
+            )
+        except Exception:
+            pass
+
+    # ---------- settings dialog ----------
+
     def open_settings(self) -> None:
         # Defer the modal past the click handler — opening a QDialog directly
         # inside the button's clicked emission segfaults on PySide6 + py3.14
@@ -4360,12 +4866,22 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._do_open_settings)
 
     def _do_open_settings(self) -> None:
+        """Open the generated settings dialog; on accept, run the
+        live-apply chain for the keys that actually changed.
+
+        The dialog edits the live Settings object in place and saves the
+        field-diff itself (settings.save_fields) — no deepcopy-replace,
+        so the object every satellite saver holds stays the truth."""
+        import copy as _copy
         from .settings import SettingsDialog
         current = getattr(self, "_settings", None)
         if current is None:
             # Settings injection from app.py hasn't happened (e.g. tests).
             from .. import settings as settings_module
             current = settings_module.load()
+        # Pre-dialog values for the preset reconcile (shallow copy: it
+        # only reads scalar fields like .theme).
+        before = _copy.copy(current)
         dlg = SettingsDialog(current, parent=self)
         self._ui_sound("modal_open")
         # While the dialog is up, its pickers preview through the live
@@ -4381,108 +4897,11 @@ class MainWindow(QMainWindow):
         if result != dlg.DialogCode.Accepted:
             dlg.deleteLater()
             return
-        new = dlg.updated_settings()
+        changed = dlg.changed_keys()
         dlg.deleteLater()
-        self._settings = new
-        self._reconcile_preset_after_dialog(current, new)
-        # Hot-swap the UI sounds master toggle.
-        ui_sounds = getattr(self, "ui_sounds", None)
-        if ui_sounds is not None:
-            ui_sounds.set_enabled(bool(new.ui_sounds_enabled))
-        # Hover/press prefetch is checked at fire time, so flipping the
-        # attr is the whole live apply. warm_results is read per-search.
-        self._prefetch.hover_enabled = bool(new.prefetch_hover)
-        # Push discord changes to the live presence client if it's running.
-        discord = getattr(self, "_discord", None)
-        if discord is not None:
-            discord.set_options(
-                details_template=new.discord_details_template,
-                state_template=new.discord_state_template,
-                show_paused=new.discord_show_paused,
-                show_progress=new.discord_show_progress,
-                activity_type=new.discord_activity_type,
-            )
-            discord.configure(new.discord_app_id, new.discord_enabled)
-        # Presence lyric feed follows both toggles; disabling emits None,
-        # which clears any lyric already sitting on the profile.
-        lyric_tracker = getattr(self, "_lyric_tracker", None)
-        if lyric_tracker is not None:
-            lyric_tracker.set_enabled(
-                new.discord_enabled and new.discord_lyrics_enabled
-            )
-        # Apply audio device override to the visualizer feed (restart if running).
-        try:
-            self.visualizer_view._set_audio_source(new.audio_device or None)
-        except Exception:
-            pass
-        # Apply listenbrainz settings to the live scrobbler.
-        scrobbler = getattr(self, "_scrobbler", None)
-        if scrobbler is not None:
-            scrobbler.configure(new.listenbrainz_token, new.listenbrainz_enabled)
-        # Apply adaptive accent toggle.
-        adaptive = getattr(self, "_adaptive", None)
-        if adaptive is not None:
-            adaptive.set_enabled(new.adaptive_accent)
-            adaptive.set_background_enabled(new.adaptive_background)
-        # Central-area gradient + corner radius. The CentralBg widget owns
-        # the paint; the theming manager owns the @radius token so other
-        # widgets (inputs, scrollbars, etc.) match the chosen softness.
-        from .central_bg import corner_radius as _corner_radius
-        if hasattr(self, "central_bg"):
-            self.central_bg.set_enabled(new.adaptive_background)
-            self.central_bg.set_style(new.adaptive_background_style or "field")
-            self.central_bg.set_motion(new.motion or "lite")
-            self.central_bg.set_radius(_corner_radius(new.corner_style))
-        # Ambient bass-pulse toggle.
-        ambient = getattr(self, "_ambient", None)
-        if ambient is not None:
-            ambient.set_pulse_enabled(new.adaptive_pulse and new.adaptive_background)
-        # Titlebar mode (tide-drawn vs system decoration) — live flip remaps.
-        self.set_csd_titlebar(new.csd_titlebar)
-        # Corner style or titlebar mode may have changed whether the window
-        # needs an alpha channel (CSD + rounded corners = truly transparent
-        # corner arcs). Must run after set_csd_titlebar so the frameless
-        # flag it reads is current.
-        self._apply_window_translucency(self._theme)
-        # Live-apply mini player prefs if the mini is currently up.
-        self._apply_mini_backdrop()
-        radius_px = _corner_radius(new.corner_style)
-        theming.manager().set_user_override(
-            "radius", f"{radius_px}px" if radius_px > 0 else None
-        )
-        # Hot-swap nav icons.
-        self.apply_nav_icons(new.nav_icon_set or "off")
-        # Hot-swap font family override. The theming manager re-applies the
-        # current theme so the new font lands on every widget that listens
-        # to theme_changed.
-        theming.manager().set_user_font(new.font_family_override or "")
-        theming.manager().set_user_font_size(new.font_size_override_pt or 0)
-        # Text-case override — re-applies the theme, which re-cases every
-        # widget that re-reads styled_case on theme_changed.
-        theming.set_case_override(new.text_case_override or "")
-        # Push new loading-indicator style to any currently-running indicator.
-        if hasattr(self, "_loading"):
-            self._loading.set_style(new.loading_indicator_style)
-        # Hot-swap motion intensity. Helpers consult the cached value every
-        # call, so animations queued after this point pick up the new level.
-        from . import motion as motion_module
-        motion_module.set_intensity(new.motion)
-        # Hot-swap UI scale. Re-apply the active theme so the QApplication
-        # font + QSS pick up the new size_pt, and any widget that listens to
-        # theme_changed (track row delegate, AlbumArt, MonoProgress, etc.)
-        # re-derives its scaled pixel sizes in the same beat.
-        from . import scale as scale_module
-        if scale_module.current().value != new.ui_scale:
-            scale_module.set_factor(new.ui_scale)
-            current_theme = theming.manager().current()
-            if current_theme is not None:
-                theming.manager().apply(current_theme.slug)
-        # Hot-swap pitch correction. This re-applies the scaletempo filter
-        # immediately so the user hears the change without restarting mpv.
-        try:
-            self.player.set_pitch_correction(bool(new.preserve_pitch))
-        except Exception:
-            pass
+        self._settings = current
+        self._reconcile_preset_after_dialog(before, current)
+        self.run_live_appliers(changed)
 
     # ---------- session persistence ----------
 
@@ -4631,3 +5050,9 @@ class MainWindow(QMainWindow):
 def _mmss(seconds: float) -> str:
     s = int(max(0, seconds))
     return f"{s // 60}:{s % 60:02d}"
+
+
+# Module-level views of the live-apply chain (tests + tools import these;
+# the class attributes on MainWindow are the single source).
+LIVE_APPLY_ORDER = MainWindow.LIVE_APPLY_ORDER
+LIVE_APPLY_EXTRA_TRIGGERS = MainWindow.LIVE_APPLY_EXTRA_TRIGGERS

@@ -369,9 +369,17 @@ class LibraryView(QWidget):
         if hasattr(self.api, "supports") and not self.api.supports("library"):
             src_name = theming.styled_case(getattr(self.api, "name", "this source"))
             self.index_heading.setText(_line_heading(f"{src_name} has no library"))
+            # The key mention derives from the live keymap (the main
+            # window's binding_display) — a hardcoded "(ctrl+7)" goes
+            # stale the moment view_source is rebound. Standalone
+            # construction (tests) has no main window: no key mention.
+            win = self.window()
+            key = (win.binding_display("view_source")
+                   if hasattr(win, "binding_display") else "")
+            key_part = f" ({key})" if key else ""
             placeholder = QListWidgetItem(
                 theming.styled_case(
-                    "  switch active source in [source] (ctrl+7) to one "
+                    f"  switch active source in [source]{key_part} to one "
                     "with a library, like youtube music or local files."
                 )
             )

@@ -1,42 +1,190 @@
-"""Settings dialog — theme, discord, advanced auth re-import.
+"""Settings dialog — GENERATED from the option-descriptor table.
 
-All persistent app options live here. Themes hot-swap on selection;
-discord settings apply on save.
+v1.x hand-wrote every option four times: a widget in _build_ui, a load
+in _populate, a store in _on_save, and a live-apply block in
+window._do_open_settings. This dialog builds itself from
+settings_schema.REGISTRY instead: tabs → sections (line headings) → one
+widget per descriptor kind. Adding an option is now: add the Settings
+field, add its OptionDesc, (maybe) name a live applier — the dialog,
+the diff-save and the live-apply chain follow.
+
+The dialog reads the LIVE Settings object (no deepcopy-replace — the
+old whole-object save is what raced the satellite savers). Edits are
+diffed against an opening snapshot; accept writes ONLY the changed
+fields (settings.save_fields) and hands the changed-key set to
+window.run_live_appliers. preview=True descriptors apply while the
+dialog is open and revert on cancel — previews never commit.
 """
 from __future__ import annotations
 
-import copy
-
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from .. import auth, backdrops, settings as settings_module, theming
+from .. import auth, settings as settings_module, theming
+from . import settings_schema
+from .headings import line_heading
 
 
 DISCORD_HELP_URL = "https://discord.com/developers/applications"
 
 
+# ---------------------------------------------------------------------------
+# dialog-side chrome the schema doesn't carry
+# ---------------------------------------------------------------------------
+
+# Generated widgets keep their v1 attribute names — muscle memory (and
+# the existing dialog tests) still find dlg.theme_picker, dlg.csd_toggle
+# and friends. Every REGISTRY key MUST have an entry (pinned by the
+# engine tests) so a new descriptor can't ship an anonymous widget.
+_WIDGET_ATTRS: dict[str, str] = {
+    "theme": "theme_picker",
+    "font_family_override": "font_picker",
+    "font_size_override_pt": "font_size_spin",
+    "text_case_override": "case_picker",
+    "ui_scale": "scale_picker",
+    "layout": "layout_picker",
+    "corner_style": "corner_picker",
+    "nav_icon_set": "nav_icons_picker",
+    "csd_titlebar": "csd_toggle",
+    "show_thumbnails": "thumbnails_picker",
+    "loading_indicator_style": "loading_picker",
+    "home_layout": "home_layout_picker",
+    "adaptive_accent": "adaptive_toggle",
+    "adaptive_background": "adaptive_bg_toggle",
+    "adaptive_background_style": "adaptive_style_picker",
+    "adaptive_pulse": "adaptive_pulse_toggle",
+    "motion": "motion_picker",
+    "ui_sounds_enabled": "ui_sounds_toggle",
+    "audio_device": "audio_device_picker",
+    "prefetch_hover": "prefetch_hover_toggle",
+    "prefetch_warm_results": "prefetch_warm_picker",
+    "preserve_pitch": "preserve_pitch_toggle",
+    "local_auto_index": "local_index_toggle",
+    "spotify_bitrate": "spotify_bitrate_picker",
+    "spotify_audio_device": "spotify_sink_edit",
+    "spotify_connect_enabled": "spotify_connect_toggle",
+    "discord_enabled": "discord_toggle",
+    "discord_app_id": "discord_app_id",
+    "discord_lyrics_enabled": "discord_lyrics_toggle",
+    "discord_show_paused": "discord_paused_toggle",
+    "discord_show_progress": "discord_progress_toggle",
+    "discord_activity_type": "discord_activity_picker",
+    "discord_details_template": "discord_details_edit",
+    "discord_state_template": "discord_state_edit",
+    "listenbrainz_enabled": "lb_toggle",
+    "listenbrainz_token": "lb_token",
+    "report_plays": "report_plays_toggle",
+    "mini_mode_default": "mini_default_toggle",
+    "mini_backdrop_style": "mini_backdrop_picker",
+    "mini_progress_style": "mini_progress_picker",
+    "mini_ticker": "mini_ticker_toggle",
+    "mini_zen": "mini_zen_toggle",
+    "mini_pulse": "mini_pulse_toggle",
+    "mini_pulse_resize": "mini_pulse_resize_toggle",
+    "mini_show_visualizer": "mini_vis_toggle",
+    "fullscreen_backdrop_style": "fs_backdrop_picker",
+    "fullscreen_pulse": "fs_pulse_toggle",
+}
+
+# Spin-box tuning for int descriptors (range / suffix / zero label).
+_INT_SPECS: dict[str, dict] = {
+    "font_size_override_pt": {
+        "min": 0, "max": 24, "suffix": " pt", "special": "theme default",
+    },
+}
+
+# Line-edit tuning for str descriptors (placeholder / secret echo).
+_STR_SPECS: dict[str, dict] = {
+    "discord_app_id": {"placeholder": "paste discord application id"},
+    "discord_details_template": {"placeholder": "default · {title}"},
+    "discord_state_template": {"placeholder": "default · {artists} · {album}"},
+    "listenbrainz_token": {
+        "placeholder": "paste your listenbrainz user token", "password": True,
+    },
+    "spotify_audio_device": {"placeholder": "default sink"},
+}
+
+# Controller key → dependent keys enabled only while the controller is
+# on (the v1 hand-wired toggled→setEnabled chains, as data).
+_ENABLE_RULES: dict[str, tuple[str, ...]] = {
+    "adaptive_background": ("adaptive_background_style", "adaptive_pulse"),
+    "mini_pulse": ("mini_pulse_resize",),
+    "discord_enabled": (
+        "discord_app_id",
+        "discord_lyrics_enabled",
+        "discord_show_paused",
+        "discord_show_progress",
+        "discord_activity_type",
+        "discord_details_template",
+        "discord_state_template",
+    ),
+    "listenbrainz_enabled": ("listenbrainz_token",),
+}
+
+# kind == "custom" descriptors resolve their widget builder here:
+# key → callable(dialog) -> QWidget. Registered by the power tools;
+# empty today (the font picker is its own first-class kind).
+CUSTOM_BUILDERS: dict[str, object] = {}
+
+
+def _dim(label: QLabel) -> QLabel:
+    label.setProperty("class", "dim")
+    label.setWordWrap(True)
+    return label
+
+
+def _page(*items) -> QScrollArea:
+    """One tab page: a scrollable column of widgets/layouts, so no
+    section is ever buried a full page-scroll away."""
+    content = QWidget()
+    col = QVBoxLayout(content)
+    col.setContentsMargins(6, 10, 6, 10)
+    col.setSpacing(12)
+    for item in items:
+        if isinstance(item, QWidget):
+            col.addWidget(item)
+        else:
+            col.addLayout(item)
+    col.addStretch(1)
+    scroll = QScrollArea()
+    scroll.setWidget(content)
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QScrollArea.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    return scroll
+
+
 class SettingsDialog(QDialog):
-    """One-window settings. Saves on close; theme applies live."""
+    """One window, every option — generated from the descriptor table.
+    Saves the field-diff on accept; previews revert on cancel."""
+
+    # The descriptors that live-preview while the dialog is open, pinned
+    # against schema preview flags in tests. Everything here must have a
+    # branch in _apply_preview AND a revert in _on_cancel.
+    PREVIEW_KEYS = frozenset({
+        "theme",
+        "font_family_override",
+        "font_size_override_pt",
+        "text_case_override",
+        "show_thumbnails",
+        "layout",
+    })
 
     def __init__(self, current_settings: settings_module.Settings, parent=None) -> None:
         super().__init__(parent)
@@ -45,19 +193,39 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(620)
         self.resize(680, 720)
 
+        # The LIVE settings object. Reads populate the widgets; accept
+        # writes only the changed fields back onto it.
+        self._settings = current_settings
+        self._defaults = settings_module.Settings()
+        self._descs = settings_schema.REGISTRY
+        self._by_key = settings_schema.by_key()
+
+        self._widgets: dict[str, QWidget] = {}
+        self._preset_markers: dict[str, QLabel] = {}
+        self._pending: dict[str, object] = {}
+        self._originals: dict[str, object] = {}
+        self._accepted_changes: tuple[str, ...] = ()
+        self._populating = False
+        # reject() is every cancel path (button, Esc, window close);
+        # these guard the revert so it runs at most once and never
+        # after an accept (the theme editor's pattern).
+        self._accepted = False
+        self._reverted = False
+        # A strip-builder pick made while the LAYOUT itself is only a
+        # preview is parked here instead of committed — accept lands
+        # layout + bar together, cancel drops both (rule 8).
+        self._pending_strip_overrides: dict | None = None
+        self._pending_strip_base = ""
+
+        # Preview snapshot — what cancel puts back (previews never
+        # commit; ground rule since the phase-1 browse-flip bug).
         self._initial_theme = current_settings.theme
         self._initial_thumbnails = current_settings.show_thumbnails or "theme"
         self._initial_font = current_settings.font_family_override or ""
         self._initial_font_size = int(current_settings.font_size_override_pt or 0)
         self._initial_case = current_settings.text_case_override or ""
-        # Work on a full, independent copy. The dialog mutates only the
-        # fields it surfaces (in _on_save) and persists the whole object, so
-        # any field NOT mirrored here would be written back at its default —
-        # silently wiping sources_enabled, the Spotify/Subsonic credentials,
-        # audio_fx_state, ui_sounds_enabled, first_launch_complete, etc. A
-        # deepcopy preserves every field (including dict fields) verbatim, so
-        # new settings added later can never regress this dialog again.
-        self._settings = copy.deepcopy(current_settings)
+        self._initial_layout = current_settings.layout or "classic"
+        self._initial_overrides = dict(current_settings.layout_overrides or {})
 
         self._build_ui()
         self._populate()
@@ -69,96 +237,153 @@ class SettingsDialog(QDialog):
         if win is not None:
             win.session_refresh_finished.connect(self._on_refresh_session_finished)
 
-    # ---------- build ----------
+    # ---------- generated build ----------
 
     def _build_ui(self) -> None:
-        # ---- appearance ----
-        self.theme_picker = QComboBox()
-        self.theme_picker.currentIndexChanged.connect(self._on_theme_changed)
+        section_order: dict[str, list[str]] = {
+            tab: [] for tab in settings_schema.TABS
+        }
+        forms: dict[tuple[str, str], QFormLayout] = {}
+        for desc in self._descs:
+            widget = self._make_widget(desc)
+            self._widgets[desc.key] = widget
+            setattr(self, _WIDGET_ATTRS[desc.key], widget)
+            slot = (desc.tab, desc.section)
+            form = forms.get(slot)
+            if form is None:
+                form = QFormLayout()
+                forms[slot] = form
+                section_order[desc.tab].append(desc.section)
+            row = self._compose_row(desc, widget)
+            if desc.kind == "bool":
+                form.addRow("", row)     # the toggle carries its own label
+            else:
+                form.addRow(f"{desc.label}:", row)
 
-        self.thumbnails_picker = QComboBox()
-        self.thumbnails_picker.addItem("from theme", "theme")
-        self.thumbnails_picker.addItem("always show", "on")
-        self.thumbnails_picker.addItem("never show", "off")
-        self.thumbnails_picker.currentIndexChanged.connect(self._on_thumbnails_changed)
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        for tab in settings_schema.TABS:
+            items: list = list(self._tab_prelude(tab))
+            for section in section_order[tab]:
+                items.append(_dim(QLabel(line_heading(section, 34))))
+                items.extend(self._section_prelude(tab, section))
+                items.append(forms[(tab, section)])
+                items.extend(self._section_chrome(tab, section))
+            items.extend(self._tab_chrome(tab))
+            tabs.addTab(_page(*items), tab)
+        # About is dialog chrome, not options — its own quiet tab.
+        tabs.addTab(_page(*self._about_items()), "about")
+        self._tabs = tabs
 
-        # Audio device picker for the visualizer (backup; cog menu has it too).
-        self.audio_device_picker = QComboBox()
-        self.audio_device_picker.addItem("auto (tide's audio only)", "")
-        try:
-            from .. import audio_capture
-            for name, label in audio_capture.list_monitor_sources():
-                self.audio_device_picker.addItem(label, name)
-        except Exception:
-            pass
+        self.save_btn = QPushButton("save")
+        self.save_btn.setDefault(True)
+        self.save_btn.clicked.connect(self._on_save)
+        self.cancel_btn = QPushButton("cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.cancel_btn)
+        btn_row.addWidget(self.save_btn)
 
-        # Layout preset picker.
-        self.layout_picker = QComboBox()
-        from .. import layout as layout_module
-        for lay in layout_module.manager().list_layouts():
-            self.layout_picker.addItem(lay.name, lay.slug)
-        self.layout_picker.currentIndexChanged.connect(self._on_layout_changed)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 14)
+        root.setSpacing(10)
+        root.addWidget(tabs, stretch=1)
+        root.addLayout(btn_row)
 
-        # Per-slot override pickers.
-        from . import variants as variants_module
-        self._slot_pickers: dict[str, QComboBox] = {}
-        for slot, options in variants_module.all_variant_slugs().items():
-            cb = QComboBox()
-            cb.addItem("(from layout)", "")
-            for opt in options:
-                cb.addItem(opt, opt)
-            cb.currentIndexChanged.connect(lambda _i=0, s=slot: self._on_slot_override(s))
-            self._slot_pickers[slot] = cb
+    def _make_widget(self, desc: settings_schema.OptionDesc) -> QWidget:
+        kind = desc.kind
+        if kind == "bool":
+            w: QWidget = QCheckBox(desc.label)
+            w.toggled.connect(
+                lambda _on=False, k=desc.key: self._on_option_changed(k))
+        elif kind == "choice":
+            w = QComboBox()
+            for value, label in settings_schema.resolve_choices(desc):
+                w.addItem(label, value)
+            w.currentIndexChanged.connect(
+                lambda _i=0, k=desc.key: self._on_option_changed(k))
+        elif kind == "int":
+            spec = _INT_SPECS.get(desc.key, {})
+            w = QSpinBox()
+            w.setRange(int(spec.get("min", 0)), int(spec.get("max", 9999)))
+            if spec.get("special"):
+                w.setSpecialValueText(spec["special"])
+            if spec.get("suffix"):
+                w.setSuffix(spec["suffix"])
+            w.valueChanged.connect(
+                lambda _v=0, k=desc.key: self._on_option_changed(k))
+        elif kind == "str":
+            spec = _STR_SPECS.get(desc.key, {})
+            w = QLineEdit()
+            if spec.get("placeholder"):
+                w.setPlaceholderText(spec["placeholder"])
+            if spec.get("password"):
+                w.setEchoMode(QLineEdit.Password)
+            w.textChanged.connect(
+                lambda _t="", k=desc.key: self._on_option_changed(k))
+        elif kind == "font":
+            w = self._build_font_picker(desc)
+        elif kind == "custom":
+            builder = CUSTOM_BUILDERS.get(desc.key)
+            if builder is None:
+                raise KeyError(
+                    f"{desc.key}: custom kind with no registered builder")
+            w = builder(self)
+        else:
+            raise ValueError(f"{desc.key}: unknown kind {kind!r}")
+        if desc.tooltip:
+            w.setToolTip(desc.tooltip)
+        return w
 
-        # Adaptive accent.
-        self.adaptive_toggle = QCheckBox("shift accent to album art")
-        self.adaptive_toggle.toggled.connect(self._on_adaptive_toggled)
+    def _compose_row(self, desc: settings_schema.OptionDesc,
+                     widget: QWidget) -> QWidget:
+        """The widget plus its row chrome: per-key extras (help buttons)
+        and the ·per personality· marker for STASH_FIELDS descriptors."""
+        extras: list[QWidget] = []
+        if desc.key == "discord_app_id":
+            self.discord_help = QPushButton("get an app id  →")
+            self.discord_help.setFlat(True)
+            self.discord_help.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl(DISCORD_HELP_URL)))
+            extras.append(self.discord_help)
+        elif desc.key == "listenbrainz_token":
+            self.lb_help = QPushButton("get a token  →")
+            self.lb_help.setFlat(True)
+            self.lb_help.clicked.connect(
+                lambda: QDesktopServices.openUrl(
+                    QUrl("https://listenbrainz.org/profile/")))
+            extras.append(self.lb_help)
+        marker: QLabel | None = None
+        if desc.per_preset:
+            marker = QLabel("·per personality·")
+            marker.setProperty("class", "dim")
+            marker.setToolTip(
+                "flips with the personality preset — each side remembers "
+                "its own value")
+            self._preset_markers[desc.key] = marker
+        if not extras and marker is None:
+            return widget
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(widget, stretch=1)
+        for extra in extras:
+            row.addWidget(extra)
+        if marker is not None:
+            row.addWidget(marker)
+        return box
 
-        # Adaptive background — tints the central content area with a soft
-        # vertical gradient pulled from the album palette. Independent of
-        # the accent shift above; either can be on without the other.
-        self.adaptive_bg_toggle = QCheckBox(
-            "tint central area with album-derived gradient"
-        )
-        self.adaptive_style_picker = QComboBox()
-        for slug, label in backdrops.choices():
-            self.adaptive_style_picker.addItem(label, slug)
-
-        # Bass pulse — swells / brightens that gradient on heavy bass while
-        # playing. Needs the monitor capture, so it's gated on the gradient
-        # being on and costs a little constant CPU during playback.
-        self.adaptive_pulse_toggle = QCheckBox(
-            "pulse the gradient on heavy bass"
-        )
-        self.adaptive_bg_toggle.toggled.connect(self.adaptive_pulse_toggle.setEnabled)
-        self.adaptive_bg_toggle.toggled.connect(self.adaptive_style_picker.setEnabled)
-
-        # Corner softness — applies a sticky @radius override on the theming
-        # manager (preserved across adaptive clears). Affects all corners
-        # that use @radius (inputs, scrollbars, the central-area gradient).
-        self.corner_picker = QComboBox()
-        self.corner_picker.addItem("sharp · 0px", "sharp")
-        self.corner_picker.addItem("soft · 6px", "soft")
-        self.corner_picker.addItem("rounded · 12px", "rounded")
-
-        # Nav-rail icon set. Each item label embeds one icon from the set
-        # so the user previews the vibe in the picker itself.
-        self.nav_icons_picker = QComboBox()
-        self.nav_icons_picker.addItem("off · text only", "off")
-        self.nav_icons_picker.addItem("svg · brutalist line-art icons", "svg")
-        self.nav_icons_picker.addItem("classic · ⌂ ▤ ≡ ♪ ⌛ ♬ ⇄ ⚙", "classic")
-        self.nav_icons_picker.addItem("emoji · 🏠 📚 📋 🎤 🕒 🎚 🔌 ⚙", "emoji")
-
-        # Font family — overrides the active theme's typography.family.
-        # Empty string = "use whatever the theme says". Every system family
-        # is listed and each row renders in its own face, so picking a font
-        # is done by looking at it rather than knowing its name. Selection
-        # live-applies; cancel reverts.
-        self.font_picker = QComboBox()
-        self.font_picker.addItem("from theme", "")
+    def _build_font_picker(self, desc: settings_schema.OptionDesc) -> QComboBox:
+        """The full-family font picker, preserved from v1: every system
+        family listed, each row rendered in its own face, bundled fonts
+        pinned up top, editable so any family name can be typed."""
+        picker = QComboBox()
+        picker.addItem("from theme", "")
         # Tide-bundled fonts pinned up top, always available.
         for f in ("IBM Plex Mono", "JetBrains Mono", "Inter"):
-            self.font_picker.addItem(f"{f} · bundled", f)
+            picker.addItem(f"{f} · bundled", f)
         try:
             from PySide6.QtGui import QFont, QFontDatabase
             from PySide6.QtWidgets import QListView
@@ -170,11 +395,10 @@ class SettingsDialog(QDialog):
                 font.setPointSize(10)
                 return font
 
-            existing = {self.font_picker.itemData(i)
-                        for i in range(self.font_picker.count())}
-            for i in range(1, self.font_picker.count()):
-                self.font_picker.setItemData(
-                    i, _preview_font(self.font_picker.itemData(i)), Qt.FontRole
+            existing = {picker.itemData(i) for i in range(picker.count())}
+            for i in range(1, picker.count()):
+                picker.setItemData(
+                    i, _preview_font(picker.itemData(i)), Qt.FontRole
                 )
             latin = QFontDatabase.WritingSystem.Latin
             for f in sorted(QFontDatabase.families()):
@@ -186,421 +410,185 @@ class SettingsDialog(QDialog):
                     # and rendering their names in themselves is a glyph-
                     # fallback stress test Qt has been seen to lose.
                     continue
-                self.font_picker.addItem(f, f)
-                self.font_picker.setItemData(
-                    self.font_picker.count() - 1, _preview_font(f), Qt.FontRole
+                picker.addItem(f, f)
+                picker.setItemData(
+                    picker.count() - 1, _preview_font(f), Qt.FontRole
                 )
             # One prototype row sizes the whole popup. Without this, every
             # app restyle made the popup's list view re-measure EVERY row in
             # its own font (shapeText × hundreds of families × fallback
             # queries) — the layout storm a real session died inside.
-            view = self.font_picker.view()
+            view = picker.view()
             if isinstance(view, QListView):
                 view.setUniformItemSizes(True)
         except Exception:
             pass
         # Make editable so users can paste any family name. Typed names
         # apply on save; picked rows apply live.
-        self.font_picker.setEditable(True)
-        self.font_picker.setInsertPolicy(QComboBox.NoInsert)
-        self.font_picker.currentIndexChanged.connect(self._on_font_changed)
+        picker.setEditable(True)
+        picker.setInsertPolicy(QComboBox.NoInsert)
+        picker.currentIndexChanged.connect(
+            lambda _i=0, k=desc.key: self._on_option_changed(k))
+        return picker
 
-        # Font size — 0 pt = follow the theme. ui_scale still multiplies.
-        self.font_size_spin = QSpinBox()
-        self.font_size_spin.setRange(0, 24)
-        self.font_size_spin.setSpecialValueText("theme default")
-        self.font_size_spin.setSuffix(" pt")
-        self.font_size_spin.valueChanged.connect(self._on_font_size_changed)
+    # ---------- dialog chrome (hand-built, non-descriptor surfaces) ----------
 
-        # Text case — beats the theme's typography.case everywhere text
-        # routes through styled_case (nav, buttons, presence, toasts, …).
-        # Live-applies like the font pickers; cancel reverts.
-        self.case_picker = QComboBox()
-        self.case_picker.addItem("from theme", "")
-        self.case_picker.addItem("lowercase", "lower")
-        self.case_picker.addItem("UPPERCASE", "upper")
-        self.case_picker.addItem("As Written", "normal")
-        self.case_picker.addItem("l33t · L1K3 TH1Z", "leet")
-        self.case_picker.addItem("zalgo · c̛u̅rsed", "zalgo")
-        self.case_picker.currentIndexChanged.connect(self._on_case_changed)
+    def _tab_prelude(self, tab: str) -> list[QWidget]:
+        if tab == "sources":
+            return [_dim(QLabel(
+                "credentials, folders and per-source on/off switches live "
+                "on the sources page (the nav rail's [source] tab). these "
+                "are the power knobs behind them."
+            ))]
+        return []
 
-        # Loading-indicator style. The labels include a tiny example of each
-        # rendering so the user knows what they're picking without trial-and-error.
-        self.loading_picker = QComboBox()
-        self.loading_picker.addItem("off", "off")
-        self.loading_picker.addItem("numbers · 42%", "numbers")
-        self.loading_picker.addItem("blocks · █████░░░░░", "blocks")
-        self.loading_picker.addItem("dots · ●●●●●○○○○○", "dots")
-        self.loading_picker.addItem("ascii · [#####-----]", "ascii")
+    def _section_prelude(self, tab: str, section: str) -> list[QWidget]:
+        if (tab, section) == ("windows", "mini player"):
+            mini_key = self._binding_text("mini_mode", "ctrl+m")
+            opener = ("clicking the now-playing art"
+                      + (f" or {mini_key}" if mini_key else ""))
+            self.mini_blurb = _dim(QLabel(
+                f"the small frameless window. open it by {opener}. "
+                "everything here is also on the mini's own right-click menu."
+            ))
+            return [self.mini_blurb]
+        return []
 
-        # v1.5 home layout — the pattern engine vs. the classic shelf rows.
-        self.home_layout_picker = QComboBox()
-        self.home_layout_picker.addItem(
-            "patterns · hero, grids, mosaics, charts, moods", "patterns")
-        self.home_layout_picker.addItem(
-            "plain shelves · the classic rows", "shelves")
+    def _section_chrome(self, tab: str, section: str) -> list:
+        if (tab, section) == ("integrations", "play reporting"):
+            report_explainer = _dim(QLabel(
+                "on: when a song starts, tide sends the same play event the "
+                "yt music web player sends. it goes to your own account and "
+                "nowhere else, and your history and recommendations pick up "
+                "what you play in tide. off: tide reports nothing, and the "
+                "only traffic is fetching the music."
+            ))
+            self.taste_btn = QPushButton("tune recommendations  →")
+            self.taste_btn.setFlat(True)
+            self.taste_btn.clicked.connect(self._on_open_taste)
+            taste_blurb = _dim(QLabel(
+                "pick the artists youtube music should treat as your taste. "
+                "this steers home shelves and radio."
+            ))
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            col.addWidget(report_explainer)
+            col.addSpacing(8)
+            col.addWidget(self.taste_btn, alignment=Qt.AlignLeft)
+            col.addWidget(taste_blurb)
+            return [col]
+        return []
 
-        # Motion intensity — gates every animation in the app via the motion
-        # module. "lite" is the recommended default (signature + everyday
-        # animations only); "full" enables atmospheric tier when it ships.
-        self.motion_picker = QComboBox()
-        self.motion_picker.addItem("off · instant transitions", "off")
-        self.motion_picker.addItem("lite · signature + everyday", "lite")
-        self.motion_picker.addItem("full · everything including ambient", "full")
+    def _tab_chrome(self, tab: str) -> list:
+        if tab == "appearance":
+            return self._power_tool_chrome()
+        if tab == "playback":
+            fx_heading = _dim(QLabel(line_heading("audio fx", 34)))
+            fx_key = self._binding_text("view_audio_fx", "ctrl+8")
+            fx_open = (f"open the full panel with {fx_key} (or the [fx] nav "
+                       "tab)" if fx_key
+                       else "open the full panel from the [fx] nav tab")
+            self.fx_blurb = _dim(QLabel(
+                "10-band eq + reverb + loudness norm + the rest of the rack.\n"
+                f"{fx_open}, or use the [fx] popover on the now-playing strip."
+            ))
+            self.audio_fx_open_btn = QPushButton("open audio fx panel  →")
+            self.audio_fx_open_btn.clicked.connect(self._on_open_audio_fx)
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            col.addWidget(self.fx_blurb)
+            col.addWidget(self.audio_fx_open_btn, alignment=Qt.AlignLeft)
+            return [fx_heading, col]
+        if tab == "sources":
+            session_heading = _dim(QLabel(line_heading("youtube music session", 34)))
+            self.refresh_session_btn = QPushButton("refresh session")
+            self.refresh_session_btn.clicked.connect(self._on_refresh_session)
+            # Inline state: current session at rest, "checking browsers…"
+            # while the window's worker runs, then the outcome. The window
+            # also toasts, but this modal dialog sits over the toast host —
+            # the row is the feedback the user actually sees.
+            self.refresh_session_status = _dim(QLabel(self._session_state_text()))
+            refresh_key = self._binding_text("refresh_session", "ctrl+shift+r")
+            key_line = (f" {refresh_key} does the same thing without opening "
+                        "settings." if refresh_key else "")
+            self.session_blurb = _dim(QLabel(
+                "pulls fresh cookies from whichever browser is still signed "
+                "in to youtube music. use it when tide wakes up with "
+                "anonymous results because the saved session expired."
+                f"{key_line}"
+            ))
+            self.sign_out_btn = QPushButton("sign out + re-import session")
+            self.sign_out_btn.clicked.connect(self._on_sign_out)
+            session_row = QHBoxLayout()
+            session_row.addWidget(self.refresh_session_btn)
+            session_row.addWidget(self.refresh_session_status, stretch=1)
+            col = QVBoxLayout()
+            col.setSpacing(6)
+            col.addLayout(session_row)
+            col.addWidget(self.session_blurb)
+            col.addSpacing(8)
+            col.addWidget(self.sign_out_btn, alignment=Qt.AlignLeft)
+            return [session_heading, col]
+        return []
 
-        # UI scale — multiplies the active theme's typography size, which
-        # cascades to every widget that uses self.font() / QFontMetrics.
-        self.scale_picker = QComboBox()
-        self.scale_picker.addItem("compact · 0.85×", "compact")
-        self.scale_picker.addItem("normal · 1.00×", "normal")
-        self.scale_picker.addItem("large · 1.15×", "large")
-        self.scale_picker.addItem("huge · 1.30×", "huge")
+    def _power_tool_chrome(self) -> list:
+        """The appearance tab's power-tool launchers + the shortcuts
+        section — the brutalist arsenal's front door. Every open is
+        DEFERRED out of the click emission: the theme editor via our own
+        singleShot handler, the other three inside their module openers
+        (open_strip_builder / open_glyph_editor / open_keymap_editor all
+        defer internally — wiring them straight to clicked is sanctioned,
+        double-deferring is not needed)."""
+        tools_heading = _dim(QLabel(line_heading("power tools", 34)))
+        tools_blurb = _dim(QLabel(
+            "the deep-cut editors. everything they change is previewable, "
+            "revertable and saved per-field — no config files, ever."
+        ))
+        self.theme_editor_btn = QPushButton("theme editor  →")
+        self.theme_editor_btn.setToolTip(
+            "edit the active theme's colors, typography and radius live; "
+            "save the result as your own theme")
+        self.theme_editor_btn.clicked.connect(self._on_open_theme_editor)
+        self.strip_builder_btn = QPushButton("strip builder  →")
+        self.strip_builder_btn.setToolTip(
+            "build your player bar: pick a variant per slot with a live "
+            "miniature preview")
+        self.strip_builder_btn.clicked.connect(self._on_open_strip_builder)
+        self.glyphs_btn = QPushButton("glyph editor  →")
+        self.glyphs_btn.setToolTip(
+            "swap any transport glyph (▶ ▮▮ ♥ …) for 1-3 characters of "
+            "your own — per personality")
+        self.glyphs_btn.clicked.connect(self._on_open_glyphs)
+        tools_row = QHBoxLayout()
+        tools_row.setSpacing(8)
+        tools_row.addWidget(self.theme_editor_btn)
+        tools_row.addWidget(self.strip_builder_btn)
+        tools_row.addWidget(self.glyphs_btn)
+        tools_row.addStretch(1)
+        tools_col = QVBoxLayout()
+        tools_col.setSpacing(6)
+        tools_col.addWidget(tools_blurb)
+        tools_col.addLayout(tools_row)
 
-        # Preserve-pitch toggle — when on, mpv's scaletempo filter keeps
-        # pitch steady as speed changes (utility / audiobook mode). Default
-        # off so the bottom-bar speed control gives the slowed/nightcore
-        # aesthetic with no extra steps.
-        self.preserve_pitch_toggle = QCheckBox(
-            "preserve pitch when changing speed"
-        )
+        shortcuts_heading = _dim(QLabel(line_heading("shortcuts", 34)))
+        shortcuts_blurb = _dim(QLabel(
+            "every keyboard shortcut is rebindable. the keymap is global "
+            "— muscle memory doesn't flip with the personality."
+        ))
+        self.keymap_btn = QPushButton("keymap editor  →")
+        self.keymap_btn.clicked.connect(self._on_open_keymap)
+        sc_col = QVBoxLayout()
+        sc_col.setSpacing(6)
+        sc_col.addWidget(shortcuts_blurb)
+        sc_col.addWidget(self.keymap_btn, alignment=Qt.AlignLeft)
+        return [tools_heading, tools_col, shortcuts_heading, sc_col]
 
-        # UI sounds — short clicks on nav / modals / toggles. Auto-muted
-        # while music is playing so they never compete with the player.
-        self.ui_sounds_toggle = QCheckBox(
-            "ui sounds (nav · modals · toggles · auto-mutes during playback)"
-        )
-
-        # tide-drawn titlebar (frameless window + themed chrome). Off =
-        # the compositor's native decoration.
-        self.csd_toggle = QCheckBox(
-            "tide titlebar (themed window chrome — matches the active theme)"
-        )
-
-        # ---- mini player (v1.2.7 redo — dedicated frameless window,
-        # opened by clicking the now-playing art or Ctrl+M). Everything
-        # here is also reachable from the mini's own right-click menu.
-        self.mini_default_toggle = QCheckBox("start in mini player")
-        # "follow" leads and "off" trails the real styles — the mini can
-        # mirror the main window or decline to paint at all.
-        self.mini_backdrop_picker = QComboBox()
-        for slug, label in (*backdrops.choices_with_follow(),
-                            (backdrops.OFF, backdrops.OFF_LABEL)):
-            self.mini_backdrop_picker.addItem(label, slug)
-        self.mini_progress_picker = QComboBox()
-        self.mini_progress_picker.addItem("border ring · the window edge fills", "ring")
-        self.mini_progress_picker.addItem("thin bar", "thin")
-        self.mini_pin_toggle = QCheckBox("pin on top of other windows")
-        self.mini_ticker_toggle = QCheckBox("live synced-lyric ticker line")
-        self.mini_zen_toggle = QCheckBox("auto-hide controls when idle")
-        self.mini_pulse_toggle = QCheckBox("backdrop breathes with the bass")
-        self.mini_pulse_resize_toggle = QCheckBox(
-            "window breathes too · resizes on bass"
-        )
-        # The resize rides the pulse envelope — no pulse, nothing to ride.
-        self.mini_pulse_toggle.toggled.connect(
-            self.mini_pulse_resize_toggle.setEnabled
-        )
-        self.mini_vis_toggle = QCheckBox("visualizer instead of album art")
-
-        appearance_form = QFormLayout()
-        appearance_form.addRow("theme:", self.theme_picker)
-        appearance_form.addRow("layout:", self.layout_picker)
-        appearance_form.addRow("  progress:", self._slot_pickers["progress"])
-        appearance_form.addRow("  volume:", self._slot_pickers["volume"])
-        appearance_form.addRow("  album art:", self._slot_pickers["album_art"])
-        appearance_form.addRow("  controls:", self._slot_pickers["controls"])
-        appearance_form.addRow("  label:", self._slot_pickers["now_label"])
-        appearance_form.addRow("thumbnails:", self.thumbnails_picker)
-        appearance_form.addRow("adaptive:", self.adaptive_toggle)
-        appearance_form.addRow("", self.adaptive_bg_toggle)
-        appearance_form.addRow("  style:", self.adaptive_style_picker)
-        appearance_form.addRow("", self.adaptive_pulse_toggle)
-        appearance_form.addRow("corners:", self.corner_picker)
-        appearance_form.addRow("nav icons:", self.nav_icons_picker)
-        appearance_form.addRow("", self.csd_toggle)
-        appearance_form.addRow("font:", self.font_picker)
-        appearance_form.addRow("  size:", self.font_size_spin)
-        appearance_form.addRow("text case:", self.case_picker)
-        appearance_form.addRow("loading bar:", self.loading_picker)
-        appearance_form.addRow("home layout:", self.home_layout_picker)
-        appearance_form.addRow("motion:", self.motion_picker)
-        appearance_form.addRow("", self.ui_sounds_toggle)
-        appearance_form.addRow("ui scale:", self.scale_picker)
-        appearance_form.addRow("visualizer audio:", self.audio_device_picker)
-
-        mini_form = QFormLayout()
-        mini_form.addRow("", self.mini_default_toggle)
-        mini_form.addRow("backdrop:", self.mini_backdrop_picker)
-        mini_form.addRow("progress:", self.mini_progress_picker)
-        mini_form.addRow("", self.mini_pin_toggle)
-        mini_form.addRow("", self.mini_ticker_toggle)
-        mini_form.addRow("", self.mini_zen_toggle)
-        mini_form.addRow("", self.mini_pulse_toggle)
-        mini_form.addRow("", self.mini_pulse_resize_toggle)
-        mini_form.addRow("", self.mini_vis_toggle)
-
-        mini_blurb = QLabel(
-            "the small frameless window. open it by clicking the "
-            "now-playing art or ctrl+m. everything here is also on the "
-            "mini's own right-click menu."
-        )
-        mini_blurb.setWordWrap(True)
-        mini_blurb.setProperty("class", "dim")
-
-        # ---- playback ----
-        self.prefetch_hover_toggle = QCheckBox(
-            "pre-resolve stream on hover"
-        )
-        self.prefetch_warm_picker = QComboBox()
-        self.prefetch_warm_picker.addItem("off", 0)
-        self.prefetch_warm_picker.addItem("top 2", 2)
-        self.prefetch_warm_picker.addItem("top 3", 3)
-        self.prefetch_warm_picker.addItem("top 5", 5)
-
-        prefetch_explainer = QLabel(
-            "resolves stream urls before you click so playback starts "
-            "faster. hover resolves the row under the mouse. warm results "
-            "resolves the top few search hits in the background."
-        )
-        prefetch_explainer.setWordWrap(True)
-        prefetch_explainer.setProperty("class", "dim")
-
-        playback_form = QFormLayout()
-        playback_form.addRow("", self.prefetch_hover_toggle)
-        playback_form.addRow("warm results:", self.prefetch_warm_picker)
-        playback_form.addRow("speed:", self.preserve_pitch_toggle)
-
-        playback_col = QVBoxLayout()
-        playback_col.setSpacing(6)
-        playback_col.addLayout(playback_form)
-        playback_col.addWidget(prefetch_explainer)
-
-        # ---- discord ----
-        discord_heading = QLabel("── discord rich presence ──")
-        discord_heading.setProperty("class", "dim")
-
-        self.discord_toggle = QCheckBox("enable discord rich presence")
-        self.discord_toggle.toggled.connect(self._on_discord_toggle)
-
-        self.discord_app_id = QLineEdit()
-        self.discord_app_id.setPlaceholderText("paste discord application id")
-        self.discord_app_id.setEnabled(False)
-
-        self.discord_help = QPushButton("get an app id  →")
-        self.discord_help.setFlat(True)
-        self.discord_help.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(DISCORD_HELP_URL))
-        )
-
-        discord_explainer = QLabel(
-            "create a new application at the discord developer portal, "
-            "copy its application id, paste it here. tide will show whatever "
-            "name / image you gave that app."
-        )
-        discord_explainer.setWordWrap(True)
-        discord_explainer.setProperty("class", "dim")
-
-        self.discord_lyrics_toggle = QCheckBox("show live lyric in presence")
-        self.discord_lyrics_toggle.setEnabled(False)
-
-        discord_lyrics_explainer = QLabel(
-            "when the playing track has synced lyrics, the current line "
-            "replaces artist · album on your profile. everyone can see it, "
-            "and lyrics can be explicit. off by default."
-        )
-        discord_lyrics_explainer.setWordWrap(True)
-        discord_lyrics_explainer.setProperty("class", "dim")
-
-        # Presence customization — how the activity reads on the profile.
-        self.discord_paused_toggle = QCheckBox(
-            "keep a '⏸ paused' presence instead of clearing it"
-        )
-        self.discord_paused_toggle.setEnabled(False)
-        self.discord_progress_toggle = QCheckBox(
-            "show the elapsed / total progress bar"
-        )
-        self.discord_progress_toggle.setEnabled(False)
-        self.discord_activity_picker = QComboBox()
-        self.discord_activity_picker.addItem("listening to …", "listening")
-        self.discord_activity_picker.addItem("playing …", "playing")
-        self.discord_activity_picker.addItem("watching …", "watching")
-        self.discord_activity_picker.setEnabled(False)
-        self.discord_details_edit = QLineEdit()
-        self.discord_details_edit.setPlaceholderText("default · {title}")
-        self.discord_details_edit.setEnabled(False)
-        self.discord_state_edit = QLineEdit()
-        self.discord_state_edit.setPlaceholderText("default · {artists} · {album}")
-        self.discord_state_edit.setEnabled(False)
-
-        discord_tpl_explainer = QLabel(
-            "the two lines take {title} {artists} {album} {source} "
-            "placeholders. leave empty for the defaults. the live lyric "
-            "(above) still takes over the second line while one is playing."
-        )
-        discord_tpl_explainer.setWordWrap(True)
-        discord_tpl_explainer.setProperty("class", "dim")
-
-        discord_id_row = QHBoxLayout()
-        discord_id_row.addWidget(self.discord_app_id, stretch=1)
-        discord_id_row.addWidget(self.discord_help)
-
-        discord_custom_form = QFormLayout()
-        discord_custom_form.addRow("activity verb:", self.discord_activity_picker)
-        discord_custom_form.addRow("line 1:", self.discord_details_edit)
-        discord_custom_form.addRow("line 2:", self.discord_state_edit)
-
-        discord_col = QVBoxLayout()
-        discord_col.setSpacing(6)
-        discord_col.addWidget(self.discord_toggle)
-        discord_col.addLayout(discord_id_row)
-        discord_col.addWidget(discord_explainer)
-        discord_col.addWidget(self.discord_lyrics_toggle)
-        discord_col.addWidget(discord_lyrics_explainer)
-        discord_col.addWidget(self.discord_paused_toggle)
-        discord_col.addWidget(self.discord_progress_toggle)
-        discord_col.addLayout(discord_custom_form)
-        discord_col.addWidget(discord_tpl_explainer)
-
-        # ---- listenbrainz ----
-        lb_heading = QLabel("── listenbrainz scrobbling ──")
-        lb_heading.setProperty("class", "dim")
-
-        self.lb_toggle = QCheckBox("enable listenbrainz scrobbling")
-        self.lb_token = QLineEdit()
-        self.lb_token.setPlaceholderText("paste your listenbrainz user token")
-        self.lb_token.setEchoMode(QLineEdit.Password)
-        self.lb_token.setEnabled(False)
-        self.lb_toggle.toggled.connect(self.lb_token.setEnabled)
-
-        self.lb_help = QPushButton("get a token  →")
-        self.lb_help.setFlat(True)
-        self.lb_help.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl("https://listenbrainz.org/profile/"))
-        )
-
-        lb_token_row = QHBoxLayout()
-        lb_token_row.addWidget(self.lb_token, stretch=1)
-        lb_token_row.addWidget(self.lb_help)
-
-        lb_explainer = QLabel(
-            "submits 'playing now' on track start and a 'listen' once you've heard "
-            "the track for 30s (or 50% / 4 minutes). create an account at "
-            "listenbrainz.org → settings → token."
-        )
-        lb_explainer.setWordWrap(True)
-        lb_explainer.setProperty("class", "dim")
-
-        lb_col = QVBoxLayout()
-        lb_col.setSpacing(6)
-        lb_col.addWidget(self.lb_toggle)
-        lb_col.addLayout(lb_token_row)
-        lb_col.addWidget(lb_explainer)
-
-        # ---- youtube music session ----
-        session_heading = QLabel("── youtube music session ─────")
-        session_heading.setProperty("class", "dim")
-
-        self.refresh_session_btn = QPushButton("refresh session")
-        self.refresh_session_btn.clicked.connect(self._on_refresh_session)
-
-        # Inline state: current session at rest, "checking browsers…" while
-        # the window's worker runs, then the outcome. The window also toasts,
-        # but this modal dialog sits over the toast host — the row is the
-        # feedback the user actually sees.
-        self.refresh_session_status = QLabel(self._session_state_text())
-        self.refresh_session_status.setProperty("class", "dim")
-        self.refresh_session_status.setWordWrap(True)
-
-        session_blurb = QLabel(
-            "pulls fresh cookies from whichever browser is still signed in "
-            "to youtube music. use it when tide wakes up with anonymous "
-            "results because the saved session expired. ctrl+shift+r does "
-            "the same thing without opening settings."
-        )
-        session_blurb.setWordWrap(True)
-        session_blurb.setProperty("class", "dim")
-
-        session_row = QHBoxLayout()
-        session_row.addWidget(self.refresh_session_btn)
-        session_row.addWidget(self.refresh_session_status, stretch=1)
-
-        session_col = QVBoxLayout()
-        session_col.setSpacing(6)
-        session_col.addLayout(session_row)
-        session_col.addWidget(session_blurb)
-
-        # ---- play reporting (v1.5) ----
-        report_heading = QLabel("── play reporting ────────────")
-        report_heading.setProperty("class", "dim")
-
-        self.report_plays_toggle = QCheckBox(
-            "report plays to youtube music")
-        report_explainer = QLabel(
-            "on: when a song starts, tide sends the same play event the "
-            "yt music web player sends. it goes to your own account and "
-            "nowhere else, and your history and recommendations pick up "
-            "what you play in tide. off: tide reports nothing, and the "
-            "only traffic is fetching the music."
-        )
-        report_explainer.setWordWrap(True)
-        report_explainer.setProperty("class", "dim")
-
-        self.taste_btn = QPushButton("tune recommendations  →")
-        self.taste_btn.setFlat(True)
-        self.taste_btn.clicked.connect(self._on_open_taste)
-        taste_blurb = QLabel(
-            "pick the artists youtube music should treat as your taste. "
-            "this steers home shelves and radio."
-        )
-        taste_blurb.setWordWrap(True)
-        taste_blurb.setProperty("class", "dim")
-
-        report_col = QVBoxLayout()
-        report_col.setSpacing(6)
-        report_col.addWidget(self.report_plays_toggle)
-        report_col.addWidget(report_explainer)
-        report_col.addSpacing(8)
-        report_col.addWidget(self.taste_btn, alignment=Qt.AlignLeft)
-        report_col.addWidget(taste_blurb)
-
-        # ---- audio fx ----
-        audio_fx_heading = QLabel("── audio fx ──────────────────")
-        audio_fx_heading.setProperty("class", "dim")
-        fx_blurb = QLabel(
-            "10-band eq + reverb + loudness norm + the rest of the rack.\n"
-            "open the full panel with ctrl+8 (or the [fx] nav tab), or use the [fx] popover on the now-playing strip."
-        )
-        fx_blurb.setProperty("class", "dim")
-        fx_blurb.setWordWrap(True)
-        self.audio_fx_open_btn = QPushButton("open audio fx panel  →")
-        self.audio_fx_open_btn.clicked.connect(self._on_open_audio_fx)
-        audio_fx_col = QVBoxLayout()
-        audio_fx_col.setSpacing(6)
-        audio_fx_col.addWidget(fx_blurb)
-        audio_fx_col.addWidget(self.audio_fx_open_btn, alignment=Qt.AlignLeft)
-
-        # ---- advanced ----
-        advanced_heading = QLabel("── advanced ──────────────────")
-        advanced_heading.setProperty("class", "dim")
-
-        self.sign_out_btn = QPushButton("sign out + re-import session")
-        self.sign_out_btn.clicked.connect(self._on_sign_out)
-
-        adv_col = QVBoxLayout()
-        adv_col.setSpacing(6)
-        adv_col.addWidget(self.sign_out_btn, alignment=Qt.AlignLeft)
-
-        # ---- about ----
-        about_heading = QLabel("── about ─────────────────────")
-        about_heading.setProperty("class", "dim")
-
+    def _about_items(self) -> list:
         from .. import __version__
         title = QLabel(f"tide  v{__version__}")
         title.setStyleSheet("font-weight: 600;")
-
         tagline = QLabel("a brutalist youtube music client.")
         tagline.setProperty("class", "dim")
-
         credits = QLabel(
             "built on:  pyside6 · mpv · ytmusicapi · yt-dlp · cryptography\n"
             "fonts:     ibm plex mono · ibm plex sans  (ofl)\n"
@@ -609,397 +597,271 @@ class SettingsDialog(QDialog):
         credits.setProperty("class", "dim")
         credits.setStyleSheet("font-family: monospace;")
         credits.setTextInteractionFlags(Qt.TextSelectableByMouse)
-
         self.repo_btn = QPushButton("github  →")
         self.repo_btn.setFlat(True)
         self.repo_btn.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl("https://github.com/captiencelovesarch/tide"))
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://github.com/captiencelovesarch/tide"))
         )
-
         self.issues_btn = QPushButton("report a bug  →")
         self.issues_btn.setFlat(True)
         self.issues_btn.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl("https://github.com/captiencelovesarch/tide/issues"))
+            lambda: QDesktopServices.openUrl(
+                QUrl("https://github.com/captiencelovesarch/tide/issues"))
         )
-
         about_links = QHBoxLayout()
         about_links.addWidget(self.repo_btn)
         about_links.addWidget(self.issues_btn)
         about_links.addStretch(1)
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        col.addWidget(title)
+        col.addWidget(tagline)
+        col.addSpacing(6)
+        col.addWidget(credits)
+        col.addLayout(about_links)
+        heading = _dim(QLabel(line_heading("about", 34)))
+        return [heading, col]
 
-        about_col = QVBoxLayout()
-        about_col.setSpacing(4)
-        about_col.addWidget(title)
-        about_col.addWidget(tagline)
-        about_col.addSpacing(6)
-        about_col.addWidget(credits)
-        about_col.addLayout(about_links)
-
-        # ---- buttons ----
-        self.save_btn = QPushButton("save")
-        self.save_btn.setDefault(True)
-        self.save_btn.clicked.connect(self._on_save)
-
-        self.cancel_btn = QPushButton("cancel")
-        self.cancel_btn.clicked.connect(self._on_cancel)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        btn_row.addWidget(self.cancel_btn)
-        btn_row.addWidget(self.save_btn)
-
-        # ---- assemble: tabbed pages, each independently scrollable, so no
-        # section is ever buried a full page-scroll away ----
-        def _page(*items) -> QScrollArea:
-            content = QWidget()
-            col = QVBoxLayout(content)
-            col.setContentsMargins(6, 10, 6, 10)
-            col.setSpacing(12)
-            for item in items:
-                if isinstance(item, QWidget):
-                    col.addWidget(item)
-                else:
-                    col.addLayout(item)
-            col.addStretch(1)
-            scroll = QScrollArea()
-            scroll.setWidget(content)
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            return scroll
-
-        tabs = QTabWidget()
-        tabs.setDocumentMode(True)
-        tabs.addTab(_page(appearance_form), "appearance")
-        tabs.addTab(_page(mini_blurb, mini_form), "mini player")
-        tabs.addTab(_page(playback_col, audio_fx_heading, audio_fx_col),
-                    "playback")
-        tabs.addTab(_page(discord_heading, discord_col, lb_heading, lb_col,
-                          session_heading, session_col,
-                          report_heading, report_col),
-                    "integrations")
-        tabs.addTab(_page(advanced_heading, adv_col, about_heading, about_col),
-                    "advanced")
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 18, 22, 14)
-        root.setSpacing(10)
-        root.addWidget(tabs, stretch=1)
-        root.addLayout(btn_row)
+    # ---------- populate / read / diff ----------
 
     def _populate(self) -> None:
-        # Block currentIndexChanged on EVERY picker we're about to set, so
-        # we don't trigger live-apply cascades (theme, layout, slots) just
-        # for loading the saved values. Side-effect of apply happens on
-        # explicit user change instead.
-        all_pickers = [
-            self.theme_picker, self.thumbnails_picker, self.audio_device_picker,
-            self.layout_picker, *self._slot_pickers.values(),
-        ]
-        for cb in all_pickers:
-            cb.blockSignals(True)
+        """Load the live settings into every generated widget, with all
+        change handling suppressed — loading saved values must not fire
+        the live-apply previews (theme, layout, …)."""
+        self._populating = True
         try:
-            self._populate_pickers()
+            for desc in self._descs:
+                self._originals[desc.key] = self._normalize(
+                    desc, getattr(self._settings, desc.key))
+                self._populate_widget(desc)
+            for controller in _ENABLE_RULES:
+                self._apply_enable_rule(controller)
         finally:
-            for cb in all_pickers:
-                cb.blockSignals(False)
+            self._populating = False
 
-    def _populate_pickers(self) -> None:
-        themes = theming.discover_themes()
-        # Sort by name for stable display.
-        for slug, theme in sorted(themes.items(), key=lambda kv: kv[1].name):
-            self.theme_picker.addItem(theme.name, slug)
-        idx = self.theme_picker.findData(self._settings.theme)
-        if idx >= 0:
-            self.theme_picker.setCurrentIndex(idx)
-
-        thumb_idx = self.thumbnails_picker.findData(self._settings.show_thumbnails or "theme")
-        if thumb_idx >= 0:
-            self.thumbnails_picker.setCurrentIndex(thumb_idx)
-
-        dev_idx = self.audio_device_picker.findData(self._settings.audio_device or "")
-        if dev_idx >= 0:
-            self.audio_device_picker.setCurrentIndex(dev_idx)
-
-        # Layout + overrides.
-        lay_idx = self.layout_picker.findData(self._settings.layout or "classic")
-        if lay_idx >= 0:
-            self.layout_picker.setCurrentIndex(lay_idx)
-        overrides = self._settings.layout_overrides or {}
-        for slot, cb in self._slot_pickers.items():
-            val = overrides.get(slot, "")
-            idx = cb.findData(val)
+    def _populate_widget(self, desc: settings_schema.OptionDesc) -> None:
+        w = self._widgets[desc.key]
+        raw = getattr(self._settings, desc.key)
+        if desc.kind == "bool":
+            w.setChecked(bool(raw))
+        elif desc.kind == "choice":
+            idx = w.findData(raw)
+            if idx < 0:
+                # Stored value isn't pickable (stale slug etc.) — show the
+                # dataclass default, which the schema meta-test guarantees
+                # is always a real row.
+                idx = w.findData(getattr(self._defaults, desc.key))
             if idx >= 0:
-                cb.setCurrentIndex(idx)
-        self.adaptive_toggle.setChecked(self._settings.adaptive_accent)
+                w.setCurrentIndex(idx)
+        elif desc.kind == "int":
+            w.setValue(int(raw or 0))
+        elif desc.kind == "str":
+            w.setText(str(raw or ""))
+        elif desc.kind == "font":
+            value = str(raw or "")
+            idx = w.findData(value)
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+            else:
+                # Custom family not in the list — show it in the editable
+                # combo's text field directly.
+                w.setCurrentText(value)
+        # custom widgets own their own populate
 
-        loading_idx = self.loading_picker.findData(
-            self._settings.loading_indicator_style or "blocks"
-        )
-        if loading_idx >= 0:
-            self.loading_picker.setCurrentIndex(loading_idx)
+    def _normalize(self, desc: settings_schema.OptionDesc, raw) -> object:
+        """The opening value through the same lens _read_value uses, so
+        an untouched widget can never register as a phantom diff."""
+        if desc.kind == "bool":
+            return bool(raw)
+        if desc.kind == "int":
+            return int(raw or 0)
+        if desc.kind in ("str", "font"):
+            return str(raw or "").strip()
+        return raw
 
-        home_idx = self.home_layout_picker.findData(
-            getattr(self._settings, "home_layout", "patterns") or "patterns")
-        if home_idx >= 0:
-            self.home_layout_picker.setCurrentIndex(home_idx)
-        motion_idx = self.motion_picker.findData(self._settings.motion or "lite")
-        if motion_idx >= 0:
-            self.motion_picker.setCurrentIndex(motion_idx)
+    def _read_value(self, desc: settings_schema.OptionDesc):
+        w = self._widgets[desc.key]
+        if desc.kind == "bool":
+            return bool(w.isChecked())
+        if desc.kind == "choice":
+            data = w.currentData()
+            return self._originals.get(desc.key) if data is None else data
+        if desc.kind == "int":
+            return int(w.value())
+        if desc.kind == "str":
+            return w.text().strip()
+        if desc.kind == "font":
+            # A picked row's data wins — INCLUDING the "from theme" row,
+            # whose data is deliberately "". Free text only counts when it
+            # differs from the selected row's label, i.e. the user actually
+            # typed a family name (the "from theme"-as-a-font regression).
+            data = w.currentData()
+            text = w.currentText().strip()
+            row_label = w.itemText(w.currentIndex()).strip()
+            value = data if text == row_label else text
+            return value or ""
+        return self._originals.get(desc.key)   # custom: widget owns state
 
-        scale_idx = self.scale_picker.findData(self._settings.ui_scale or "normal")
-        if scale_idx >= 0:
-            self.scale_picker.setCurrentIndex(scale_idx)
+    def widget_for(self, key: str) -> QWidget | None:
+        return self._widgets.get(key)
 
-        self.preserve_pitch_toggle.setChecked(bool(self._settings.preserve_pitch))
-        self.ui_sounds_toggle.setChecked(bool(self._settings.ui_sounds_enabled))
-        self.csd_toggle.setChecked(bool(self._settings.csd_titlebar))
-        self.adaptive_bg_toggle.setChecked(bool(self._settings.adaptive_background))
-        style_idx = self.adaptive_style_picker.findData(
-            self._settings.adaptive_background_style or "field"
-        )
-        if style_idx >= 0:
-            self.adaptive_style_picker.setCurrentIndex(style_idx)
-        self.adaptive_pulse_toggle.setChecked(bool(self._settings.adaptive_pulse))
-        self.adaptive_pulse_toggle.setEnabled(bool(self._settings.adaptive_background))
-        self.adaptive_style_picker.setEnabled(bool(self._settings.adaptive_background))
-        corner_idx = self.corner_picker.findData(self._settings.corner_style or "sharp")
-        if corner_idx >= 0:
-            self.corner_picker.setCurrentIndex(corner_idx)
-        nav_idx = self.nav_icons_picker.findData(self._settings.nav_icon_set or "off")
-        if nav_idx >= 0:
-            self.nav_icons_picker.setCurrentIndex(nav_idx)
-        font_override = self._settings.font_family_override or ""
-        font_idx = self.font_picker.findData(font_override)
-        if font_idx >= 0:
-            self.font_picker.setCurrentIndex(font_idx)
-        else:
-            # Custom value not in the preset list — show it in the editable
-            # combo's text field directly.
-            self.font_picker.setCurrentText(font_override)
-        self.font_size_spin.setValue(int(self._settings.font_size_override_pt or 0))
+    # ---------- change handling / previews ----------
 
-        self.mini_default_toggle.setChecked(bool(self._settings.mini_mode_default))
-        mini_bd_idx = self.mini_backdrop_picker.findData(
-            self._settings.mini_backdrop_style or "follow"
-        )
-        if mini_bd_idx >= 0:
-            self.mini_backdrop_picker.setCurrentIndex(mini_bd_idx)
-        mini_pr_idx = self.mini_progress_picker.findData(
-            self._settings.mini_progress_style or "ring"
-        )
-        if mini_pr_idx >= 0:
-            self.mini_progress_picker.setCurrentIndex(mini_pr_idx)
-        self.mini_pin_toggle.setChecked(bool(self._settings.mini_pin))
-        self.mini_ticker_toggle.setChecked(bool(self._settings.mini_ticker))
-        self.mini_zen_toggle.setChecked(bool(self._settings.mini_zen))
-        self.mini_pulse_toggle.setChecked(bool(self._settings.mini_pulse))
-        self.mini_pulse_resize_toggle.setChecked(
-            bool(self._settings.mini_pulse_resize))
-        self.mini_pulse_resize_toggle.setEnabled(bool(self._settings.mini_pulse))
-        self.mini_vis_toggle.setChecked(
-            bool(self._settings.mini_show_visualizer))
-
-        self.prefetch_hover_toggle.setChecked(bool(self._settings.prefetch_hover))
-        warm_idx = self.prefetch_warm_picker.findData(
-            int(self._settings.prefetch_warm_results or 0)
-        )
-        if warm_idx >= 0:
-            self.prefetch_warm_picker.setCurrentIndex(warm_idx)
-
-        case_idx = self.case_picker.findData(self._settings.text_case_override or "")
-        if case_idx >= 0:
-            self.case_picker.setCurrentIndex(case_idx)
-
-        on = self._settings.discord_enabled
-        self.discord_toggle.setChecked(on)
-        self.discord_app_id.setText(self._settings.discord_app_id)
-        self.discord_lyrics_toggle.setChecked(self._settings.discord_lyrics_enabled)
-        self.discord_paused_toggle.setChecked(bool(self._settings.discord_show_paused))
-        self.discord_progress_toggle.setChecked(
-            bool(self._settings.discord_show_progress))
-        act_idx = self.discord_activity_picker.findData(
-            self._settings.discord_activity_type or "listening")
-        if act_idx >= 0:
-            self.discord_activity_picker.setCurrentIndex(act_idx)
-        self.discord_details_edit.setText(self._settings.discord_details_template)
-        self.discord_state_edit.setText(self._settings.discord_state_template)
-        self._on_discord_toggle(on)
-
-        self.lb_toggle.setChecked(self._settings.listenbrainz_enabled)
-        self.lb_token.setText(self._settings.listenbrainz_token)
-        self.lb_token.setEnabled(self._settings.listenbrainz_enabled)
-
-        self.report_plays_toggle.setChecked(
-            getattr(self._settings, "report_plays", False))
-
-    # ---------- handlers ----------
-
-    def _on_theme_changed(self, _idx: int) -> None:
-        slug = self.theme_picker.currentData()
-        if slug:
-            theming.manager().apply(slug)
-
-    def _on_layout_changed(self, _idx: int) -> None:
-        slug = self.layout_picker.currentData()
-        if not slug:
+    def _on_option_changed(self, key: str) -> None:
+        if self._populating:
             return
-        from .. import layout as layout_module
-        # Live-apply preview through the parent MainWindow.
-        parent = self.parent()
-        if parent is not None and hasattr(parent, "apply_layout"):
-            effective = layout_module.manager().apply(slug, dict(self._gather_overrides()))
-            if effective is not None:
-                parent.apply_layout(effective)
+        desc = self._by_key[key]
+        value = self._read_value(desc)
+        self._pending[key] = value
+        if key in _ENABLE_RULES:
+            self._apply_enable_rule(key)
+        if desc.preview:
+            self._apply_preview(key, value)
 
-    def _on_slot_override(self, slot: str) -> None:
-        overrides = dict(self._gather_overrides())
-        from .. import layout as layout_module
-        effective = layout_module.manager().update_overrides(overrides)
-        parent = self.parent()
-        if parent is not None and hasattr(parent, "apply_layout"):
-            parent.apply_layout(effective)
+    def _apply_enable_rule(self, controller: str) -> None:
+        on = bool(self._read_value(self._by_key[controller]))
+        for dep in _ENABLE_RULES[controller]:
+            w = self._widgets.get(dep)
+            if w is not None:
+                w.setEnabled(on)
 
-    def _gather_overrides(self) -> dict[str, str]:
-        out: dict[str, str] = {}
-        for slot, cb in self._slot_pickers.items():
-            val = cb.currentData() or ""
-            if val:
-                out[slot] = val
-        return out
+    def _apply_preview(self, key: str, value) -> None:
+        """Live-preview one preview-flagged option through the managers.
+        Never persists anything — cancel reverts via the opening snapshot
+        (_on_cancel), and the managers no-op on same-value pushes so a
+        populate-or-return-to-original change is harmless."""
+        if key == "theme":
+            if value:
+                theming.manager().apply(str(value))
+        elif key == "font_family_override":
+            theming.manager().set_user_font(str(value or ""))
+        elif key == "font_size_override_pt":
+            theming.manager().set_user_font_size(int(value or 0))
+        elif key == "text_case_override":
+            theming.set_case_override(str(value or ""))
+        elif key == "show_thumbnails":
+            self._push_thumbnails(str(value or "theme"))
+        elif key == "layout":
+            self._preview_layout(str(value or ""))
 
-    def _on_adaptive_toggled(self, on: bool) -> None:
-        # P5.3 wires the driver — here we just persist.
-        pass
-
-    def _on_thumbnails_changed(self, _idx: int) -> None:
+    def _push_thumbnails(self, value: str) -> None:
         from .track_row import set_thumbnail_override
-        value = self.thumbnails_picker.currentData() or "theme"
         set_thumbnail_override(value)
         # Force the live theme to re-emit so attached delegates repaint.
         current = theming.manager().current()
         if current is not None:
             theming.manager().theme_changed.emit(current)
 
-    def _on_discord_toggle(self, on: bool) -> None:
-        self.discord_app_id.setEnabled(on)
-        self.discord_lyrics_toggle.setEnabled(on)
-        self.discord_paused_toggle.setEnabled(on)
-        self.discord_progress_toggle.setEnabled(on)
-        self.discord_activity_picker.setEnabled(on)
-        self.discord_details_edit.setEnabled(on)
-        self.discord_state_edit.setEnabled(on)
+    def _preview_layout(self, slug: str) -> None:
+        """Live-apply a layout pick through the parent MainWindow. The
+        per-slot overrides ride along unchanged from settings — the strip
+        builder owns editing those."""
+        if not slug:
+            return
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "apply_layout"):
+            return
+        from .. import layout as layout_module
+        effective = layout_module.manager().apply(
+            slug, dict(self._settings.layout_overrides or {}))
+        if effective is not None:
+            parent.apply_layout(effective)
 
-    def _on_case_changed(self, _idx: int) -> None:
-        """Live-preview the text-case override. set_case_override no-ops on
-        the same value, so populate-time setCurrentIndex is harmless."""
-        theming.set_case_override(self.case_picker.currentData() or "")
+    # ---------- accept / cancel ----------
 
     def _on_save(self) -> None:
-        self._settings.theme = self.theme_picker.currentData() or self._initial_theme
-        self._settings.discord_enabled = self.discord_toggle.isChecked()
-        self._settings.discord_app_id = self.discord_app_id.text().strip()
-        self._settings.discord_lyrics_enabled = self.discord_lyrics_toggle.isChecked()
-        self._settings.discord_show_paused = self.discord_paused_toggle.isChecked()
-        self._settings.discord_show_progress = self.discord_progress_toggle.isChecked()
-        self._settings.discord_activity_type = (
-            self.discord_activity_picker.currentData() or "listening"
-        )
-        self._settings.discord_details_template = (
-            self.discord_details_edit.text().strip()
-        )
-        self._settings.discord_state_template = self.discord_state_edit.text().strip()
-        self._settings.text_case_override = self.case_picker.currentData() or ""
-        self._settings.show_thumbnails = self.thumbnails_picker.currentData() or "theme"
-        self._settings.audio_device = self.audio_device_picker.currentData() or ""
-        self._settings.listenbrainz_enabled = self.lb_toggle.isChecked()
-        self._settings.listenbrainz_token = self.lb_token.text().strip()
-        # Flipping the toggle (or having it on at all) counts as answering
-        # the play-reporting question — the one-time upgrade pointer stops.
-        # Saving with it untouched-and-off doesn't: we can't know the user
-        # ever looked at this tab.
-        report_on = self.report_plays_toggle.isChecked()
-        if report_on or self._settings.report_plays != report_on:
-            self._settings.report_plays_answered = True
-        self._settings.report_plays = report_on
-        self._settings.layout = self.layout_picker.currentData() or "classic"
-        self._settings.layout_overrides = self._gather_overrides()
-        self._settings.adaptive_accent = self.adaptive_toggle.isChecked()
-        self._settings.loading_indicator_style = (
-            self.loading_picker.currentData() or "blocks"
-        )
-        self._settings.home_layout = (
-            self.home_layout_picker.currentData() or "patterns")
-        self._settings.motion = self.motion_picker.currentData() or "lite"
-        self._settings.ui_scale = self.scale_picker.currentData() or "normal"
-        self._settings.preserve_pitch = self.preserve_pitch_toggle.isChecked()
-        self._settings.ui_sounds_enabled = self.ui_sounds_toggle.isChecked()
-        self._settings.csd_titlebar = self.csd_toggle.isChecked()
-        self._settings.prefetch_hover = self.prefetch_hover_toggle.isChecked()
-        self._settings.prefetch_warm_results = int(
-            self.prefetch_warm_picker.currentData() or 0
-        )
-        self._settings.adaptive_background = self.adaptive_bg_toggle.isChecked()
-        self._settings.adaptive_background_style = (
-            self.adaptive_style_picker.currentData() or "field"
-        )
-        self._settings.adaptive_pulse = self.adaptive_pulse_toggle.isChecked()
-        self._settings.mini_mode_default = self.mini_default_toggle.isChecked()
-        self._settings.mini_backdrop_style = (
-            self.mini_backdrop_picker.currentData() or "follow"
-        )
-        self._settings.mini_progress_style = (
-            self.mini_progress_picker.currentData() or "ring"
-        )
-        self._settings.mini_pin = self.mini_pin_toggle.isChecked()
-        self._settings.mini_ticker = self.mini_ticker_toggle.isChecked()
-        self._settings.mini_zen = self.mini_zen_toggle.isChecked()
-        self._settings.mini_pulse = self.mini_pulse_toggle.isChecked()
-        self._settings.mini_pulse_resize = (
-            self.mini_pulse_resize_toggle.isChecked()
-        )
-        self._settings.mini_show_visualizer = self.mini_vis_toggle.isChecked()
-        self._settings.corner_style = self.corner_picker.currentData() or "sharp"
-        self._settings.nav_icon_set = self.nav_icons_picker.currentData() or "off"
-        # Prefer the picker's data (preset family) if it's still selected;
-        # fall back to the editable text for free-form entries.
-        # A picked row's data wins — INCLUDING the "from theme" row, whose
-        # data is deliberately "". The old `data or text` fallthrough saved
-        # the row's display label ("from theme") as a literal font family.
-        # Free text only counts when it differs from the selected row's
-        # label, i.e. the user actually typed a family name.
-        font_data = self.font_picker.currentData()
-        font_text = self.font_picker.currentText().strip()
-        row_label = self.font_picker.itemText(self.font_picker.currentIndex()).strip()
-        font_value = font_data if font_text == row_label else font_text
-        self._settings.font_family_override = font_value or ""
-        self._settings.font_size_override_pt = int(self.font_size_spin.value())
-        settings_module.save(self._settings)
+        """Diff-apply: write ONLY the fields whose widget value differs
+        from the opening snapshot onto the live settings, save exactly
+        those via save_fields, and remember the changed keys for the
+        window's live-apply chain."""
+        s = self._settings
+        changed: list[str] = []
+        for desc in self._descs:
+            value = self._read_value(desc)
+            if value is None:
+                continue
+            if value != self._originals[desc.key]:
+                setattr(s, desc.key, value)
+                changed.append(desc.key)
+        # A parked strip-builder pick commits WITH the layout it was
+        # built against — only if the accepted layout still IS that
+        # layout. A pick whose base the combo abandoned afterwards is
+        # dropped: its diff describes another layout's slots, and
+        # committing it is exactly the skew this parking prevents (the
+        # combo move already re-previewed the window past it).
+        parked = self._pending_strip_overrides
+        if parked is not None:
+            self._pending_strip_overrides = None
+            if (s.layout or "classic") == self._pending_strip_base:
+                self._commit_strip_overrides(parked)
+        # Flipping the play-reporting toggle (or having it on at all)
+        # counts as answering the one-time question — the upgrade pointer
+        # stops. Saving with it untouched-and-off doesn't: we can't know
+        # the user ever looked at this tab.
+        if ((bool(s.report_plays) or "report_plays" in changed)
+                and not s.report_plays_answered):
+            s.report_plays_answered = True
+            changed.append("report_plays_answered")
+        self._accepted_changes = tuple(changed)
+        self._accepted = True
+        if changed:
+            settings_module.save_fields(s, *changed)
         self.accept()
 
-    def _on_font_changed(self, _idx: int) -> None:
-        """Live-preview a picked family. Idempotent (set_user_font no-ops on
-        the same value), so the populate-time setCurrentIndex is harmless."""
-        theming.manager().set_user_font(self.font_picker.currentData() or "")
-
-    def _on_font_size_changed(self, value: int) -> None:
-        theming.manager().set_user_font_size(int(value))
+    def changed_keys(self) -> tuple[str, ...]:
+        """The accepted diff — what the window's live-apply chain runs
+        on. Empty until an accept happens."""
+        return self._accepted_changes
 
     def _on_cancel(self) -> None:
-        # Revert live previews. Fonts + case preview live too — put back
-        # whatever the session started with (no-ops when untouched).
+        # The [cancel] button. Everything happens in reject() so that
+        # button-cancel, Esc and the window-manager close share ONE
+        # revert path.
+        self.reject()
+
+    def reject(self) -> None:   # cancel button, Esc, AND window close
+        """QDialog routes its built-in cancel paths — the Esc key and
+        the titlebar close — straight here, NOT through the cancel
+        button. The preview revert therefore lives here, guarded so it
+        runs once and never after an accept: previews never commit, on
+        ANY way out (rule 8; phase 1's browse-flip bug class)."""
+        if not self._accepted and not self._reverted:
+            self._reverted = True
+            self._revert_previews()
+        super().reject()
+
+    def _revert_previews(self) -> None:
+        # Put back whatever the session started with (no-ops when
+        # untouched). Previews never commit.
         theming.manager().set_user_font(self._initial_font)
         theming.manager().set_user_font_size(self._initial_font_size)
         theming.set_case_override(self._initial_case)
-        if self._initial_theme and self._initial_theme != self.theme_picker.currentData():
+        theme_now = self._widgets["theme"].currentData()
+        if self._initial_theme and self._initial_theme != theme_now:
             theming.manager().apply(self._initial_theme)
-        if self._initial_thumbnails != (self.thumbnails_picker.currentData() or "theme"):
-            from .track_row import set_thumbnail_override
-            set_thumbnail_override(self._initial_thumbnails)
-            current = theming.manager().current()
-            if current is not None:
-                theming.manager().theme_changed.emit(current)
-        self.reject()
+        thumbs_now = self._widgets["show_thumbnails"].currentData() or "theme"
+        if self._initial_thumbnails != thumbs_now:
+            self._push_thumbnails(self._initial_thumbnails)
+        layout_now = self._widgets["layout"].currentData() or "classic"
+        if (self._initial_layout != layout_now
+                or self._pending_strip_overrides is not None):
+            # A parked strip pick is pixels-only — dropping the dict and
+            # re-applying the opening layout+overrides erases it.
+            self._pending_strip_overrides = None
+            self._revert_layout_preview()
+
+    def _revert_layout_preview(self) -> None:
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "apply_layout"):
+            return
+        from .. import layout as layout_module
+        effective = layout_module.manager().apply(
+            self._initial_layout, dict(self._initial_overrides))
+        if effective is not None:
+            parent.apply_layout(effective)
+
+    # ---------- session / advanced chrome handlers ----------
 
     def _on_sign_out(self) -> None:
         # Defer the confirm/inform message boxes past this button's click
@@ -1030,6 +892,26 @@ class SettingsDialog(QDialog):
         while win is not None and not hasattr(win, "refresh_session_manual"):
             win = win.parent()
         return win
+
+    def _binding_text(self, action_id: str, fallback: str) -> str:
+        """A live key binding for dialog blurbs, resolved through the
+        main window's keymap (binding_display) so a rebind can't orphan
+        the copy. Parentless dialogs (tests) fall back to the shipped
+        default text; a deliberately unbound action resolves to "" so
+        callers drop the key mention entirely."""
+        win = self._find_main_window()
+        if win is not None and hasattr(win, "binding_display"):
+            return win.binding_display(action_id)
+        return fallback
+
+    def _tool_sound(self, key: str) -> None:
+        """Click feedback for the power-tool launchers, routed through
+        the main window's UiSoundPlayer (the _ui_sound pattern — this
+        dialog has no player of its own). Silently absent when the
+        dialog is parentless."""
+        win = self._find_main_window()
+        if win is not None and hasattr(win, "_ui_sound"):
+            win._ui_sound(key)
 
     def _session_state_text(self) -> str:
         """The yt session at rest, phrased for the settings row. Expiry is
@@ -1070,6 +952,11 @@ class SettingsDialog(QDialog):
         self.refresh_session_status.setText(message)
 
     def _on_open_taste(self) -> None:
+        # Deferred out of the click emission per the modal-from-click
+        # crash rule ([[feedback-pyside-modal]]).
+        QTimer.singleShot(0, self._do_open_taste)
+
+    def _do_open_taste(self) -> None:
         """v1.5 taste-profile editor. Talks to the live YT source from the
         registry; the button just reports when there isn't one."""
         from ..sources import registry
@@ -1095,6 +982,137 @@ class SettingsDialog(QDialog):
                 win._switch_view("audio_fx")
             except Exception:
                 pass
+
+    # ---------- power tools ----------
+
+    def _on_open_theme_editor(self) -> None:
+        # Deferred out of the click emission — constructing/exec'ing a
+        # modal inside a clicked() handler is the PySide6 + py3.14
+        # segfault pattern ([[feedback-pyside-modal]]).
+        self._tool_sound("modal_open")
+        QTimer.singleShot(0, self._do_open_theme_editor)
+
+    def _do_open_theme_editor(self) -> None:
+        from .theme_editor import ThemeEditorDialog
+        dlg = ThemeEditorDialog(parent=self)
+        dlg.theme_saved.connect(self._on_theme_saved)
+        dlg.exec()
+        dlg.deleteLater()
+        self._tool_sound("modal_close")
+
+    def _on_theme_saved(self, slug: str) -> None:
+        """A theme was just written AND applied by the editor (which also
+        refreshed the registry). Persisting ``settings.theme`` is OUR
+        job: repopulate the theme combo from the fresh registry and
+        select the new slug, so the pick rides the dialog's normal
+        pending-diff + accept path (save_fields, live-apply chain,
+        _reconcile_preset_after_dialog). Cancel still reverts the applied
+        theme — previews never commit; the saved theme dir simply stays
+        available in every picker."""
+        desc = self._by_key.get("theme")
+        combo = self._widgets.get("theme")
+        if desc is None or combo is None:
+            return
+        self._populating = True
+        try:
+            combo.clear()
+            for value, label in settings_schema.resolve_choices(desc):
+                combo.addItem(label, value)
+        finally:
+            self._populating = False
+        idx = combo.findData(slug)
+        if idx < 0:
+            return
+        if combo.currentIndex() == idx:
+            # Repopulate already left the combo on this row — the signal
+            # won't fire, so file the pending change by hand.
+            self._on_option_changed("theme")
+        else:
+            combo.setCurrentIndex(idx)
+
+    def _on_open_strip_builder(self) -> None:
+        """open_strip_builder defers construction internally — wiring it
+        straight to the click is sanctioned (no double-defer needed).
+        A parked pick (made while a layout preview is pending) re-opens
+        as the builder's starting state, not the stale saved dict."""
+        self._tool_sound("modal_open")
+        from .strip_builder import open_strip_builder
+        overrides = (dict(self._pending_strip_overrides)
+                     if self._pending_strip_overrides is not None
+                     else dict(self._settings.layout_overrides or {}))
+        open_strip_builder(
+            parent=self,
+            overrides=overrides,
+            on_chosen=self._on_strip_overrides,
+        )
+
+    def _layout_preview_pending(self) -> bool:
+        """True while the layout combo shows an unaccepted preview — the
+        layout manager is re-based on it, so a strip-builder diff made
+        now describes a layout settings doesn't hold yet."""
+        layout_now = self._widgets["layout"].currentData() or "classic"
+        return layout_now != self._initial_layout
+
+    def _on_strip_overrides(self, payload: dict) -> None:
+        """The strip builder's accepted diff. With no layout preview
+        pending it commits immediately through the window's sanctioned
+        route; with one pending it is PARKED — previewed on the window,
+        committed only when the dialog's accept commits the layout it
+        was diffed against, dropped on cancel. Only fires on a real
+        change; an empty dict means "clear back to the layout defaults"
+        and MUST still apply."""
+        if self._layout_preview_pending():
+            self._pending_strip_overrides = dict(payload)
+            self._pending_strip_base = (
+                self._widgets["layout"].currentData() or "classic")
+            self._preview_parked_strip()
+            return
+        self._commit_strip_overrides(payload)
+
+    def _commit_strip_overrides(self, payload: dict) -> None:
+        """update_overrides → apply_layout's keep-list path + a
+        field-scoped save — the ONE sanctioned persist route."""
+        win = self._find_main_window()
+        if win is not None and hasattr(win, "apply_strip_overrides"):
+            win.apply_strip_overrides(dict(payload))
+        else:
+            # Parentless (tests): keep the settings + layout manager
+            # truthful even with no window strip to rebuild.
+            from .. import layout as layout_module
+            self._settings.layout_overrides = dict(payload)
+            layout_module.manager().update_overrides(dict(payload))
+            settings_module.save_fields(self._settings, "layout_overrides")
+        # The committed bar is a COMMIT, not a preview — if the user then
+        # cancels this dialog with a layout preview pending, the revert
+        # must land on these overrides, not the opening snapshot.
+        self._initial_overrides = dict(self._settings.layout_overrides or {})
+
+    def _preview_parked_strip(self) -> None:
+        """Show the parked bar on the previewed layout — pixels only,
+        through the same live path as the layout preview. Nothing
+        persists; cancel re-applies the opening snapshot over it."""
+        parent = self.parent()
+        if parent is None or not hasattr(parent, "apply_layout"):
+            return
+        from .. import layout as layout_module
+        effective = layout_module.manager().apply(
+            self._pending_strip_base,
+            dict(self._pending_strip_overrides or {}))
+        if effective is not None:
+            parent.apply_layout(effective)
+
+    def _on_open_glyphs(self) -> None:
+        """open_glyph_editor defers internally. Parented to this dialog,
+        so its refresh_glyphs walk reaches the MainWindow behind it."""
+        self._tool_sound("modal_open")
+        from .glyph_editor import open_glyph_editor
+        open_glyph_editor(self._settings, self)
+
+    def _on_open_keymap(self) -> None:
+        """open_keymap_editor defers internally."""
+        self._tool_sound("modal_open")
+        from .keymap_editor import open_keymap_editor
+        open_keymap_editor(self, self._settings)
 
     # ---------- result ----------
 
