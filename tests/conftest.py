@@ -15,6 +15,8 @@ tree per test run; the OS reaps /tmp.
 import os
 import tempfile
 
+import pytest
+
 _SANDBOX = tempfile.mkdtemp(prefix="tide-tests-")
 os.environ["XDG_CONFIG_HOME"] = os.path.join(_SANDBOX, "config")
 os.environ["XDG_CACHE_HOME"] = os.path.join(_SANDBOX, "cache")
@@ -27,3 +29,11 @@ assert str(_config.CACHE_DIR).startswith(_SANDBOX), (
     "tide.config was imported before the test sandbox took effect — "
     "real user data is at risk; refusing to run"
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_capture(monkeypatch):
+    # showing the visualizer starts capture even offscreen. processing tests
+    # use finite fake pipes; ui tests must never open the user's monitor.
+    from tide.audio_capture import AudioVisualizerFeed
+    monkeypatch.setattr(AudioVisualizerFeed, "start", lambda self, source=None: False)

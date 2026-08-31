@@ -173,6 +173,72 @@ def _pulse_bin_range() -> tuple[int, int, int]:
 _PULSE_LO, _PULSE_HI, _PULSE_FLUX_HI = _pulse_bin_range()
 
 
+# 192 synthetic decaying kicks (60/80/95 Hz, 32 chunk phases, amplitudes
+# .03/.7): env >= .5 arrived 14.83 ms late at .7, 21.36-22.09 ms at .03.
+# 15 ms covers the loud-hit median. parec's 10 ms is only a fallback request;
+# a server snapshot replaces it when available. transport/display latency
+# still needs a listening/loopback calibration.
+_PULSE_CAPTURE_REQUEST_S = 0.010
+_PULSE_ONSET_LATENCY_S = 0.015
+_PULSE_LATENCY_ENV = "TIDE_PULSE_LATENCY_MS"
+
+
+@dataclass(frozen=True, slots=True)
+class PulseFrame:
+    captured_at: float
+    level: float
+    kind: str
+    latency: float
+    reset: bool = False
+    scoped: bool = True
+    # pre-envelope attack evidence; sustain and reset frames carry zero.
+    onset: float | None = None
+    # raw full-mix rms, before windowing; monitor volume still applies.
+    energy: float | None = None
+
+
+def _configured_pulse_latency() -> float | None:
+    try:
+        latency = float(os.environ[_PULSE_LATENCY_ENV]) / 1000.0
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return latency if math.isfinite(latency) and latency >= 0.0 else None
+
+
+def _pulse_kind(diag: dict | None) -> str:
+    d = diag or {}
+    sustain = d.get("contrast", 0.0) * PULSE_SUSTAIN_FLOOR
+    onset = d.get("onset", 0.0)
+    bass = d.get("gate_quiet", 0.0) * d.get("gate_fraction", 0.0)
+    if d.get("level", 0.0) > bass * max(onset, sustain) + EPS:
+        return "beat"
+    if bass * onset > 0.0 and onset > sustain:
+        return "kick"
+    return "sustain"
+
+
+def _pulse_onset(diag: dict | None, kind: str) -> float | None:
+    if not diag:
+        return None
+    if kind == "beat":
+        value = diag.get("level", 0.0)
+    elif kind == "kick":
+        value = (diag.get("gate_quiet", 0.0)
+                 * diag.get("gate_fraction", 0.0) * diag.get("onset", 0.0))
+    else:
+        return 0.0
+    return max(0.0, min(1.0, float(value))) if math.isfinite(value) else None
+
+
+def _pulse_energy(samples: np.ndarray) -> float | None:
+    if not samples.size:
+        return None
+    # float64 keeps squaring finite float32 input from overflowing.
+    with np.errstate(over="ignore", invalid="ignore"):
+        energy = math.sqrt(float(np.square(samples, dtype=np.float64).mean()))
+    return energy if math.isfinite(energy) else None
+
+
 # ---------- pulse trace (developer facility) ----------
 #
 # Set TIDE_PULSE_TRACE=/path/to/trace.csv before launching tide and every
@@ -736,10 +802,72 @@ def _default_sink_monitor() -> str | None:
     return sink + ".monitor"
 
 
+def _capture_latency_from_info(info, pid: int, stream_idx: int) -> float | None:
+    names = ("source_outputs", "sink_inputs", "sources", "sinks")
+    if not isinstance(info, dict) or any(not isinstance(info.get(k), list) for k in names):
+        return None
+
+    def indexed(name, index):
+        if type(index) is not int:
+            return None
+        matches = [row for row in info[name]
+                   if isinstance(row, dict) and type(row.get("index")) is int
+                   and row["index"] == index]
+        return matches[0] if len(matches) == 1 else None
+
+    captures = []
+    for row in info["source_outputs"]:
+        if not isinstance(row, dict):
+            continue
+        props = row.get("properties")
+        if (isinstance(props, dict)
+                and str(props.get("application.process.id")) == str(pid)
+                and props.get("application.name") == "tide-visualizer"):
+            captures.append(row)
+    if len(captures) != 1:
+        return None
+    capture = captures[0]
+    playback = indexed("sink_inputs", stream_idx)
+    if playback is None or capture.get("corked") or playback.get("corked"):
+        return None
+    sink = indexed("sinks", playback.get("sink"))
+    monitor = indexed("sources", capture.get("source"))
+    if sink is None or monitor is None:
+        return None
+    # pactl names a source's owning sink "monitor_source" in JSON too.
+    if (not isinstance(sink.get("name"), str) or not isinstance(monitor.get("name"), str)
+            or monitor.get("monitor_source") != sink["name"]
+            or sink.get("monitor_source") != monitor["name"]):
+        return None
+    values = (capture.get("buffer_latency_usec"), capture.get("source_latency_usec"),
+              playback.get("sink_latency_usec"))
+    if any(type(v) not in (float, int) or not 0.0 <= v <= 5_000_000
+           or not math.isfinite(v) for v in values):
+        return None
+    # pa_timing_info subtracts sink latency for a monitor. the tap can lead
+    # the speakers; clamping its signed contribution would erase that fact.
+    # pactl omits client transport/pipe latency, so this is one component.
+    return (values[0] + values[1] - values[2]) / 1_000_000.0
+
+
+def _query_capture_latency(pid: int, stream_idx: int) -> float | None:
+    if shutil.which("pactl") is None:
+        return None
+    try:
+        result = subprocess.run(["pactl", "-f", "json", "list"],
+                                capture_output=True, text=True, timeout=0.5)
+        if result.returncode != 0 or len(result.stdout) > 4 * 1024 * 1024:
+            return None
+        return _capture_latency_from_info(json.loads(result.stdout), pid, stream_idx)
+    except Exception:
+        return None
+
+
 class AudioVisualizerFeed(QObject):
     bands_updated = Signal(object)         # numpy.ndarray (BANDS,)
     waveform_updated = Signal(object)      # numpy.ndarray (CHUNK,)
     pulse_updated = Signal(float)          # bass-energy envelope, 0..1
+    pulse_frame = Signal(object)           # immutable PulseFrame for timeline recording
     error = Signal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -762,6 +890,9 @@ class AudioVisualizerFeed(QObject):
         # pulse-trace block above. Opened per capture session in start().
         self._tracer: _PulseTracer | None = None
         self._t_capture0: float = 0.0
+        self._pulse_latency_override = _configured_pulse_latency()
+        self._pulse_probe_proc: subprocess.Popen | None = None
+        self._pulse_capture_latency: tuple[subprocess.Popen, float] | None = None
         # Reference-counted consumers. The singleton feed is shared by the
         # visualizer view and the app-wide ambient-pulse controller; capture
         # runs while at least one consumer holds it so neither tears it down
@@ -850,6 +981,7 @@ class AudioVisualizerFeed(QObject):
             except Exception:
                 self._tracer = None
         self._t_capture0 = time.monotonic()
+        self._pulse_latency_override = _configured_pulse_latency()
         self._stop.clear()
         self._thread = threading.Thread(target=self._process_loop, name="tide-fft", daemon=True)
         self._thread.start()
@@ -886,6 +1018,8 @@ class AudioVisualizerFeed(QObject):
         if self._thread is not None:
             self._thread.join(timeout=1.0)
         self._thread = None
+        self._pulse_probe_proc = None
+        self._pulse_capture_latency = None
         self._running = False
         self._prev_bands = None
         self._pulse_env = None
@@ -896,10 +1030,60 @@ class AudioVisualizerFeed(QObject):
 
     # ---------- worker ----------
 
+    def _start_pulse_latency_probe(self, proc: subprocess.Popen) -> None:
+        if (self._pulse_latency_override is not None or self._stream_idx is None
+                or self._pulse_probe_proc is proc or type(getattr(proc, "pid", None)) is not int):
+            return
+        self._pulse_probe_proc = proc
+        self._pulse_capture_latency = None
+        # wait for the first audio chunk: the source output may not exist at
+        # spawn time. a separate daemon keeps pactl out of the fft/gui paths.
+        thread = threading.Thread(target=self._measure_pulse_latency,
+                                  args=(proc, self._stream_idx),
+                                  name="tide-pulse-latency", daemon=True)
+        try:
+            thread.start()
+        except RuntimeError:
+            pass
+
+    def _measure_pulse_latency(self, proc: subprocess.Popen, stream_idx: int) -> None:
+        latency = _query_capture_latency(proc.pid, stream_idx)
+        if (latency is not None and not self._stop.is_set()
+                and self._proc is proc and self._stream_idx == stream_idx):
+            self._pulse_capture_latency = (proc, latency)
+
+    def _emit_pulse_frame(self, state: _PulseState | None,
+                          started_at: float | None = None,
+                          energy: float | None = None) -> None:
+        now = time.monotonic()
+        latency = self._pulse_latency_override
+        if latency is None:
+            elapsed = max(0.0, now - started_at) if started_at is not None else 0.0
+            capture = _PULSE_CAPTURE_REQUEST_S
+            measured = self._pulse_capture_latency
+            if measured is not None and measured[0] is self._proc:
+                capture = measured[1]
+            latency = capture + _PULSE_ONSET_LATENCY_S + elapsed
+        kind = _pulse_kind(state.diag) if state is not None else "sustain"
+        if energy is not None and (not math.isfinite(energy) or energy < 0.0):
+            energy = None
+        self.pulse_frame.emit(PulseFrame(
+            captured_at=now,
+            level=float(state.env) if state is not None else 0.0,
+            kind=kind,
+            latency=latency,
+            reset=state is None,
+            scoped=self._stream_idx is not None,
+            onset=_pulse_onset(state.diag, kind) if state is not None else 0.0,
+            # a reset marks a gap, not a measurement of silence.
+            energy=energy if state is not None else None,
+        ))
+
     def _trace_reset(self) -> None:
         """One reset marker row when the pulse baseline drops, so stream
         gaps are visible in a trace. Callers guard on the baseline having
         actually existed, keeping a paused stream from spamming markers."""
+        self._emit_pulse_frame(None)
         if self._tracer is not None:
             self._tracer.row(
                 time.monotonic() - self._t_capture0, None, reset=True)
@@ -1011,9 +1195,12 @@ class AudioVisualizerFeed(QObject):
                         bytes(pending[:chunk_bytes]), dtype=np.float32
                     )
                     del pending[:chunk_bytes]
+                    analysis_started = time.monotonic()
                     try:
                         self._prev_bands = _compute_bands(samples, self._prev_bands)
                     except Exception:
+                        self._pulse_env = None
+                        self._trace_reset()
                         continue
                     # Re-check right before emitting: stop() may have been
                     # called (possibly at teardown) since this chunk began,
@@ -1031,6 +1218,9 @@ class AudioVisualizerFeed(QObject):
                         # the emit, the next clean chunk re-anchors.
                         if self._pulse_env is not None:
                             self.pulse_updated.emit(float(self._pulse_env.env))
+                    energy = (_pulse_energy(samples)
+                              if self._pulse_env is not None else None)
+                    self._emit_pulse_frame(self._pulse_env, analysis_started, energy)
                     if self._tracer is not None:
                         state = self._pulse_env
                         self._tracer.row(
@@ -1038,6 +1228,8 @@ class AudioVisualizerFeed(QObject):
                             state.diag if state is not None else None,
                             reset=state is None,
                         )
+                    if self._pulse_env is not None:
+                        self._start_pulse_latency_probe(proc)
             if not died or self._stop.is_set():
                 return
             # parec exited underneath us (sink unplugged, pipewire restart).
