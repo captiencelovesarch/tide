@@ -190,6 +190,10 @@ class PulseFrame:
     latency: float
     reset: bool = False
     scoped: bool = True
+    # pre-envelope attack evidence; sustain and reset frames carry zero.
+    onset: float | None = None
+    # raw full-mix rms, before windowing; monitor volume still applies.
+    energy: float | None = None
 
 
 def _configured_pulse_latency() -> float | None:
@@ -210,6 +214,28 @@ def _pulse_kind(diag: dict | None) -> str:
     if bass * onset > 0.0 and onset > sustain:
         return "kick"
     return "sustain"
+
+
+def _pulse_onset(diag: dict | None, kind: str) -> float | None:
+    if not diag:
+        return None
+    if kind == "beat":
+        value = diag.get("level", 0.0)
+    elif kind == "kick":
+        value = (diag.get("gate_quiet", 0.0)
+                 * diag.get("gate_fraction", 0.0) * diag.get("onset", 0.0))
+    else:
+        return 0.0
+    return max(0.0, min(1.0, float(value))) if math.isfinite(value) else None
+
+
+def _pulse_energy(samples: np.ndarray) -> float | None:
+    if not samples.size:
+        return None
+    # float64 keeps squaring finite float32 input from overflowing.
+    with np.errstate(over="ignore", invalid="ignore"):
+        energy = math.sqrt(float(np.square(samples, dtype=np.float64).mean()))
+    return energy if math.isfinite(energy) else None
 
 
 # ---------- pulse trace (developer facility) ----------
@@ -1015,7 +1041,8 @@ class AudioVisualizerFeed(QObject):
             self._pulse_capture_latency = (proc, latency)
 
     def _emit_pulse_frame(self, state: _PulseState | None,
-                          started_at: float | None = None) -> None:
+                          started_at: float | None = None,
+                          energy: float | None = None) -> None:
         now = time.monotonic()
         latency = self._pulse_latency_override
         if latency is None:
@@ -1025,13 +1052,19 @@ class AudioVisualizerFeed(QObject):
             if measured is not None and measured[0] is self._proc:
                 capture = measured[1]
             latency = capture + _PULSE_ONSET_LATENCY_S + elapsed
+        kind = _pulse_kind(state.diag) if state is not None else "sustain"
+        if energy is not None and (not math.isfinite(energy) or energy < 0.0):
+            energy = None
         self.pulse_frame.emit(PulseFrame(
             captured_at=now,
             level=float(state.env) if state is not None else 0.0,
-            kind=_pulse_kind(state.diag) if state is not None else "sustain",
+            kind=kind,
             latency=latency,
             reset=state is None,
             scoped=self._stream_idx is not None,
+            onset=_pulse_onset(state.diag, kind) if state is not None else 0.0,
+            # a reset marks a gap, not a measurement of silence.
+            energy=energy if state is not None else None,
         ))
 
     def _trace_reset(self) -> None:
@@ -1168,7 +1201,9 @@ class AudioVisualizerFeed(QObject):
                         # the emit, the next clean chunk re-anchors.
                         if self._pulse_env is not None:
                             self.pulse_updated.emit(float(self._pulse_env.env))
-                    self._emit_pulse_frame(self._pulse_env, analysis_started)
+                    energy = (_pulse_energy(samples)
+                              if self._pulse_env is not None else None)
+                    self._emit_pulse_frame(self._pulse_env, analysis_started, energy)
                     if self._tracer is not None:
                         state = self._pulse_env
                         self._tracer.row(
