@@ -1,4 +1,4 @@
-"""Silent YT Music token auto-refresh (v1.4.x).
+"""Silent YT Music token auto-refresh (v1.4.x) + manual refresh (v1.5.x).
 
 Expiry used to stop at a toast — detection was automatic, the actual fix
 waited for a click on [refresh token]. These tests pin the new behavior:
@@ -6,9 +6,14 @@ a 401 (or an approaching cookie deadline) starts the silent browser
 re-import on its own, and the toast survives only as the fallback for
 the cases silence can't fix.
 
+The manual path (refresh_session_manual — settings button, Ctrl+Shift+R)
+is the same worker with opposite manners: it ignores the auto cooldown,
+shares the in-flight dedup, and always announces its outcome.
+
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -58,7 +63,9 @@ class _RefreshStub:
         return None
 
 
-class AutoRefreshTest(unittest.TestCase):
+class _RefreshTestBase(unittest.TestCase):
+    """Shared harness: stubbed worker, captured toasts, fake yt source."""
+
     def setUp(self) -> None:
         _app()
         theming.manager().refresh()
@@ -99,6 +106,8 @@ class AutoRefreshTest(unittest.TestCase):
     def _toast_texts(self) -> list[str]:
         return [a[1] for a, _k in self.toasts]
 
+
+class AutoRefreshTest(_RefreshTestBase):
     def test_401_heals_silently(self) -> None:
         """Dead cookies → silent re-import → no toast, client rebuilt."""
         self.w._on_source_auth_expired("ytmusic")
@@ -168,6 +177,188 @@ class AutoRefreshTest(unittest.TestCase):
         with mock.patch.object(auth, "seconds_until_expiry", return_value=2 * 86400.0):
             self.w._check_session_expiry()
         self.assertEqual(len(self.toasts), 1)
+
+
+class ManualRefreshTest(_RefreshTestBase):
+    """refresh_session_manual — the settings button / Ctrl+Shift+R path."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.outcomes: list[tuple[bool, str]] = []
+        self.w.session_refresh_finished.connect(
+            lambda ok, msg: self.outcomes.append((ok, msg))
+        )
+
+    def test_manual_bypasses_cooldown(self) -> None:
+        """The cooldown gates the machine, not the human: right after the
+        auto path refused, a click must still fire."""
+        self.w._auto_refresh_at = time.monotonic()      # "just tried"
+        self.w._on_source_auth_expired("ytmusic")
+        self.assertEqual(self.stub.calls, [], "cooldown didn't gate the auto path")
+        self.assertTrue(self.w.refresh_session_manual())
+        self.assertEqual(len(self.stub.calls), 1, "manual path obeyed the cooldown")
+
+    def test_manual_inflight_dedup(self) -> None:
+        """A second click while the worker runs must not double-fire, and
+        completion still announces exactly once."""
+        self.assertTrue(self.w.refresh_session_manual())
+        self.assertFalse(self.w.refresh_session_manual())
+        self.assertEqual(len(self.stub.calls), 1, "stacked a second worker")
+        self.stub.calls[0][0]("firefox")
+        self.assertEqual(self._toast_texts(), ["session refreshed from firefox"])
+        # Attempt finished — the next click may start a fresh one.
+        self.assertTrue(self.w.refresh_session_manual())
+        self.assertEqual(len(self.stub.calls), 2)
+
+    def test_manual_success_feedback_and_reloads(self) -> None:
+        """Success is loud (toast + signal) and reloads the stale views
+        through the same hook the auto path uses."""
+        with mock.patch.object(self.w, "_refresh_after_reauth") as reload_hook:
+            self.w.refresh_session_manual()
+            self.stub.calls[0][0]("chromium")
+            reload_hook.assert_called_once_with("ytmusic")
+        self.assertEqual(self.fake.reloads, 1, "fresh cookies weren't loaded")
+        self.assertEqual(self._toast_texts(), ["session refreshed from chromium"])
+        self.assertEqual(self.outcomes, [(True, "session refreshed from chromium")])
+        self.assertNotIn("ytmusic", self.w._auth_expired_toasted)
+
+    def test_manual_no_browser_points_at_sign_in(self) -> None:
+        """'' from the worker = every profile signed out: say so and offer
+        the sign-in flow instead of pretending it worked."""
+        self.w.refresh_session_manual()
+        self.stub.calls[0][0]("")
+        self.assertEqual(len(self.toasts), 1)
+        _args, kwargs = self.toasts[0]
+        self.assertEqual(_args[1], "no signed-in browser found")
+        self.assertEqual(kwargs.get("action_label"), "sign in")
+        self.assertEqual(len(self.outcomes), 1)
+        ok, msg = self.outcomes[0]
+        self.assertFalse(ok)
+        self.assertIn("sign in", msg)
+        self.assertEqual(self.fake.reloads, 0)
+
+    def test_manual_worker_error_announces(self) -> None:
+        self.w.refresh_session_manual()
+        self.stub.calls[0][1]("locked cookie db")
+        self.assertEqual(self._toast_texts(),
+                         ["session refresh failed: locked cookie db"])
+        self.assertEqual(self.outcomes,
+                         [(False, "session refresh failed: locked cookie db")])
+
+    def test_click_during_auto_attempt_makes_finish_loud(self) -> None:
+        """Dedup across paths: a click while the silent auto attempt is in
+        flight starts nothing new, but the user asked — the attempt's
+        completion switches from silent to announced."""
+        self.w._on_source_auth_expired("ytmusic")       # auto attempt running
+        self.assertFalse(self.w.refresh_session_manual())
+        self.assertEqual(len(self.stub.calls), 1, "stacked a second worker")
+        on_done, _ = self.stub.calls[0]                 # the AUTO callbacks
+        on_done("brave")
+        self.assertEqual(self._toast_texts(), ["session refreshed from brave"])
+        self.assertEqual(self.outcomes, [(True, "session refreshed from brave")])
+        self.assertEqual(self.fake.reloads, 1)
+
+    def test_no_yt_source_reports_instead_of_crashing(self) -> None:
+        source_registry()._sources.clear()
+        source_registry()._enabled.clear()
+        self.assertFalse(self.w.refresh_session_manual())
+        self.assertEqual(self.stub.calls, [])
+        self.assertEqual(self.outcomes, [(False, "youtube music isn't set up")])
+
+    def test_set_up_but_disabled_points_at_the_switch(self) -> None:
+        """Wizard ran (auth saved) but the source is toggled off — startup
+        never registered it, so get() is None while the settings row right
+        above the button says "signed in". "isn't set up" would be a lie;
+        point at the enable switch instead."""
+        source_registry()._sources.clear()
+        source_registry()._enabled.clear()
+        with mock.patch.object(auth, "have_auth", return_value=True):
+            self.assertFalse(self.w.refresh_session_manual())
+        self.assertEqual(self.stub.calls, [])
+        self.assertEqual(self.outcomes, [(
+            False, "youtube music is turned off. enable it in settings → sources"
+        )])
+
+    def test_toast_reauth_then_manual_click_starts_one_worker(self) -> None:
+        """[refresh token] on the expiry toast routes through the manual
+        path, so a manual refresh (button / Ctrl+Shift+R) landing while it
+        runs must dedup against it — one worker, one cookie harvest, one
+        announced outcome."""
+        self.w._begin_source_reauth("ytmusic")
+        self.assertEqual(len(self.stub.calls), 1, "toast action started nothing")
+        self.assertFalse(self.w.refresh_session_manual())
+        self.assertEqual(len(self.stub.calls), 1, "stacked a second worker")
+        self.stub.calls[0][0]("firefox")
+        self.assertEqual(self._toast_texts(), ["session refreshed from firefox"])
+        self.assertEqual(self.outcomes, [(True, "session refreshed from firefox")])
+        self.assertEqual(self.fake.reloads, 1)
+        # Attempt finished — flag released, a fresh click starts a new one.
+        self.assertFalse(self.w._auto_refresh_inflight)
+        self.assertTrue(self.w.refresh_session_manual())
+
+
+class SettingsRefreshButtonTest(_RefreshTestBase):
+    """The [refresh session] row in settings → integrations delegates to
+    the window and mirrors the outcome inline."""
+
+    def _dialog(self):
+        from tide import settings as settings_module
+        from tide.ui.settings import SettingsDialog
+        return SettingsDialog(settings_module.Settings(), parent=self.w)
+
+    def test_button_state_cycle(self) -> None:
+        dlg = self._dialog()
+        try:
+            self.assertEqual(dlg.refresh_session_status.text(), "not signed in")
+            dlg._on_refresh_session()
+            self.assertFalse(dlg.refresh_session_btn.isEnabled())
+            self.assertEqual(dlg.refresh_session_status.text(), "checking browsers…")
+            self.assertEqual(len(self.stub.calls), 1)
+            self.stub.calls[0][0]("brave")
+            self.assertTrue(dlg.refresh_session_btn.isEnabled())
+            self.assertEqual(dlg.refresh_session_status.text(),
+                             "session refreshed from brave")
+        finally:
+            dlg.deleteLater()
+
+    def test_failure_lands_inline(self) -> None:
+        dlg = self._dialog()
+        try:
+            dlg._on_refresh_session()
+            self.stub.calls[0][0]("")
+            self.assertTrue(dlg.refresh_session_btn.isEnabled())
+            self.assertIn("no signed-in browser found",
+                          dlg.refresh_session_status.text())
+        finally:
+            dlg.deleteLater()
+
+
+class ExpiryLabelTest(_RefreshTestBase):
+    """Sub-hour expiry used to render "expires in 0h" on both surfaces
+    (settings row + warning toast) — the formatters need a minutes tier."""
+
+    def test_settings_row_counts_minutes_under_an_hour(self) -> None:
+        from tide import settings as settings_module
+        from tide.ui.settings import SettingsDialog
+        with mock.patch.object(auth, "have_auth", return_value=True), \
+             mock.patch.object(auth, "seconds_until_expiry", return_value=1800.0):
+            dlg = SettingsDialog(settings_module.Settings(), parent=self.w)
+        try:
+            self.assertEqual(dlg.refresh_session_status.text(),
+                             "signed in · expires in 30m")
+        finally:
+            dlg.deleteLater()
+
+    def test_toast_counts_minutes_under_an_hour(self) -> None:
+        self.w._warn_session_expiring(1800.0)
+        self.assertEqual(self._toast_texts(),
+                         ["youtube music: token expires in 30m"])
+
+    def test_under_a_minute_rounds_up_not_down(self) -> None:
+        # "expires in 0m" would be the same bug one tier lower.
+        self.w._warn_session_expiring(20.0)
+        self.assertEqual(self._toast_texts(),
+                         ["youtube music: token expires in 1m"])
 
 
 if __name__ == "__main__":

@@ -1,23 +1,40 @@
-"""PipeWire/PulseAudio monitor capture for the visualizer.
+"""PipeWire/PulseAudio capture of tide's own playback for the visualizer.
 
 PortAudio (which sounddevice wraps) doesn't expose sink monitors on
 PipeWire+PA reliably — it just sees the default *input* (typically the
 mic). Instead we shell out to ``parec``, which is the canonical PA way
-to capture from a sink's ``.monitor`` source. Works on PipeWire and
-classic PulseAudio identically.
+to capture playback audio. Works on PipeWire and classic PulseAudio
+identically.
+
+Scope: auto mode captures TIDE's audio, not the desktop's. A sink's
+``.monitor`` carries everything the system plays — Discord, browsers,
+games — and all of it used to drive the backdrop pulse. Auto resolution
+finds tide's own sink input (mpv announces itself as ``tide``; child
+backends register their pid) and records just that stream via
+``parec --monitor-stream``. The default sink's monitor remains the
+fallback while tide has no open stream, and an explicitly picked monitor
+source in settings always wins.
 
 The capture loop runs in a Python thread; FFT and band-binning run there
 too so the GUI thread only sees ready-to-render arrays. Results are
 delivered on the GUI thread via Qt signals.
+
+Debugging the bass pulse: launch with TIDE_PULSE_TRACE=/path/to/trace.csv
+and every analysis chunk (~43/s) appends one row of detector internals
+while capture runs — signals, per-gate values, envelope, and reset markers
+at stream gaps. Play the song that misbehaves, then read the CSV to see
+which gate ate (or invented) each hit.
 """
 from __future__ import annotations
 
+import json
 import math
+import os
 import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
@@ -29,21 +46,98 @@ BANDS = 32
 SMOOTH_ALPHA = 0.45
 EPS = 1e-9
 
-# Bass-pulse envelope follower — drives the adaptive-background pulse. Kept
-# separate from the visualizer's band smoothing. The raw low-frequency energy
-# is normalized against a moving floor/peak, so bass-heavy songs establish a
-# new baseline instead of pinning the ambient background at max forever.
-PULSE_LOW_HZ = 30.0
-PULSE_HIGH_HZ = 200.0
-PULSE_GAIN = 6.0          # pre-log gain applied to raw bass magnitude
+# Bass-pulse detector — drives the adaptive-background pulse. Kept separate
+# from the visualizer's band smoothing.
+#
+# The first onset-gated detector judged every song against fixed absolute
+# thresholds and multiplied all of its signals together — and the field
+# report was "works on maybe 60% of songs". Both halves of that design were
+# the problem. A loud sustained bed log-compresses the whole band's rise, so
+# a fixed flux threshold that a dry kick clears by 10x is missed by the same
+# kick over a bed; a dense mix never clears an absolute bass-share floor
+# even though its kicks surge the share; and multiplying gates means one
+# compressed term (measured: contrast 0.12 with every other gate wide open)
+# silences a hit every other signal saw clearly.
+#
+# v2 keeps the narrow-band, onset-first philosophy but judges each signal
+# against the song's own recent behavior, and lets any one confident
+# rhythm signal carry the pulse:
+#   * per-bin rectified spectral flux over an extended low band (43-260 Hz):
+#     a kick's own bins rise no matter how loud the sustained bed next to
+#     them is, where the old summed-band flux was compressed to nothing;
+#   * adaptive normalization — flux is scored against ring-buffer
+#     percentiles of the last ~2 s (p50 = this song's "nothing happening",
+#     p95 = this song's "biggest recent rise"), so the detector
+#     self-calibrates to any mix density, mastering level, or volume, with
+#     absolute span floors so silence can't amplify numeric dust;
+#   * a bass-share *surge* path — the kick-band's share of total power
+#     jumping relative to its own baseline — which is what a kick looks
+#     like inside a wall-of-sound mix where the absolute share never gets
+#     near dominance (the absolute-share gate stays, as the other door);
+#   * a broadband percussive fallback for songs that keep rhythm out of
+#     the bass entirely: when the bass channel has produced no onsets for
+#     a while AND the broadband flux is spiky (percussive, not pad-like),
+#     hits there pulse at reduced strength — "beat", not "kick";
+#   * the onset path is NOT multiplied by the floor/peak contrast anymore:
+#     contrast only scales the sustained-bass breathing (still capped at
+#     PULSE_SUSTAIN_FLOOR). An audible kick over a loud bed now reads full
+#     strength instead of inheriting the bed's compression.
+# The moving floor/peak followers, the instant-attack envelope, and the
+# no-fabricated-onsets rules around stream gaps all carry over unchanged.
+PULSE_LOW_HZ = 35.0
+PULSE_HIGH_HZ = 130.0     # level/share band: where a kick's *body* lives
+PULSE_FLUX_HIGH_HZ = 260.0   # flux band extends over the kick's punch too
+PULSE_GAIN = 6.0          # pre-log gain applied to raw kick-band magnitude
 PULSE_TOLERANCE = 0.18    # ignore this much of the local bass range
-PULSE_MIN_SPAN = 0.45     # log-domain floor-to-peak range minimum
-PULSE_QUIET_FLOOR = 3.1   # below this, bass is treated as too quiet to pulse
-PULSE_QUIET_FULL = 4.4    # above this, adaptive contrast has full strength
+PULSE_MIN_SPAN = 0.6      # log-domain floor-to-peak range minimum
+# Absolute quiet guard, lowered from 3.0/4.2: it now only has to reject the
+# noise floor and barely-audible leakage, not stand in for calibration.
+# Measured: kicks at amp 0.03 (~-30 dBFS, a low-listening-volume monitor
+# level) sit at raw 3.2 and must pulse; amp 0.01 sits at 2.2 and must not.
+PULSE_QUIET_FLOOR = 2.3
+PULSE_QUIET_FULL = 3.0
+PULSE_SUSTAIN_FLOOR = 0.22   # ceiling for sustained (onset-free) bass level
+PULSE_FRACTION_FLOOR = 0.12  # kick-band power share below this: no absolute path
+PULSE_FRACTION_FULL = 0.34   # ...above this the absolute-share door is open
 PULSE_FLOOR_RISE_S = 1.2  # sustained bass becomes "normal" over a few sec
 PULSE_FLOOR_FALL_S = 0.7
 PULSE_PEAK_FALL_S = 1.4
-PULSE_RELEASE_S = 0.35    # decay time constant; attack is instantaneous
+PULSE_RELEASE_S = 0.22    # decay time constant; attack is instantaneous
+# --- adaptive-normalization tuning ---
+PULSE_STATS_S = 2.0       # ring-buffer horizon the percentiles see
+PULSE_ONSET_LO = 0.25     # normalized kick flux: onset ramps in here...
+PULSE_ONSET_HI = 0.85     # ...and is a full-strength hit here
+# Per-bin log step below which a bin's frame-to-frame change is treated as
+# jitter, not signal (soft-threshold shrinkage before the flux sums). Kills
+# the ±image interference wobble of steady deep bass and most noise wiggle
+# at the source; a real onset's log-unit bin steps barely notice it.
+PULSE_BIN_DEADBAND = 0.25
+# Span floors for (p95 - p50) in each normalizer, in each signal's own
+# units. These are what keep near-silence and steady noise from amplifying
+# their own dust to "the biggest thing this song has done lately".
+PULSE_KSPAN_MIN = 1.2     # summed per-bin log flux, 43-260 Hz (~5 bins)
+PULSE_FSPAN_MIN = 0.035   # bass-share surge (share is 0..1)
+PULSE_BSPAN_MIN = 25.0    # summed per-bin log flux, 260 Hz-22 kHz (~505 bins)
+# The surge path only counts when the surge lands on a real share — a jump
+# from nothing to nothing-much is noise, not a kick...
+PULSE_FSURGE_FLOOR = 0.06
+PULSE_FSURGE_FULL = 0.16
+PULSE_FSURGE_STRENGTH = 0.95
+# ...and only in songs whose *resting* share is low. When bass already
+# dominates the mix, share wiggle from the rest of the program modulating
+# total power is meaningless — the energy-flux path owns those songs — so
+# the surge door closes as the running share average rises.
+PULSE_FRAC_AVG_S = 2.0
+PULSE_SURGE_SHARE_LO = 0.30
+PULSE_SURGE_SHARE_HI = 0.50
+# --- broadband percussive fallback ---
+PULSE_BB_STRENGTH = 0.62  # fallback pulses read "beat", never full "kick"
+PULSE_BB_SPIK_LO = 1.6    # broadband flux spikiness (p95-p50)/(p50+eps):
+PULSE_BB_SPIK_HI = 3.2    # steady noise/pads score ~0-1, percussion 3+
+PULSE_BB_SPIK_EPS = 5.0
+PULSE_BASS_ACT_LO = 0.03  # recent bass-onset activity below this: fallback
+PULSE_BASS_ACT_HI = 0.10  # fully open; above this: fully closed
+PULSE_BASS_ACT_FALL_S = 7.0   # how long the bass channel stays "recently active"
 
 
 def _build_band_edges(n_bands: int = BANDS, sample_rate: int = SAMPLE_RATE,
@@ -65,21 +159,119 @@ _HANN_WINDOW = np.hanning(CHUNK).astype(np.float32)
 _BAND_EDGES = _build_band_edges()
 
 
-def _pulse_bin_range() -> tuple[int, int]:
+def _pulse_bin_range() -> tuple[int, int, int]:
+    # At CHUNK=1024 a bin is ~43 Hz wide, so the kick band is only a few bins;
+    # +1 keeps the bin nearest each top frequency inside the (exclusive) slice.
     hz_per_bin = (SAMPLE_RATE / 2.0) / (CHUNK // 2)
     lo = max(1, int(round(PULSE_LOW_HZ / hz_per_bin)))
-    hi = max(lo + 1, int(round(PULSE_HIGH_HZ / hz_per_bin)))
-    return lo, hi
+    hi = max(lo + 1, int(round(PULSE_HIGH_HZ / hz_per_bin)) + 1)
+    flux_hi = max(hi, int(round(PULSE_FLUX_HIGH_HZ / hz_per_bin)) + 1)
+    return lo, hi, flux_hi
 
 
-_PULSE_LO, _PULSE_HI = _pulse_bin_range()
+_PULSE_LO, _PULSE_HI, _PULSE_FLUX_HI = _pulse_bin_range()
 
 
-@dataclass
+# ---------- pulse trace (developer facility) ----------
+#
+# Set TIDE_PULSE_TRACE=/path/to/trace.csv before launching tide and every
+# analysis chunk appends one row of detector internals (signals, gate values,
+# final envelope) while capture runs. This is how "the backdrop missed the
+# kicks in this song" turns into a diffable artifact instead of a vibe:
+# play the failing song with the trace on, then read off which gate ate
+# each hit. Costs one dict per chunk when off; rows flush about once a
+# second when on, so a crash loses at most that much.
+
+_TRACE_ENV = "TIDE_PULSE_TRACE"
+_TRACE_COLUMNS = (
+    "t", "reset", "raw", "floor", "peak", "span", "fraction", "frac_avg",
+    "kflux", "fflux", "bflux", "knorm", "fnorm", "bnorm", "spik",
+    "contrast", "gate_quiet", "onset", "gate_fraction", "act", "fallback_w",
+    "level", "env",
+)
+
+
+class _PulseTracer:
+    """Appends per-chunk detector diagnostics to a CSV. Never raises into
+    the capture loop: any I/O failure closes the trace and capture carries
+    on without it."""
+
+    def __init__(self, path: str) -> None:
+        self._dead = False
+        self._fh = open(os.path.expanduser(path), "a", buffering=64 * 1024)
+        if self._fh.tell() == 0:
+            self._fh.write(",".join(_TRACE_COLUMNS) + "\n")
+        self._last_flush = time.monotonic()
+
+    def row(self, t: float, diag: dict | None, *, reset: bool = False) -> None:
+        if self._dead:
+            return
+        try:
+            vals = [f"{t:.4f}", "1" if reset else "0"]
+            d = diag or {}
+            for col in _TRACE_COLUMNS[2:]:
+                v = d.get(col)
+                vals.append("" if v is None else f"{v:.5g}")
+            self._fh.write(",".join(vals) + "\n")
+            now = time.monotonic()
+            if now - self._last_flush >= 1.0:
+                self._fh.flush()
+                self._last_flush = now
+        except Exception:
+            self.close()
+
+    def close(self) -> None:
+        self._dead = True
+        try:
+            self._fh.flush()
+            self._fh.close()
+        except Exception:
+            pass
+
+
+# eq=False: the state carries numpy arrays, and a generated __eq__ would
+# raise "truth value is ambiguous" on the first comparison. Identity is the
+# only meaningful equality for a carried-forward state anyway.
+@dataclass(eq=False)
 class _PulseState:
     env: float
     floor: float
     peak: float
+    raw: float = 0.0        # prev chunk's log kick-band energy
+    fraction: float = 0.0   # prev chunk's kick-band power share, for the surge
+    frac_avg: float = 0.0   # slow EMA of the share — the song's resting share
+    # Each flux channel's own single-chunk rise, carried so an attack that
+    # straddles a chunk boundary still sums to one onset. The two-chunk
+    # window is exact: after a baseline reset the carries are zero and
+    # nothing from before a gap can leak in.
+    krise: float = 0.0      # kick-band (43-260 Hz) per-bin rectified log flux
+    frise: float = 0.0      # bass-share rise
+    brise: float = 0.0      # broadband (260 Hz up) per-bin rectified log flux
+    # Prev chunk's full per-bin log magnitudes — what per-bin flux diffs
+    # against. ~0.5 KB, recreated per chunk.
+    lb: np.ndarray | None = None
+    # Ring buffers of recent flux values (one slot per chunk, ~2 s each):
+    # the percentile baselines that make every threshold per-song adaptive.
+    # Allocated at anchor time and then shared (mutated in place) by every
+    # subsequent state — only the newest state is ever alive.
+    kbuf: np.ndarray | None = None
+    fbuf: np.ndarray | None = None
+    bbuf: np.ndarray | None = None
+    nbuf: int = 0           # how much of the rings is filled
+    ibuf: int = 0           # ring write index
+    # Recent bass-onset activity (fast rise, ~7 s fall). While the bass
+    # channel has been producing onsets, the broadband fallback stays shut.
+    act: float = 0.0
+    # The chunk's second half, carried so the next call can analyze the
+    # 50%-overlap frame that straddles the boundary. Without it a kick
+    # landing at a chunk edge is Hann-windowed to a whisper in BOTH
+    # adjacent frames (measured: share 0.02 at the onset frame vs 0.2 for
+    # a centered hit) — the classic reason onset analysis overlaps frames.
+    tail: np.ndarray | None = None
+    # Per-chunk diagnostics for the trace facility and the tests. Written
+    # every chunk (a dict fill costs nothing at 43 Hz), never read back by
+    # the detector itself.
+    diag: dict | None = field(default=None, compare=False)
 
 
 def _ema_alpha(dt: float, tau_s: float) -> float:
@@ -93,23 +285,114 @@ def _smoothstep(edge0: float, edge1: float, value: float) -> float:
     return x * x * (3.0 - 2.0 * x)
 
 
-def _compute_pulse(samples: np.ndarray, prev: _PulseState | None) -> _PulseState:
-    """Adaptive instant-attack / slow-release bass pulse in 0..1.
+_PULSE_HOP = CHUNK // 2
 
-    The pulse uses local contrast instead of absolute bass level. On a
-    bass-heavy song, sustained bass raises ``floor`` and stops reading as a
-    permanent hit; transient kicks still jump above the tolerance band.
+
+def _compute_pulse(
+    samples: np.ndarray, prev: _PulseState | None
+) -> _PulseState | None:
+    """Adaptive instant-attack / slow-release kick pulse in 0..1.
+
+    Called once per CHUNK exactly as before, but internally analyzes two
+    50%-overlapped Hann frames per call (the boundary-straddling frame
+    first, then the chunk itself). Overlap keeps every transient near a
+    frame center; without it a kick landing at a chunk edge is windowed
+    down to a whisper in both adjacent frames and its bass share reads as
+    noise. The returned state's ``env`` is the post-second-frame envelope;
+    ``diag`` reports the louder of the two frames plus the final envelope.
+    """
+    dt = _PULSE_HOP / SAMPLE_RATE
+    state = prev
+    straddle_diag: dict | None = None
+    tail = prev.tail if prev is not None else None
+    if tail is not None and tail.shape[0] == _PULSE_HOP:
+        frame = np.concatenate((tail, samples[:_PULSE_HOP]))
+        state = _pulse_frame(frame, state, dt)
+        if state is None:
+            return None
+        straddle_diag = state.diag
+    state = _pulse_frame(samples, state, dt)
+    if state is None:
+        return None
+    if (
+        straddle_diag is not None
+        and state.diag is not None
+        and straddle_diag["level"] > state.diag["level"]
+    ):
+        straddle_diag["env"] = state.env
+        state.diag = straddle_diag
+    state.tail = samples[_PULSE_HOP:].copy()
+    return state
+
+
+def _pulse_frame(
+    samples: np.ndarray, prev: _PulseState | None, dt: float
+) -> _PulseState | None:
+    """One analysis frame of the pulse detector.
+
+    Onset-first and self-calibrating: per-bin spectral flux in the low
+    band, a bass-share surge, and (when the bass has been quiet a while) a
+    broadband percussive fallback are each scored against ring-buffer
+    percentiles of the song's own last ~2 s, so "a hit" means "unusual for
+    this song right now", not "past a constant someone tuned on one mix".
+    The moving floor/peak contrast survives only as the throttle on
+    sustained-bass breathing (capped at PULSE_SUSTAIN_FLOOR); it no longer
+    multiplies the onset path. See the PULSE_* block for the full design.
     """
     windowed = samples * _HANN_WINDOW
     mag = np.abs(np.fft.rfft(windowed))
-    energy = float(mag[_PULSE_LO:_PULSE_HI].mean())
-    raw = math.log1p(energy * PULSE_GAIN)
-    dt = CHUNK / SAMPLE_RATE
+    power = mag * mag
+    kick = float(mag[_PULSE_LO:_PULSE_HI].mean())
+    raw = math.log1p(kick * PULSE_GAIN)
+    # Kick-band share of the full spectrum (DC excluded). A real kick hit is
+    # bass-dominated in the moment — or at least *surges toward* dominance;
+    # loud vocals/snares/noise are neither.
+    kick_power = float(power[_PULSE_LO:_PULSE_HI].sum())
+    total_power = float(power[1:].sum())
+    fraction = kick_power / max(EPS, total_power)
 
-    if prev is None:
+    if not (
+        math.isfinite(raw)
+        and math.isfinite(fraction)
+        and math.isfinite(total_power)
+    ):
+        # One poisoned chunk (a client writing NaN into the monitored sink)
+        # must not stick NaN into the followers or the flux ring buffers —
+        # every NaN comparison is False, so they would never recover. The
+        # total_power term matters here: it goes non-finite if ANY bin is,
+        # which is what certifies the per-bin log magnitudes below as clean
+        # before they can poison the rings. Drop the baseline instead: the
+        # caller treats None as "start over", and the next clean chunk
+        # re-anchors through the anchor branch, which computes no flux, so
+        # the gap cannot fabricate an onset either.
+        return None
+
+    # Per-bin log magnitudes — what the flux channels diff against. Per-bin
+    # (rather than flux-of-the-band-sum) is the fix for kicks over loud
+    # sustained beds: the bed parks in its own bins and contributes zero
+    # rise there, while the kick's bins rise by their full log step.
+    lb = np.log1p(mag * PULSE_GAIN)
+
+    if prev is None or prev.lb is None:
+        # Fresh baseline — capture start, stale-audio drop, parec respawn,
+        # or recovery from a NaN chunk. With no history there is no flux, so
+        # a kick landing in this exact chunk is capped at the sustain floor.
+        # That softened first hit is the deliberate cost of never fabricating
+        # onsets at gap edges: "quiet before the gap, loud after" must not
+        # read as a kick that never happened.
         floor = raw * 0.65
         peak = max(raw, floor + 0.55)
         env = 0.0
+        krise = frise = brise = 0.0
+        kflux = fflux = bflux = 0.0
+        ring = max(8, int(round(PULSE_STATS_S / dt)))
+        kbuf = np.zeros(ring)
+        fbuf = np.zeros(ring)
+        bbuf = np.zeros(ring)
+        nbuf = 0
+        ibuf = 0
+        act = 0.0
+        frac_avg = fraction
     else:
         floor_tau = PULSE_FLOOR_RISE_S if raw > prev.floor else PULSE_FLOOR_FALL_S
         floor_a = _ema_alpha(dt, floor_tau)
@@ -122,20 +405,153 @@ def _compute_pulse(samples: np.ndarray, prev: _PulseState | None) -> _PulseState
             peak = prev.peak + (floor - prev.peak) * peak_a
             peak = max(peak, raw)
         env = prev.env
+        # A kick's attack can split across two frames, so neither frame's
+        # rise clears the onset scoring on its own. Sum this frame's rise
+        # with the previous frame's; a split onset then reads as the single
+        # rise it is. Each state stores only its own rise, so the window is
+        # exactly two frames — after a baseline reset the carry is zero and
+        # nothing from before the gap can leak in.
+        #
+        # Per-bin soft deadband, then signed net (rises minus falls,
+        # clamped at zero) — NOT rectified rises. Two measured reasons:
+        # down in the low bins a steady deep sine is not per-bin steady
+        # (its ±frequency images interfere, neighboring bins trade
+        # magnitude in a slow beat, and rectifying counted every trade as
+        # an onset — a pure 50 Hz sine held "flux" ~0.9 forever); and
+        # broadband noise wiggles every bin a little each frame. The
+        # deadband shrinks each bin's step toward zero by a fixed log
+        # amount, which erases micro-jitter entirely while barely denting
+        # a real onset's log-unit steps; the signed sum then cancels
+        # whatever oscillation survives. The per-bin *log* step before the
+        # sum is what keeps a kick over a loud bed uncompressed: the bed's
+        # bins contribute ~zero while the kick's own quiet-before bins
+        # rise by their full log step.
+        dlb = lb - prev.lb
+        dlb = (np.clip(dlb - PULSE_BIN_DEADBAND, 0.0, None)
+               + np.clip(dlb + PULSE_BIN_DEADBAND, None, 0.0))
+        krise = max(0.0, float(dlb[_PULSE_LO:_PULSE_FLUX_HI].sum()))
+        brise = max(0.0, float(dlb[_PULSE_FLUX_HI:].sum()))
+        frise = max(0.0, fraction - prev.fraction)
+        kflux = krise + prev.krise
+        fflux = frise + prev.frise
+        bflux = brise + prev.brise
+        kbuf, fbuf, bbuf = prev.kbuf, prev.fbuf, prev.bbuf
+        ibuf = prev.ibuf
+        nbuf = prev.nbuf
+        act = prev.act
+        frac_avg = prev.frac_avg + (
+            fraction - prev.frac_avg) * _ema_alpha(dt, PULSE_FRAC_AVG_S)
+        # Push before scoring: a lone hit then sits at its buffer's p95 and
+        # scores ~1 against itself, which is exactly the self-scaling the
+        # normalizers are for.
+        ring = kbuf.shape[0]
+        kbuf[ibuf] = kflux
+        fbuf[ibuf] = fflux
+        bbuf[ibuf] = bflux
+        ibuf = (ibuf + 1) % ring
+        nbuf = min(nbuf + 1, ring)
+
+    # Adaptive scoring: p50 is this song's "nothing happening", p95 its
+    # "biggest recent rise". The span floors keep silence and steady noise
+    # from promoting their own dust; the clip means anything at or past the
+    # recent-best rise is simply a full hit.
+    if nbuf >= 4:
+        # References ride p98, not p95: hits at a plain 0.5 s period
+        # occupy ~4-5% of the ring's frames, so p95 lands right ON the
+        # hit boundary and flickers between "reference = a hit" (between-
+        # hit wiggle scores ~0) and "reference = baseline" (wiggle scores
+        # as onsets). p98 (≈ third-largest of the ring) sits inside the
+        # hits whenever the song has any, while still ignoring a lone
+        # glitch frame.
+        k50, k98 = np.percentile(kbuf[:nbuf], (50.0, 98.0))
+        f50, f98 = np.percentile(fbuf[:nbuf], (50.0, 98.0))
+        b50, b98 = np.percentile(bbuf[:nbuf], (50.0, 98.0))
+        knorm = max(0.0, min(1.0, (kflux - k50) / max(PULSE_KSPAN_MIN, k98 - k50)))
+        fnorm = max(0.0, min(1.0, (fflux - f50) / max(PULSE_FSPAN_MIN, f98 - f50)))
+        bnorm = max(0.0, min(1.0, (bflux - b50) / max(PULSE_BSPAN_MIN, b98 - b50)))
+        # Spikiness of the broadband flux distribution: percussion spends
+        # most chunks near zero and a few very high (huge p98/p50 ratio);
+        # steady noise and slow swells keep the two close together.
+        spik = (b98 - b50) / (b50 + PULSE_BB_SPIK_EPS)
+    else:
+        knorm = fnorm = bnorm = spik = 0.0
 
     span = max(PULSE_MIN_SPAN, peak - floor)
     threshold = floor + span * PULSE_TOLERANCE
-    level = (raw - threshold) / max(EPS, span * (1.0 - PULSE_TOLERANCE))
-    level = max(0.0, min(1.0, level))
-    # Local contrast alone is too twitchy on quiet songs, where tiny absolute
-    # bass changes can fill the local range. Gate it by real bass energy.
-    level *= _smoothstep(PULSE_QUIET_FLOOR, PULSE_QUIET_FULL, raw)
+    contrast = (raw - threshold) / max(EPS, span * (1.0 - PULSE_TOLERANCE))
+    contrast = max(0.0, min(1.0, contrast))
+    # Absolute quiet guard only — calibration is the normalizers' job now.
+    gate_quiet = _smoothstep(PULSE_QUIET_FLOOR, PULSE_QUIET_FULL, raw)
+    # Two onset doors. The kick-flux path is the main one; the surge path
+    # catches kicks whose *energy* rise is compressed (wall-of-sound, or a
+    # slammed master where the hit is bass momentarily taking over the
+    # spectrum, not the spectrum getting louder) — but a surge only counts
+    # when it lands on a real share.
+    surge_room = 1.0 - _smoothstep(
+        PULSE_SURGE_SHARE_LO, PULSE_SURGE_SHARE_HI, frac_avg)
+    surge = (fnorm * surge_room
+             * _smoothstep(PULSE_FSURGE_FLOOR, PULSE_FSURGE_FULL, fraction))
+    onset = max(
+        _smoothstep(PULSE_ONSET_LO, PULSE_ONSET_HI, knorm),
+        PULSE_FSURGE_STRENGTH * surge,
+    )
+    # The share gate has the same two doors: absolute dominance, or a real
+    # surge. Broadband noise fails both — its share is a static sliver.
+    gate_fraction = max(
+        _smoothstep(PULSE_FRACTION_FLOOR, PULSE_FRACTION_FULL, fraction),
+        PULSE_FSURGE_STRENGTH * surge,
+    )
+    # Onset carries the hit at full strength on its own; contrast only
+    # throttles the sustained breathing. This decoupling is what lets an
+    # audible kick over a loud bed read full instead of inheriting the
+    # bed's log compression (measured 0.12 contrast with every gate open).
+    level = gate_quiet * gate_fraction * max(
+        onset, contrast * PULSE_SUSTAIN_FLOOR)
+
+    # Recent bass-onset activity: rises with the hit just computed, falls
+    # over ~7 s. While the bass channel is doing its job, the broadband
+    # fallback stays shut so snares layered over kicks can't double-fire.
+    hit_strength = gate_quiet * gate_fraction * onset
+    if hit_strength > act:
+        act = act + (hit_strength - act) * 0.5
+    else:
+        act = act + (hit_strength - act) * _ema_alpha(dt, PULSE_BASS_ACT_FALL_S)
+    # The fallback: rhythm that lives entirely outside the bass. Requires a
+    # percussive (spiky) broadband channel AND a bass channel that has been
+    # quiet a while; pulses at reduced strength so it reads "beat", not
+    # "kick". The quiet guard reuses overall loudness so a barely-audible
+    # source stays dark here too.
+    fallback_w = (
+        (1.0 - _smoothstep(PULSE_BASS_ACT_LO, PULSE_BASS_ACT_HI, act))
+        * _smoothstep(PULSE_BB_SPIK_LO, PULSE_BB_SPIK_HI, spik)
+    )
+    if fallback_w > 0.0:
+        # Loudness by high-percentile bin, not mean: a percussive burst
+        # lives in ~90 of 505 bins, and a mean would dilute clearly-audible
+        # hits below the quiet guard. p90 asks "are the hot bins hot".
+        raw_bb = math.log1p(float(np.percentile(mag[1:], 90.0)) * PULSE_GAIN)
+        gate_quiet_bb = _smoothstep(PULSE_QUIET_FLOOR, PULSE_QUIET_FULL, raw_bb)
+        level = max(level, PULSE_BB_STRENGTH * bnorm * fallback_w * gate_quiet_bb)
+
     if level >= env:
         env = level
     else:
         decay = math.exp(-dt / PULSE_RELEASE_S)
         env = env * decay + level * (1.0 - decay)
-    return _PulseState(env=env, floor=floor, peak=peak)
+    return _PulseState(
+        env=env, floor=floor, peak=peak, raw=raw, fraction=fraction,
+        frac_avg=frac_avg, krise=krise, frise=frise, brise=brise, lb=lb,
+        kbuf=kbuf, fbuf=fbuf, bbuf=bbuf, nbuf=nbuf, ibuf=ibuf, act=act,
+        diag={
+            "raw": raw, "floor": floor, "peak": peak, "span": span,
+            "fraction": fraction, "frac_avg": frac_avg,
+            "kflux": kflux, "fflux": fflux,
+            "bflux": bflux, "knorm": knorm, "fnorm": fnorm, "bnorm": bnorm,
+            "spik": spik, "contrast": contrast, "gate_quiet": gate_quiet,
+            "onset": onset, "gate_fraction": gate_fraction,
+            "act": act, "fallback_w": fallback_w, "level": level, "env": env,
+        },
+    )
 
 
 def _compute_bands(samples: np.ndarray, prev: np.ndarray | None = None) -> np.ndarray:
@@ -194,6 +610,90 @@ def list_monitor_sources() -> list[tuple[str, str]]:
     return result
 
 
+# ---------- own-stream resolution ----------
+#
+# The feed should hear TIDE, not the desktop. A sink monitor carries
+# everything the system plays — Discord pings, browser video, game audio —
+# and all of it used to pulse the backdrop. PulseAudio (and pipewire-pulse)
+# can instead record the monitor of one specific *sink input* via
+# ``parec --monitor-stream=<index>``, so auto mode resolves tide's own
+# playback stream and captures exactly that. mpv runs in-process with
+# ``audio_client_name="tide"`` (player.py), so its stream is claimable by
+# name; child-process backends (librespot) register their pid here and are
+# claimed by ``application.process.id``. An explicit monitor picked in
+# settings still wins over all of this.
+
+_OWN_APP_NAMES = frozenset({"tide"})
+_stream_pids: set[str] = set()
+_stream_pids_lock = threading.Lock()
+
+
+def register_stream_pid(pid: int | None) -> None:
+    """Claim a child playback process's streams for auto capture.
+
+    Called by backends that play through a separate process (librespot);
+    their sink inputs carry the child's ``application.process.id``, not
+    tide's, and would otherwise be invisible to auto resolution."""
+    if pid:
+        with _stream_pids_lock:
+            _stream_pids.add(str(int(pid)))
+
+
+def unregister_stream_pid(pid: int | None) -> None:
+    if pid:
+        with _stream_pids_lock:
+            _stream_pids.discard(str(int(pid)))
+
+
+def _own_pids() -> set[str]:
+    with _stream_pids_lock:
+        return {str(os.getpid())} | set(_stream_pids)
+
+
+def _pick_own_sink_input(entries: list, pids: set[str]) -> int | None:
+    """Pure matcher over ``pactl -f json list sink-inputs`` data: the index
+    of tide's own playback stream, or None. Prefers an uncorked (actually
+    playing) stream — tide can briefly own two (mpv idling while librespot
+    plays, or vice versa) and the corked one is the wrong tap."""
+    own: list[tuple[int, bool]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        props = entry.get("properties")
+        if not isinstance(props, dict):
+            continue
+        mine = (
+            props.get("application.name") in _OWN_APP_NAMES
+            or props.get("application.id") in _OWN_APP_NAMES
+            or str(props.get("application.process.id")) in pids
+        )
+        idx = entry.get("index")
+        if mine and isinstance(idx, int):
+            own.append((idx, bool(entry.get("corked", False))))
+    for idx, corked in own:
+        if not corked:
+            return idx
+    return own[0][0] if own else None
+
+
+def _own_sink_input() -> int | None:
+    """Resolve tide's playback sink input right now, or None (pactl
+    missing/failed, or tide simply has no open stream)."""
+    if shutil.which("pactl") is None:
+        return None
+    try:
+        out = subprocess.run(
+            ["pactl", "-f", "json", "list", "sink-inputs"],
+            capture_output=True, text=True, timeout=2,
+        )
+        entries = json.loads(out.stdout or "[]")
+    except Exception:
+        return None
+    if not isinstance(entries, list):
+        return None
+    return _pick_own_sink_input(entries, _own_pids())
+
+
 def _default_sink_monitor() -> str | None:
     """Return ``<default_sink>.monitor`` or None if pactl is missing."""
     if shutil.which("pactl") is None:
@@ -227,8 +727,19 @@ class AudioVisualizerFeed(QObject):
         self._stop = threading.Event()
         self._running = False
         self._monitor = "(not started)"
+        # Capture scoping. explicit_source is a user-picked monitor (wins
+        # outright); otherwise auto mode claims tide's own sink input
+        # (stream_idx) and only falls back to the default sink's monitor
+        # while tide has no open stream.
+        self._explicit_source: str | None = None
+        self._stream_idx: int | None = None
+        self._next_upgrade: float = 0.0
         self._prev_bands: np.ndarray | None = None
         self._pulse_env: _PulseState | None = None
+        # Opt-in per-chunk diagnostics CSV (TIDE_PULSE_TRACE) — see the
+        # pulse-trace block above. Opened per capture session in start().
+        self._tracer: _PulseTracer | None = None
+        self._t_capture0: float = 0.0
         # Reference-counted consumers. The singleton feed is shared by the
         # visualizer view and the app-wide ambient-pulse controller; capture
         # runs while at least one consumer holds it so neither tears it down
@@ -273,24 +784,49 @@ class AudioVisualizerFeed(QObject):
             self._consumers = holders
             self.start(source=self._preferred_source)
 
+    def _resolve_target(self) -> tuple[str | None, int | None]:
+        """(monitor_name, stream_index) for the next parec spawn. Stream
+        mode when auto resolution claims one of tide's own sink inputs;
+        monitor mode for an explicit user-chosen source, or as the auto
+        fallback while tide has no open playback stream."""
+        if self._explicit_source:
+            return self._explicit_source, None
+        idx = _own_sink_input()
+        if idx is not None:
+            return None, idx
+        return _default_sink_monitor(), None
+
     def start(self, source: str | None = None) -> bool:
         if self._running:
             return True
         if shutil.which("parec") is None:
             self.error.emit("parec not found — install libpulse")
             return False
-        monitor = source or _default_sink_monitor()
-        if not monitor:
+        self._explicit_source = source or None
+        monitor, stream_idx = self._resolve_target()
+        if monitor is None and stream_idx is None:
             self.error.emit("couldn't resolve a sink monitor — check pactl info")
             return False
 
         try:
-            self._proc = self._spawn_parec(monitor)
+            self._proc = self._spawn_parec(monitor, stream_idx)
         except Exception as exc:
             self.error.emit(f"parec failed to start: {exc}")
             return False
 
-        self._monitor = monitor
+        self._stream_idx = stream_idx
+        self._monitor = (
+            f"tide (stream #{stream_idx})" if stream_idx is not None
+            else str(monitor)
+        )
+        self._next_upgrade = time.monotonic() + 2.0
+        trace_path = os.environ.get(_TRACE_ENV)
+        if trace_path:
+            try:
+                self._tracer = _PulseTracer(trace_path)
+            except Exception:
+                self._tracer = None
+        self._t_capture0 = time.monotonic()
         self._stop.clear()
         self._thread = threading.Thread(target=self._process_loop, name="tide-fft", daemon=True)
         self._thread.start()
@@ -321,21 +857,40 @@ class AudioVisualizerFeed(QObject):
         self._prev_bands = None
         self._pulse_env = None
         self._consumers.clear()
+        if self._tracer is not None:
+            self._tracer.close()
+            self._tracer = None
 
     # ---------- worker ----------
 
-    def _spawn_parec(self, monitor: str) -> subprocess.Popen:
+    def _trace_reset(self) -> None:
+        """One reset marker row when the pulse baseline drops, so stream
+        gaps are visible in a trace. Callers guard on the baseline having
+        actually existed, keeping a paused stream from spamming markers."""
+        if self._tracer is not None:
+            self._tracer.row(
+                time.monotonic() - self._t_capture0, None, reset=True)
+
+    def _spawn_parec(self, monitor: str | None,
+                     stream_idx: int | None = None) -> subprocess.Popen:
+        argv = ["parec"]
+        if stream_idx is not None:
+            # Per-stream capture: the monitor of ONE sink input — tide's
+            # own playback — rather than a whole sink shared with every
+            # other app on the desktop.
+            argv += ["--monitor-stream", str(stream_idx)]
+        else:
+            argv += ["-d", str(monitor)]
+        argv += [
+            "--rate", str(SAMPLE_RATE),
+            "--channels", "1",
+            "--format", "float32le",
+            "--raw",
+            "--latency-msec", "10",
+            "--client-name", "tide-visualizer",
+        ]
         return subprocess.Popen(
-            [
-                "parec",
-                "-d", monitor,
-                "--rate", str(SAMPLE_RATE),
-                "--channels", "1",
-                "--format", "float32le",
-                "--raw",
-                "--latency-msec", "10",
-                "--client-name", "tide-visualizer",
-            ],
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             bufsize=0,
@@ -359,6 +914,27 @@ class AudioVisualizerFeed(QObject):
             pending = bytearray()
             died = False
             while not self._stop.is_set():
+                # Auto mode parked on the whole-sink fallback: watch for
+                # tide's own stream appearing (play pressed after capture
+                # started) and jump to it. Ending this parec is the whole
+                # trigger — the respawn path re-resolves and lands on the
+                # stream. Time-gated so pactl runs at most every ~2 s, and
+                # only reached while audio flows, which is exactly when a
+                # wrong-scope capture matters.
+                if (
+                    self._explicit_source is None
+                    and self._stream_idx is None
+                    and time.monotonic() >= self._next_upgrade
+                ):
+                    self._next_upgrade = time.monotonic() + 2.0
+                    if _own_sink_input() is not None:
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=1.0)
+                        except Exception:
+                            pass
+                        died = True
+                        break
                 try:
                     data = stdout.read(chunk_bytes)
                 except Exception:
@@ -372,6 +948,13 @@ class AudioVisualizerFeed(QObject):
                     if proc.poll() is not None:
                         died = True
                         break
+                    # Paused stream = a time gap for the onset detector too;
+                    # keep the baseline dropped while no audio flows so the
+                    # first post-resume chunk can't flux against pre-pause
+                    # audio. Chunk processing is idle here, so this is free.
+                    if self._pulse_env is not None:
+                        self._trace_reset()
+                    self._pulse_env = None
                     if self._stop.wait(0.05):
                         break
                     continue
@@ -383,6 +966,13 @@ class AudioVisualizerFeed(QObject):
                 # audio rather than replaying it late.
                 if len(pending) > chunk_bytes * 4:
                     del pending[:len(pending) - chunk_bytes * 2]
+                    # The dropped stretch is a time gap. Differencing onset
+                    # flux across it reads "quiet before the stall, loud
+                    # after" as a kick that never happened — re-anchor the
+                    # pulse baseline on the next chunk instead.
+                    if self._pulse_env is not None:
+                        self._trace_reset()
+                    self._pulse_env = None
                 while len(pending) >= chunk_bytes and not self._stop.is_set():
                     samples = np.frombuffer(
                         bytes(pending[:chunk_bytes]), dtype=np.float32
@@ -399,7 +989,17 @@ class AudioVisualizerFeed(QObject):
                     except Exception:
                         self._pulse_env = None
                     else:
-                        self.pulse_updated.emit(float(self._pulse_env.env))
+                        # None = non-finite chunk dropped the baseline; skip
+                        # the emit, the next clean chunk re-anchors.
+                        if self._pulse_env is not None:
+                            self.pulse_updated.emit(float(self._pulse_env.env))
+                    if self._tracer is not None:
+                        state = self._pulse_env
+                        self._tracer.row(
+                            time.monotonic() - self._t_capture0,
+                            state.diag if state is not None else None,
+                            reset=state is None,
+                        )
             if not died or self._stop.is_set():
                 return
             # parec exited underneath us (sink unplugged, pipewire restart).
@@ -412,12 +1012,34 @@ class AudioVisualizerFeed(QObject):
                 return
             if self._stop.wait(0.5):
                 return
+            # Re-resolve on every respawn: tide's stream index changes when
+            # playback stops/starts or the backend switches (mpv ↔
+            # librespot), and the fallback↔stream upgrade arrives here too.
+            monitor, stream_idx = self._resolve_target()
+            if monitor is None and stream_idx is None:
+                monitor = _default_sink_monitor()
+            if stream_idx != self._stream_idx:
+                # The target moved — a re-resolution, not a crash loop.
+                respawns = 0
             try:
-                self._proc = self._spawn_parec(self._monitor)
+                self._proc = self._spawn_parec(monitor, stream_idx)
             except Exception as exc:
                 self._running = False
                 self.error.emit(f"parec died and couldn't restart: {exc}")
                 return
+            self._stream_idx = stream_idx
+            self._monitor = (
+                f"tide (stream #{stream_idx})" if stream_idx is not None
+                else str(monitor)
+            )
+            self._next_upgrade = time.monotonic() + 2.0
+            # New stream, new baseline: the first post-respawn chunk must
+            # not compute onset flux against audio from before the gap —
+            # that manufactures a full-strength "kick" out of a sustained
+            # bass bed resuming after a pipewire hiccup.
+            if self._pulse_env is not None:
+                self._trace_reset()
+            self._pulse_env = None
 
 
 # Singleton.

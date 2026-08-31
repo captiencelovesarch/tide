@@ -212,11 +212,16 @@ def run(argv: list[str] | None = None) -> int:
 
     # ---------- source registry (v1.2 multi-source) ----------
     reg = source_registry()
-    if yt is not None:
-        yt_source = YTMusicSource(yt)
-        reg.register(yt_source, enabled=user_settings.sources_enabled.get("ytmusic", False))
-    else:
-        yt_source = None
+    # Registered even when signed out (yt is None), the same way Subsonic
+    # registers without config: the source panel builds its rows from the
+    # registry, so an unregistered source has no row — no toggle, no gear,
+    # no [sign in]. That made a cancelled sign-in a one-way trip, since the
+    # auto-disable above then kept ensure_signed_in() from ever running
+    # again and nothing in the UI could undo it. Enabled only with a live
+    # client; the row's [sign in] flips it back on via reauth_source().
+    yt_source = YTMusicSource(yt)
+    reg.register(yt_source, enabled=(yt is not None
+                                     and user_settings.sources_enabled.get("ytmusic", False)))
     reg.register(SoundCloudSource(),
                  enabled=user_settings.sources_enabled.get("soundcloud", True))
     reg.register(BandcampSource(),
@@ -291,7 +296,9 @@ def run(argv: list[str] | None = None) -> int:
     # In the no-source-enabled corner case (user dismissed every source in
     # the wizard), fall back to local_source so the UI has SOMETHING to
     # bind to and the views don't crash on first paint.
-    api_obj = reg.active or yt_source or local_source
+    # yt_source is registered even when signed out, so it only counts as a
+    # fallback when it actually has a client behind it.
+    api_obj = reg.active or (yt_source if yt is not None else None) or local_source
 
     # ---------- playback router ----------
     router = PlaybackRouter()
@@ -321,6 +328,16 @@ def run(argv: list[str] | None = None) -> int:
     # to leave the window invisible at launch (tray icon only) whenever
     # the CSD titlebar was enabled.
     window.set_csd_titlebar(user_settings.csd_titlebar)
+
+    # Settings on the window before the first show: the translucency check
+    # below reads corner_style from here, and WA_TranslucentBackground only
+    # takes effect on map — deciding it now avoids a native-window rebuild
+    # (and its flicker) right after launch. Re-assigned further down with
+    # the rest of the live-reconfigure refs; both point at the same object.
+    window._settings = user_settings
+    # CSD + rounded corners want an ARGB window so the corner arcs are
+    # genuinely transparent instead of a dark bite of QSS bg.
+    window._apply_window_translucency(theming.manager().current())
 
     # "start in mini player": skip showing the main window entirely — the
     # mini opens further down, once settings/adaptive/ambient are attached
@@ -373,6 +390,10 @@ def run(argv: list[str] | None = None) -> int:
     # Adaptive accent driver — shifts theme accent toward album art.
     from .ui.adaptive import AdaptiveDriver
     adaptive = AdaptiveDriver(window.queue)
+    # The liquid backdrop draws the cover itself, not just its palette.
+    # Connected before the enable calls below so the driver's immediate
+    # re-fire for the current track lands in the backdrop too.
+    adaptive.art_ready.connect(window.central_bg.set_art)
     adaptive.set_enabled(user_settings.adaptive_accent)
     # Also drive ambient backdrop extraction if the user wants the adaptive
     # background. This is independent of the accent shift.
@@ -412,7 +433,7 @@ def run(argv: list[str] | None = None) -> int:
     # raises the "session expired → [sign in]" toast within seconds of
     # launch. Network blips raise non-auth errors and are ignored — never
     # sign anyone out over a dead wifi link.
-    if yt_source is not None and reg.is_enabled("ytmusic"):
+    if yt is not None and reg.is_enabled("ytmusic"):
         from PySide6.QtCore import QRunnable, QThreadPool
 
         class _YtAuthProbe(QRunnable):

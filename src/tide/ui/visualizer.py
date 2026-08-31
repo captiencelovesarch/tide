@@ -790,7 +790,7 @@ class VisualizerView(QWidget):
         amenu = menu.addMenu("audio source")
         a_group = QActionGroup(amenu)
         a_group.setExclusive(True)
-        a_auto = QAction("auto (default sink monitor)", amenu, checkable=True)
+        a_auto = QAction("auto (tide's audio only)", amenu, checkable=True)
         a_auto.setChecked(self._audio_source_override is None)
         a_auto.triggered.connect(lambda: self._set_audio_source(None))
         a_group.addAction(a_auto)

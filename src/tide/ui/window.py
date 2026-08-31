@@ -364,6 +364,11 @@ class MainWindow(QMainWindow):
     # reads, so after one failed cycle the toast takes over.
     AUTO_REFRESH_COOLDOWN_S = 15 * 60
 
+    # Outcome of a MANUAL session refresh (refresh_session_manual): (ok,
+    # message). The settings dialog listens so its inline [refresh session]
+    # row can mirror the result without owning any worker bookkeeping.
+    session_refresh_finished = Signal(bool, str)
+
     def statusBar(self):  # shadows QMainWindow.statusBar for Python callers
         """The status bar lives INSIDE the CentralBg shell (not in the native
         QMainWindow slot) so the adaptive gradient runs edge to edge under
@@ -413,6 +418,8 @@ class MainWindow(QMainWindow):
         self._play_started_fired_for: str | None = None
         self._mini_mode: bool = False
         self._mini = None                   # lazy MiniPlayer window
+        self._fs_mode: bool = False
+        self._fs = None                     # lazy FullscreenPlayer window
         self._upper_wrap_widget = None
 
         # Stream-URL prefetch — kicks off while the current track is finishing
@@ -820,6 +827,11 @@ class MainWindow(QMainWindow):
         self._auto_refresh_inflight = False
         self._auto_refresh_at: float | None = None    # monotonic, last attempt
         self._auto_refresh_trigger = "expired"
+        # True while a MANUAL refresh wants the loud finish (see
+        # refresh_session_manual). Also covers the piggyback case: a click
+        # that lands while a silent attempt is mid-flight starts nothing new
+        # but flips that attempt's completion from silent to announced.
+        self._manual_refresh_notify = False
 
         # Auth heartbeat. Cookie death used to surface only when the user
         # happened to touch the API — i.e. mid-session, as songs quietly
@@ -954,6 +966,13 @@ class MainWindow(QMainWindow):
         self.sleep_btn = BracketButton("zzz")
         self.sleep_btn.setToolTip("sleep timer (ctrl+i)")
         self.sleep_btn.clicked.connect(self.open_sleep_timer)
+
+        # Fullscreen mode entry point (v1.6). Keyboard-only features
+        # don't exist (see sleep_btn's war story) — the glyph rides the
+        # strip's right cluster next to it.
+        self.fullscreen_btn = BracketButton("full", "⤢")
+        self.fullscreen_btn.setToolTip("fullscreen (f11)")
+        self.fullscreen_btn.clicked.connect(self.toggle_fullscreen_mode)
 
         self.time_label = QLabel("0:00 / 0:00")
         self.time_label.setProperty("class", "dim")
@@ -1181,7 +1200,14 @@ class MainWindow(QMainWindow):
         else:
             days = int(remaining // 86400)
             hours = int(remaining // 3600)
-            when = f"{days}d" if days >= 1 else f"{hours}h"
+            if days >= 1:
+                when = f"{days}d"
+            elif hours >= 1:
+                when = f"{hours}h"
+            else:
+                # Under an hour "0h" reads like a bug — count minutes,
+                # and round anything under one up so it never says "0m".
+                when = f"{max(1, int(remaining // 60))}m"
             text = f"youtube music: token expires in {when}"
         show_toast(
             self.toast_host(),
@@ -1276,6 +1302,12 @@ class MainWindow(QMainWindow):
 
     def _on_auto_refresh_done(self, profile_label: str) -> None:
         """Bound method (never a lambda) — see refresh_token_async."""
+        if self._manual_refresh_notify:
+            # The user hit [refresh session] while this silent attempt was
+            # already in flight. Dedup kept it to one worker, but the click
+            # bought a loud answer — finish through the manual path.
+            self._on_manual_refresh_done(profile_label)
+            return
         self._auto_refresh_inflight = False
         slug = getattr(self, "_refresh_slug", "ytmusic")
         if not profile_label:
@@ -1319,6 +1351,10 @@ class MainWindow(QMainWindow):
 
     def _on_auto_refresh_failed(self, message: str) -> None:
         """Bound method (never a lambda) — see refresh_token_async."""
+        if self._manual_refresh_notify:
+            # Same piggyback as _on_auto_refresh_done: the user asked.
+            self._on_manual_refresh_failed(message)
+            return
         self._auto_refresh_inflight = False
         slug = getattr(self, "_refresh_slug", "ytmusic")
         self.statusBar().showMessage(f"token refresh failed: {message}")
@@ -1338,50 +1374,134 @@ class MainWindow(QMainWindow):
         if remaining is not None:
             self._warn_session_expiring(remaining)
 
-    def _begin_source_reauth(self, slug: str) -> None:
-        """Toast-action handler for [refresh token].
+    # ---------- manual session refresh ----------
 
-        For YT Music, try a silent cookie re-import first — the browser is
-        usually still signed in, so the whole thing resolves in one click with
-        no dialog. Only when no browser holds a live session do we fall back
-        to the wizard, which is the case where the user genuinely has to go
-        log in again."""
-        if slug == "ytmusic":
-            from .wizard import refresh_token_async
-            self.statusBar().showMessage("refreshing youtube music token…")
-            self._refresh_slug = slug
-            refresh_token_async(self._on_token_refreshed, self._on_token_refresh_failed)
-            return
-        self._open_source_reauth(slug)
+    def refresh_session_manual(self, slug: str = "ytmusic") -> bool:
+        """User-asked session refresh — the settings button, Ctrl+Shift+R
+        and the expiry toast's [refresh token] action all land here.
 
-    def _on_token_refreshed(self, profile_label: str) -> None:
-        """Bound method (never a lambda) — worker signals deliver into the
-        emitting thread when connected to lambdas."""
+        Same worker as the silent auto path, opposite manners. No cooldown:
+        the cooldown exists to stop a *machine* from re-importing a dead
+        cookie jar in a loop, and a human clicking refresh IS the signal to
+        try again right now. And the outcome is never swallowed: success
+        toasts and reloads the stale views exactly like a healed auto
+        attempt; failure says so and points at sign-in.
+
+        In-flight dedup is shared with the auto path — a click while any
+        attempt is running starts nothing new, it just flips that attempt's
+        finish from silent to loud (via _manual_refresh_notify). Completion
+        also emits session_refresh_finished(ok, message) for inline UI (the
+        settings row) that can't watch toasts from behind a modal.
+
+        Returns True iff this call started a new attempt.
+        """
+        if source_registry().get(slug) is None:
+            # Nothing registered to hand refreshed cookies to. Two ways to
+            # get here: the wizard never ran (genuinely not set up), or it
+            # ran but the source is toggled off — app startup only builds
+            # the YT source when it's enabled. Saved auth tells them apart,
+            # and the settings row right above this button says "signed in"
+            # in the second case, so "isn't set up" would read as a lie.
+            from .. import auth as auth_module
+            try:
+                signed_in = bool(auth_module.have_auth())
+            except Exception:
+                signed_in = False
+            if signed_in:
+                msg = "youtube music is turned off. enable it in settings → sources"
+            else:
+                msg = "youtube music isn't set up"
+            self.statusBar().showMessage(msg)
+            self.session_refresh_finished.emit(False, msg)
+            return False
+        self._manual_refresh_notify = True
+        self._refresh_slug = slug
+        self.statusBar().showMessage("refreshing youtube music session…")
+        if self._auto_refresh_inflight:
+            return False
+        from .wizard import refresh_token_async
+        self._auto_refresh_inflight = True
+        # A manual attempt still counts against the AUTO cooldown: if this
+        # import doesn't stick, the heartbeat shouldn't burn cycles retrying
+        # the same jar seconds later. The manual path itself never checks it.
+        self._auto_refresh_at = time.monotonic()
+        refresh_token_async(self._on_manual_refresh_done, self._on_manual_refresh_failed)
+        return True
+
+    def _on_manual_refresh_done(self, profile_label: str) -> None:
+        """Bound method (never a lambda) — see refresh_token_async."""
+        self._auto_refresh_inflight = False
+        self._manual_refresh_notify = False
         slug = getattr(self, "_refresh_slug", "ytmusic")
+        from .toast import show_toast
         if not profile_label:
-            # No browser had a live session: the user really is signed out.
+            # Every profile came back signed out. A refresh can only copy a
+            # live session, not mint one — the user has to sign in first.
             self.statusBar().showMessage("no signed-in browser found")
-            self._open_source_reauth(slug)
+            show_toast(
+                self.toast_host(),
+                "no signed-in browser found",
+                action_label="sign in",
+                on_action=lambda: self._open_source_reauth(slug),
+            )
+            try:
+                self.source_view.refresh_statuses()
+                self.source_view._refresh_dot_for(slug)
+            except Exception:
+                pass
+            self.session_refresh_finished.emit(
+                False, "no signed-in browser found. sign in from the sources tab"
+            )
             return
         source = source_registry().get(slug)
-        # Rebuild the source's client against the cookies we just wrote.
         try:
             rebuilt = bool(source.reload_client())
         except Exception:
             rebuilt = False
         self._auth_expired_toasted.discard(slug)
-        self._expiry_warned = False      # fresh cookies → warn again next time
-        from .toast import show_toast
+        self._expiry_warned = False      # fresh cookies → watch the new deadline
         if not rebuilt:
-            show_toast(self.toast_host(), "token refreshed. restart tide to use it")
+            show_toast(self.toast_host(), "session refreshed. restart tide to use it")
+            self.session_refresh_finished.emit(
+                True, "session refreshed. restart tide to use it"
+            )
             return
-        self.statusBar().showMessage(f"token refreshed from {profile_label}")
-        show_toast(self.toast_host(), f"token refreshed from {profile_label}")
+        self.statusBar().showMessage(f"session refreshed from {profile_label}")
+        show_toast(self.toast_host(), f"session refreshed from {profile_label}")
+        try:
+            self.source_view.refresh_statuses()
+            self.source_view._refresh_dot_for(slug)
+        except Exception:
+            pass
         self._refresh_after_reauth(slug)
+        self.session_refresh_finished.emit(
+            True, f"session refreshed from {profile_label}"
+        )
 
-    def _on_token_refresh_failed(self, message: str) -> None:
-        slug = getattr(self, "_refresh_slug", "ytmusic")
-        self.statusBar().showMessage(f"token refresh failed: {message}")
+    def _on_manual_refresh_failed(self, message: str) -> None:
+        """Bound method (never a lambda) — see refresh_token_async."""
+        self._auto_refresh_inflight = False
+        self._manual_refresh_notify = False
+        self.statusBar().showMessage(f"session refresh failed: {message}")
+        from .toast import show_toast
+        show_toast(self.toast_host(), f"session refresh failed: {message}")
+        self.session_refresh_finished.emit(False, f"session refresh failed: {message}")
+
+    def _begin_source_reauth(self, slug: str) -> None:
+        """Toast-action handler for [refresh token].
+
+        For YT Music, delegate to refresh_session_manual: the user clicked,
+        so the loud finish is exactly right, and going through the manual
+        path keeps the in-flight dedup honest — a click landing while the
+        silent auto attempt (or an earlier click's attempt) is still running
+        must not start a second cookie harvest, with its second keyring
+        prompt. The browser is usually still signed in, so the whole thing
+        resolves in one click with no dialog; only when no browser holds a
+        live session does the completion toast point at sign-in, which is
+        the case where the user genuinely has to go log in again."""
+        if slug == "ytmusic":
+            self.refresh_session_manual(slug)
+            return
         self._open_source_reauth(slug)
 
     def _refresh_after_reauth(self, slug: str) -> None:
@@ -1788,10 +1908,14 @@ class MainWindow(QMainWindow):
         self._play_now(track, seed_radio=True)
         self.statusBar().showMessage("radio started")
 
-    def _toggle_visualizer_fullscreen(self) -> None:
-        # F11 only meaningful when the visualizer is the active view.
+    def _on_f11(self) -> None:
+        # On the visualizer view F11 keeps its original meaning
+        # (fullscreen the canvas); everywhere else it opens the
+        # fullscreen now-playing mode.
         if self.stack.currentIndex() == 8:
             self.visualizer_view._toggle_fullscreen()
+        else:
+            self.toggle_fullscreen_mode()
 
     # ---------- discovery navigation ----------
 
@@ -2067,8 +2191,8 @@ class MainWindow(QMainWindow):
         can_like = bool(cur_source and cur_source.supports("rating"))
         can_radio = bool(cur_source and cur_source.supports("radio"))
         self.like_btn.setEnabled(can_like)
-        if self._mini is not None:
-            self._mini.set_like_enabled(can_like)
+        for w in self._companions():
+            w.set_like_enabled(can_like)
         self.radio_btn.setEnabled(can_radio)
         # Best-effort like-state lookup in the background; UI defaults to ♡.
         self._liked_current = False
@@ -2100,8 +2224,8 @@ class MainWindow(QMainWindow):
         self._liked_current = target
         self._refresh_like_button()
         self.like_btn.setEnabled(False)
-        if self._mini is not None:
-            self._mini.set_like_enabled(False)
+        for w in self._companions():
+            w.set_like_enabled(False)
 
         thread = QThread()
         worker = _RateWorker(self.api, self._current.video_id, target)
@@ -2121,8 +2245,8 @@ class MainWindow(QMainWindow):
         if self._current and self._current.video_id == video_id:
             self.statusBar().showMessage("liked" if liked else "removed like")
             self.like_btn.setEnabled(True)
-            if self._mini is not None:
-                self._mini.set_like_enabled(True)
+            for w in self._companions():
+                w.set_like_enabled(True)
 
     def _on_rate_failed(self, video_id: str, msg: str) -> None:
         # Revert optimistic flip.
@@ -2130,16 +2254,16 @@ class MainWindow(QMainWindow):
             self._liked_current = not self._liked_current
             self._refresh_like_button()
             self.like_btn.setEnabled(True)
-            if self._mini is not None:
-                self._mini.set_like_enabled(True)
+            for w in self._companions():
+                w.set_like_enabled(True)
         self.statusBar().showMessage(f"couldn't update like: {msg}")
 
     def _refresh_like_button(self) -> None:
         glyph = "♥" if self._liked_current else "♡"
         self.like_btn.setLabel(glyph)
         self.like_btn.setGlyph(glyph)
-        if self._mini is not None:
-            self._mini.set_liked(self._liked_current)
+        for w in self._companions():
+            w.set_liked(self._liked_current)
 
     # ---------- v1.5 insights + play reporting ----------
 
@@ -2435,7 +2559,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_mode_buttons(self) -> None:
         """Paint the queue's shuffle/repeat state onto the transport
-        buttons (and the mini player, when it's up)."""
+        buttons (and the companion windows, when they exist)."""
         shuffle_on = self.queue.shuffle_enabled
         mode = self.queue.repeat_mode
         self.shuffle_btn.setActiveState(shuffle_on)
@@ -2448,8 +2572,8 @@ class MainWindow(QMainWindow):
         else:
             self.repeat_btn.setLabel("repeat")
             self.repeat_btn.setGlyph("↻")
-        if self._mini is not None:
-            self._mini.set_modes(shuffle_on, mode)
+        for w in self._companions():
+            w.set_modes(shuffle_on, mode)
 
     def _on_queue_modes_changed(self) -> None:
         self._refresh_mode_buttons()
@@ -2520,9 +2644,9 @@ class MainWindow(QMainWindow):
             or bool(self._play_history)
             or self.player.duration > 0
         )
-        if self._mini is not None:
-            self._mini.set_nav_enabled(self.prev_btn.isEnabled(),
-                                       self.next_btn.isEnabled())
+        for w in self._companions():
+            w.set_nav_enabled(self.prev_btn.isEnabled(),
+                              self.next_btn.isEnabled())
 
     # ---------- queue / radio plumbing ----------
 
@@ -3054,15 +3178,37 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, _remap)
 
     def _apply_window_translucency(self, theme) -> None:
-        """Honor a theme's `[layout] window_translucent` flag (seaglass).
+        """Honor a theme's `[layout] window_translucent` flag (seaglass),
+        and give the tide-drawn titlebar real rounded window corners.
 
-        The attribute only takes effect on map, so a live theme switch that
-        flips it needs one hide/show — visually covered by the restyle that
-        lands the same instant. No-ops when the flag already matches."""
+        With CSD on and a corner radius set, the backdrop clips a rounded
+        path — but on an opaque window the clipped-out corner shows the flat
+        QSS bg as a dark bite. An ARGB window makes those pixels genuinely
+        transparent, same recipe the mini player uses unconditionally.
+        CentralBg.paintEvent checks this attribute and paints square when
+        it's unset — that's the degradation path for configs that never
+        turn translucency on (system decorations, or sharp corners). With
+        CSD + rounded corners the attribute is set unconditionally; there
+        is no compositing detection, so what an ARGB window looks like on
+        compositor-less X11 is up to the platform (in practice the corners
+        render black, same as v1.5).
+
+        The attribute only takes effect on map, so a live flip needs one
+        hide/show — visually covered by the restyle that lands the same
+        instant. No-ops when the flag already matches."""
         try:
             want = bool(theme.t("layout", "window_translucent", False))
         except Exception:
             want = False
+        if not want:
+            try:
+                from .central_bg import corner_radius as _corner_radius
+                csd = bool(self.windowFlags() & Qt.FramelessWindowHint)
+                radius = _corner_radius(
+                    getattr(self._settings, "corner_style", "sharp"))
+                want = csd and radius > 0
+            except Exception:
+                pass
         if want == self.testAttribute(Qt.WA_TranslucentBackground):
             return
         self.setAttribute(Qt.WA_TranslucentBackground, want)
@@ -3152,7 +3298,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+7"), self, lambda: self._switch_view("source"))
         QShortcut(QKeySequence("Ctrl+8"), self, lambda: self._switch_view("audio_fx"))
         QShortcut(QKeySequence("Ctrl+9"), self, self.open_settings)
-        QShortcut(QKeySequence("F11"), self, self._toggle_visualizer_fullscreen)
+        QShortcut(QKeySequence("F11"), self, self._on_f11)
         QShortcut(QKeySequence("Ctrl+,"), self, self.open_settings)
         QShortcut(QKeySequence("Space"), self, self.player.toggle)
         QShortcut(QKeySequence("Ctrl+Right"), self, self._on_next_clicked)
@@ -3164,6 +3310,10 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+R"), self, self._on_repeat_clicked)
         QShortcut(QKeySequence("Ctrl+M"), self, self.toggle_mini_mode)
         QShortcut(QKeySequence("Ctrl+I"), self, self.open_sleep_timer)
+        # Manual YT session refresh — same path as settings → integrations →
+        # [refresh session], no dialog needed. Ctrl+R is taken by repeat;
+        # Shift makes it "the other refresh".
+        QShortcut(QKeySequence("Ctrl+Shift+R"), self, self.refresh_session_manual)
         # Playback speed shortcuts: [ slower, ] faster, \ reset to 1.0×.
         # Mirrors the popover's −/+ and reset; the SpeedButton's set_speed
         # handles clamping + persistence.
@@ -3229,16 +3379,13 @@ class MainWindow(QMainWindow):
 
     def _on_audio_fx_state_changed(self, state) -> None:
         """Fan a state change from either FX widget out to: (a) the
-        playback router (which pushes the rebuilt filter chain into mpv),
-        (b) the OTHER FX widget so its controls reflect the same state,
-        (c) the persisted Settings.audio_fx_state JSON (debounced to
-        avoid a TOML write on every EQ-slider tick)."""
-        from ..audio_fx import build_filter_chain
-        # 1. apply
-        try:
-            self.player.set_audio_filter_chain(build_filter_chain(state))
-        except Exception:
-            pass
+        playback router, which pushes the rebuilt filter chain into mpv
+        (debounced — see _schedule_audio_fx_push), (b) the OTHER FX
+        widget so its controls reflect the same state, (c) the persisted
+        Settings.audio_fx_state JSON (debounced to avoid a TOML write on
+        every EQ-slider tick)."""
+        # 1. apply (debounced).
+        self._schedule_audio_fx_push(state)
         # 2. mirror — the two widgets share the dataclass instance, but
         # their bound widgets still need to repaint to reflect mutations
         # the OTHER widget made. blockSignals inside sync_from_state /
@@ -3254,6 +3401,44 @@ class MainWindow(QMainWindow):
             self.audio_fx_btn._refresh_label()
         # 3. persist (debounced).
         self._schedule_audio_fx_save(state)
+
+    def _schedule_audio_fx_push(self, state) -> None:
+        # Building the chain string is cheap; handing it to mpv is not.
+        # With the convolution reverb loaded, one af set costs 34-62 ms
+        # ON THE GUI THREAD and restarts the reverb tail — and a slider
+        # drag emits a state change per pixel. Trailing-edge debounce
+        # (same shape as the settings-save one below): mpv gets a single
+        # push shortly after the knob stops moving.
+        from PySide6.QtCore import QTimer as _QT
+        timer = getattr(self, "_audio_fx_push_timer", None)
+        if timer is None:
+            timer = _QT(self)
+            timer.setInterval(120)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_audio_fx_push)
+            self._audio_fx_push_timer = timer
+        self._pending_audio_fx_push = state
+        timer.start()
+
+    def _flush_audio_fx_push(self) -> None:
+        state = getattr(self, "_pending_audio_fx_push", None)
+        if state is None:
+            return
+        from ..audio_fx import build_filter_chain
+        try:
+            chain = build_filter_chain(state)
+        except Exception:
+            return
+        # Plenty of ticks rebuild the exact chain mpv is already running
+        # (toggling a bypassed section, re-picking the same preset). A
+        # re-push would buy nothing and still cut the reverb tail.
+        if chain == getattr(self, "_last_audio_fx_chain", None):
+            return
+        try:
+            self.player.set_audio_filter_chain(chain)
+        except Exception:
+            return
+        self._last_audio_fx_chain = chain
 
     def _schedule_audio_fx_save(self, state) -> None:
         # Lazy-init the QTimer so we don't pay the construction cost on
@@ -3366,6 +3551,7 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(self.audio_fx_btn)
         controls_row.addWidget(self.speed_btn)
         controls_row.addWidget(self.sleep_btn)
+        controls_row.addWidget(self.fullscreen_btn)
         controls_row.addWidget(self.volume)
 
         progress_row = QHBoxLayout()
@@ -3421,6 +3607,7 @@ class MainWindow(QMainWindow):
         volume_row.addWidget(self.audio_fx_btn)
         volume_row.addWidget(self.speed_btn)
         volume_row.addWidget(self.sleep_btn)
+        volume_row.addWidget(self.fullscreen_btn)
         volume_row.addWidget(self.volume)
         volume_row.addStretch(1)
 
@@ -3454,7 +3641,8 @@ class MainWindow(QMainWindow):
                 # throwaway host before its deferred deleteLater fired. Keep
                 # them explicitly — survival shouldn't hinge on event-loop
                 # timing or on every layout variant re-including them.
-                self.audio_fx_btn, self.speed_btn, self.sleep_btn]
+                self.audio_fx_btn, self.speed_btn, self.sleep_btn,
+                self.fullscreen_btn]
         # Pull our widgets out of the old layout so the layout deletion
         # doesn't take them with it.
         for w in keep:
@@ -3715,6 +3903,10 @@ class MainWindow(QMainWindow):
         """
         if on == self._mini_mode:
             return
+        if on and self._fs_mode:
+            # The companion modes are exclusive. Both swaps land in the
+            # same event-loop turn, so nothing paints between them.
+            self.set_fullscreen_mode(False)
         self._mini_mode = on
         adaptive = getattr(self, "_adaptive", None)
         ambient = getattr(self, "_ambient", None)
@@ -3755,10 +3947,97 @@ class MainWindow(QMainWindow):
         if self._mini is not None and self._mini_mode:
             self._mini.apply_settings()
 
+    # ---------- fullscreen mode (v1.6) ----------
+
+    def toggle_fullscreen_mode(self) -> None:
+        # Deferred for the same reason as toggle_mini_mode: reached from
+        # mouse handlers and shortcuts, and window show/hide inside the
+        # emission is the PySide6 + py3.14 crash pattern.
+        QTimer.singleShot(0, self._toggle_fullscreen_now)
+
+    def _toggle_fullscreen_now(self) -> None:
+        self.set_fullscreen_mode(not self._fs_mode)
+
+    def exit_fullscreen_mode(self) -> None:
+        self.set_fullscreen_mode(False)
+
+    def set_fullscreen_mode(self, on: bool) -> None:
+        """Swap between the main window and the fullscreen now-playing
+        surface (ui/fullscreen.py). Same shape as set_mini_mode — a
+        dedicated top-level, main hidden while it's up — and the two
+        companion modes are exclusive."""
+        if on == self._fs_mode:
+            return
+        if on and self._mini_mode:
+            # Capture the monitor before the mini goes away — fullscreen
+            # belongs on the screen the user was actually looking at.
+            target_screen = (self._mini.screen() if self._mini is not None
+                             else self.screen())
+            self.set_mini_mode(False)
+        else:
+            target_screen = self.screen()
+        self._fs_mode = on
+        adaptive = getattr(self, "_adaptive", None)
+        ambient = getattr(self, "_ambient", None)
+        if on:
+            if self._fs is None:
+                from .fullscreen import FullscreenPlayer
+                self._fs = FullscreenPlayer(self)
+                if adaptive is not None:
+                    # Full-res cover for the liquid style — the same
+                    # wiring app.py gives the main backdrop. Without it
+                    # liquid melted the cover on the main surface but
+                    # fell back to plain fields in fullscreen.
+                    adaptive.art_ready.connect(self._fs.central_bg.set_art)
+            if adaptive is not None:
+                adaptive.set_mini_active(True)
+            if ambient is not None:
+                # The fullscreen surface fans the envelope into its own
+                # backdrop, same as the mini.
+                ambient.add_target(self._fs)
+            self._fs.prepare_for_screen(target_screen)
+            if target_screen is not None:
+                # setScreen picks the fullscreen output on Wayland; the
+                # geometry push is what lands it there on X11.
+                try:
+                    self._fs.setScreen(target_screen)
+                except AttributeError:
+                    pass
+                self._fs.setGeometry(target_screen.geometry())
+            self._fs.sync_now(
+                self._current,
+                self.player.duration,
+                self._last_position,
+                self.player.state,
+                self._liked_current,
+            )
+            self._fs.showFullScreen()
+            self._fs.raise_()
+            self._fs.activateWindow()
+            self.hide()
+        else:
+            if self._fs is not None:
+                if ambient is not None:
+                    ambient.remove_target(self._fs)
+                self._fs.hide()
+            if adaptive is not None:
+                adaptive.set_mini_active(False)
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
     # ---------- multi-window helpers (tray / MPRIS) ----------
 
+    def _companions(self) -> list:
+        """The other now-playing windows (mini, fullscreen) that mirror
+        like/nav/mode state. Constructed lazily, so 0–2 entries."""
+        return [w for w in (self._mini, self._fs) if w is not None]
+
     def active_app_window(self) -> QWidget:
-        """The window the user currently interacts with — mini or main."""
+        """The window the user currently interacts with — fullscreen,
+        mini or main."""
+        if self._fs_mode and self._fs is not None:
+            return self._fs
         if self._mini_mode and self._mini is not None:
             return self._mini
         return self
@@ -3774,7 +4053,9 @@ class MainWindow(QMainWindow):
 
     def toast_host(self) -> QWidget:
         """Where toasts should render — the hidden main window can't show
-        them while the mini is up."""
+        them while a companion window is up."""
+        if self._fs_mode and self._fs is not None and self._fs.isVisible():
+            return self._fs
         if self._mini_mode and self._mini is not None and self._mini.isVisible():
             return self._mini
         return self
@@ -3859,6 +4140,11 @@ class MainWindow(QMainWindow):
             ambient.set_pulse_enabled(new.adaptive_pulse and new.adaptive_background)
         # Titlebar mode (tide-drawn vs system decoration) — live flip remaps.
         self.set_csd_titlebar(new.csd_titlebar)
+        # Corner style or titlebar mode may have changed whether the window
+        # needs an alpha channel (CSD + rounded corners = truly transparent
+        # corner arcs). Must run after set_csd_titlebar so the frameless
+        # flag it reads is current.
+        self._apply_window_translucency(self._theme)
         # Live-apply mini player prefs if the mini is currently up.
         self._apply_mini_backdrop()
         radius_px = _corner_radius(new.corner_style)
@@ -4000,15 +4286,16 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
             return
-        # Real quit: the mini is a separate top-level and would outlive
-        # super().closeEvent, leaving the app idling headless with a dead
-        # player. Commit to quitting (the mini's own closeEvent reroutes
-        # compositor closes to exit-mini unless _wants_quit says otherwise),
-        # then close it before the player goes down.
+        # Real quit: the companion windows are separate top-levels and
+        # would outlive super().closeEvent, leaving the app idling
+        # headless with a dead player. Commit to quitting (their own
+        # closeEvents reroute compositor closes to exit-mode unless
+        # _wants_quit says otherwise), then close them before the player
+        # goes down.
         self._wants_quit = True
-        if self._mini is not None:
+        for w in self._companions():
             try:
-                self._mini.close()
+                w.close()
             except RuntimeError:
                 pass
         if self._session_dirty:

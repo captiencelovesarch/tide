@@ -451,6 +451,18 @@ class AlbumArt(QLabel):
             self._framed = framed
             self._apply_theme(self._theme)
 
+    def set_base_size(self, base: int) -> None:
+        """Re-anchor the unscaled base size after construction. The
+        fullscreen window re-derives its art size per monitor, so the
+        tile can't be pinned to whatever screen it was first built for.
+        Goes through _apply_theme so the ui-scale multiply and a
+        re-render at the new size both happen."""
+        base = max(1, int(base))
+        if base == self._base_size:
+            return
+        self._base_size = base
+        self._apply_theme(self._theme)
+
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.LeftButton:
             self._pressed = True

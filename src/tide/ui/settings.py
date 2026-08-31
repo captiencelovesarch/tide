@@ -62,6 +62,13 @@ class SettingsDialog(QDialog):
         self._build_ui()
         self._populate()
 
+        # Manual session refresh reports through a window signal (the worker
+        # and its dedup live on MainWindow, not here). Qt drops the
+        # connection with the dialog, so no teardown bookkeeping needed.
+        win = self._find_main_window()
+        if win is not None:
+            win.session_refresh_finished.connect(self._on_refresh_session_finished)
+
     # ---------- build ----------
 
     def _build_ui(self) -> None:
@@ -77,7 +84,7 @@ class SettingsDialog(QDialog):
 
         # Audio device picker for the visualizer (backup; cog menu has it too).
         self.audio_device_picker = QComboBox()
-        self.audio_device_picker.addItem("auto (default sink monitor)", "")
+        self.audio_device_picker.addItem("auto (tide's audio only)", "")
         try:
             from .. import audio_capture
             for name, label in audio_capture.list_monitor_sources():
@@ -116,11 +123,15 @@ class SettingsDialog(QDialog):
         self.adaptive_style_picker = QComboBox()
         self.adaptive_style_picker.addItem("living fields · layered ambience", "field")
         self.adaptive_style_picker.addItem("diagonal band · classic sweep", "band")
-        self.adaptive_style_picker.addItem("bass arch · hill swells on bass", "vbeam")
+        self.adaptive_style_picker.addItem("bass arch · hazy hill swells on bass", "vbeam")
         self.adaptive_style_picker.addItem("sunset horizon · sun low over water", "horizon")
         self.adaptive_style_picker.addItem("lightning · strikes on the beat", "lightning")
         self.adaptive_style_picker.addItem("deep water · glow wells up from below", "depths")
-        self.adaptive_style_picker.addItem("rim light · edges glow, center stays dark", "rimlight")
+        self.adaptive_style_picker.addItem("rim light · edges hold the light", "rimlight")
+        self.adaptive_style_picker.addItem("liquid cover · the album art, melted", "liquid")
+        self.adaptive_style_picker.addItem("aurora · slow curtains of light", "aurora")
+        self.adaptive_style_picker.addItem("smoke · drifts, glows from within", "smoke")
+        self.adaptive_style_picker.addItem("caustics · underwater light web", "caustics")
 
         # Bass pulse — swells / brightens that gradient on heavy bass while
         # playing. Needs the monitor capture, so it's gated on the gradient
@@ -282,11 +293,15 @@ class SettingsDialog(QDialog):
         self.mini_backdrop_picker.addItem("follow main backdrop style", "follow")
         self.mini_backdrop_picker.addItem("living fields · layered ambience", "field")
         self.mini_backdrop_picker.addItem("diagonal band · classic sweep", "band")
-        self.mini_backdrop_picker.addItem("bass arch · hill swells on bass", "vbeam")
+        self.mini_backdrop_picker.addItem("bass arch · hazy hill swells on bass", "vbeam")
         self.mini_backdrop_picker.addItem("sunset horizon · sun low over water", "horizon")
         self.mini_backdrop_picker.addItem("lightning · strikes on the beat", "lightning")
         self.mini_backdrop_picker.addItem("deep water · glow wells up from below", "depths")
-        self.mini_backdrop_picker.addItem("rim light · edges glow, center stays dark", "rimlight")
+        self.mini_backdrop_picker.addItem("rim light · edges hold the light", "rimlight")
+        self.mini_backdrop_picker.addItem("liquid cover · the album art, melted", "liquid")
+        self.mini_backdrop_picker.addItem("aurora · slow curtains of light", "aurora")
+        self.mini_backdrop_picker.addItem("smoke · drifts, glows from within", "smoke")
+        self.mini_backdrop_picker.addItem("caustics · underwater light web", "caustics")
         self.mini_backdrop_picker.addItem("off · flat card", "off")
         self.mini_progress_picker = QComboBox()
         self.mini_progress_picker.addItem("border ring · the window edge fills", "ring")
@@ -498,6 +513,39 @@ class SettingsDialog(QDialog):
         lb_col.addLayout(lb_token_row)
         lb_col.addWidget(lb_explainer)
 
+        # ---- youtube music session ----
+        session_heading = QLabel("── youtube music session ─────")
+        session_heading.setProperty("class", "dim")
+
+        self.refresh_session_btn = QPushButton("refresh session")
+        self.refresh_session_btn.clicked.connect(self._on_refresh_session)
+
+        # Inline state: current session at rest, "checking browsers…" while
+        # the window's worker runs, then the outcome. The window also toasts,
+        # but this modal dialog sits over the toast host — the row is the
+        # feedback the user actually sees.
+        self.refresh_session_status = QLabel(self._session_state_text())
+        self.refresh_session_status.setProperty("class", "dim")
+        self.refresh_session_status.setWordWrap(True)
+
+        session_blurb = QLabel(
+            "pulls fresh cookies from whichever browser is still signed in "
+            "to youtube music. use it when tide wakes up with anonymous "
+            "results because the saved session expired. ctrl+shift+r does "
+            "the same thing without opening settings."
+        )
+        session_blurb.setWordWrap(True)
+        session_blurb.setProperty("class", "dim")
+
+        session_row = QHBoxLayout()
+        session_row.addWidget(self.refresh_session_btn)
+        session_row.addWidget(self.refresh_session_status, stretch=1)
+
+        session_col = QVBoxLayout()
+        session_col.setSpacing(6)
+        session_col.addLayout(session_row)
+        session_col.addWidget(session_blurb)
+
         # ---- play reporting (v1.5) ----
         report_heading = QLabel("── play reporting ────────────")
         report_heading.setProperty("class", "dim")
@@ -644,6 +692,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(_page(playback_col, audio_fx_heading, audio_fx_col),
                     "playback")
         tabs.addTab(_page(discord_heading, discord_col, lb_heading, lb_col,
+                          session_heading, session_col,
                           report_heading, report_col),
                     "integrations")
         tabs.addTab(_page(advanced_heading, adv_col, about_heading, about_col),
@@ -990,6 +1039,52 @@ class SettingsDialog(QDialog):
             self, "tide",
             "signed out. re-import from settings → sources whenever you like.",
         )
+
+    def _find_main_window(self):
+        """Walk up to the MainWindow (same trick as _on_open_audio_fx) — it
+        owns the refresh worker, the dedup flags and the completion signal."""
+        win = self.parent()
+        while win is not None and not hasattr(win, "refresh_session_manual"):
+            win = win.parent()
+        return win
+
+    def _session_state_text(self) -> str:
+        """The yt session at rest, phrased for the settings row. Expiry is
+        best effort — imports from before tide recorded it show plain
+        "signed in", and that must not read as a problem."""
+        if not auth.have_auth():
+            return "not signed in"
+        remaining = auth.seconds_until_expiry()
+        if remaining is None:
+            return "signed in"
+        if remaining <= 0:
+            return "signed in · session expired"
+        days = int(remaining // 86400)
+        hours = int(remaining // 3600)
+        if days >= 1:
+            when = f"{days}d"
+        elif hours >= 1:
+            when = f"{hours}h"
+        else:
+            # Under an hour "0h" reads like a bug — count minutes, and
+            # round anything under one up so it never says "0m".
+            when = f"{max(1, int(remaining // 60))}m"
+        return f"signed in · expires in {when}"
+
+    def _on_refresh_session(self) -> None:
+        win = self._find_main_window()
+        if win is None:
+            # Constructed without a MainWindow parent (tests) — nothing to
+            # delegate to, and nothing will emit the completion signal.
+            self.refresh_session_status.setText("couldn't reach the main window")
+            return
+        self.refresh_session_btn.setEnabled(False)
+        self.refresh_session_status.setText("checking browsers…")
+        win.refresh_session_manual()
+
+    def _on_refresh_session_finished(self, ok: bool, message: str) -> None:
+        self.refresh_session_btn.setEnabled(True)
+        self.refresh_session_status.setText(message)
 
     def _on_open_taste(self) -> None:
         """v1.5 taste-profile editor. Talks to the live YT source from the

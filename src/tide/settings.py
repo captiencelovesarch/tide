@@ -42,7 +42,8 @@ class Settings:
     # v1.2.7 mini player redo — the dedicated frameless window (ui/mini.py).
     # Backdrop: "follow" = use adaptive_background_style; or a concrete
     # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths" |
-    # "rimlight", or "off" for a flat card.
+    # "rimlight" | "liquid" | "aurora" | "smoke" | "caustics", or "off"
+    # for a flat card.
     mini_backdrop_style: str = "follow"
     # "ring" = window border fills as the progress bar; "thin" = classic bar.
     mini_progress_style: str = "ring"
@@ -91,7 +92,8 @@ class Settings:
     # ui/central_bg.py).
     adaptive_background: bool = False
     # Adaptive backdrop style: "field" | "band" | "vbeam" | "horizon" |
-    # "lightning" | "depths" | "rimlight".
+    # "lightning" | "depths" | "rimlight" | "liquid" | "aurora" | "smoke"
+    # | "caustics".
     adaptive_background_style: str = "field"
     # When True (and adaptive_background is on), that gradient also swells /
     # brightens on heavy bass, app-wide while playing. Needs the monitor
@@ -185,6 +187,16 @@ class Settings:
     # v1.5 home engine. "patterns" = the block/pattern home (hero, grids,
     # mosaics, charts, moods); "shelves" = the v1.4 plain shelf rows.
     home_layout: str = "patterns"
+    # v1.6 fullscreen mode — the lean-back now-playing window (ui/fullscreen.py),
+    # opened with F11 or the [⤢] strip button. Backdrop: "follow" = use
+    # adaptive_background_style; or a concrete style slug, or "off" for flat.
+    # Same choices as the mini player.
+    fullscreen_backdrop_style: str = "follow"
+    # Remembered side pane on the right half: "lyrics" | "queue" | "off".
+    fullscreen_pane: str = "lyrics"
+    # Fullscreen backdrop swells with the bass envelope (shares the mini's
+    # capture consumer; only runs while the window is up).
+    fullscreen_pulse: bool = True
 
 
 def _to_toml(s: Settings) -> str:

@@ -8,19 +8,26 @@ into mpv. Persistence is JSON-in-a-settings-string so the TOML stays
 shallow (the existing serializer doesn't handle lists of dicts).
 
 Filter order in the chain is deliberate:
-    EQ bands → bass shelf → treble shelf → stereo width →
-    compressor → reverb → loudness norm → mono
+    EQ bands → exciter → bass shelf → treble shelf → lofi →
+    stereo width → compressor → chorus → flanger → phaser → tremolo →
+    reverb → crossfeed → loudness norm → mono
 
-EQ first to shape the source signal cleanly, shelves next for broad
-tone, then dynamics/space, then loudness leveling at the end, then the
-optional mono fold as the very last step. mpv layers its own scaletempo
-+ volume in front of our chain.
+EQ first to shape the source signal cleanly, the exciter right after so
+its synthesized harmonics ride the corrected spectrum before the broad
+shelves, lofi next since it band-limits and crushes the *source*
+character, then image/dynamics, then the modulation family (motion
+before space — a chorused signal into reverb sounds like an ensemble in
+a room, a reverbed signal into chorus sounds like seasickness), then
+the convolution reverb, headphone crossfeed on the summed result,
+loudness leveling near the end, and the optional mono fold as the very
+last step. mpv layers its own scaletempo + volume in front of our
+chain.
 """
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
-from typing import Mapping
 
 
 # ---------- frequencies + bands ----------
@@ -73,20 +80,28 @@ def detect_eq_preset(bands: list[float]) -> str:
 
 # ---------- reverb presets ----------
 
-# Each entry is a single ffmpeg ``aecho`` argument string (everything
-# after the ``=``). build_filter_chain() prefixes with "aecho=" and
-# scales the out_gain by ``reverb_wet``.
+# Convolution reverb. Each preset maps to a synthesized stereo impulse
+# response (see ``fx_ir`` — exponentially decaying colored noise with
+# per-preset RT60 / pre-delay / damping / width), convolved in mpv via
+# an ffmpeg ``afir`` lavfi graph. The old ``aecho`` "reverb" was a
+# handful of discrete delay taps — audibly just the song echoing —
+# and is gone.
 #
-# Structure of an aecho arg: in_gain : out_gain : delays_ms : decays
-# Multi-tap delays/decays are pipe-separated. "off" = no reverb.
-REVERB_PRESETS: dict[str, str] = {
-    "off":       "",
-    "room":      "0.8:0.55:35:0.30",
-    "hall":      "0.7:0.65:80|140:0.40|0.30",
-    "cathedral": "0.6:0.75:120|240|360:0.50|0.40|0.30",
-    # Signature tide preset — slower, longer tail, paired well with
+# The value here is the wet-path mix weight the preset gets when the
+# user's wet knob is at 1.0; the knob scales it linearly. The IRs are
+# energy-normalized, so weight 1.0 ≈ wet as loud as dry on noise-like
+# music; bigger rooms get a bit more so cranking the knob actually
+# drenches. "off" = no reverb. Room acoustics live in
+# ``fx_ir.IR_SPECS`` under the same preset names.
+REVERB_PRESETS: dict[str, float] = {
+    "off":       0.0,
+    "room":      0.9,
+    "hall":      1.1,
+    "plate":     1.0,
+    "cathedral": 1.25,
+    # Signature tide preset — huge, dark, maximally wide; pairs with
     # speed < 1.0 + pitch-shift off (the "slowed + reverb" aesthetic).
-    "slowed":    "0.7:0.85:90|180|270:0.55|0.45|0.35",
+    "slowed":    1.5,
 }
 
 
@@ -117,6 +132,23 @@ class AudioFxState:
     stereo_width: float = 1.0
     compressor: bool = False
     mono: bool = False
+    # ---- the fx drawer (v1.6) ----
+    # Modulation family — enable-only, defaults tuned to sound right
+    # the moment they're switched on.
+    chorus: bool = False
+    flanger: bool = False
+    phaser: bool = False
+    tremolo: bool = False
+    tremolo_speed: float = 5.0        # Hz, 0.5–10
+    # Exciter (ffmpeg crystalizer) — adds sparkle/definition up top.
+    exciter: bool = False
+    exciter_amount: float = 2.0       # crystalizer intensity, 0–5
+    # Headphone crossfeed — bleeds a filtered bit of each channel into
+    # the other, like speakers in a room instead of hard L/R on cans.
+    crossfeed: bool = False
+    crossfeed_strength: float = 0.4   # 0–1
+    # Lofi — a composite: band-limit + bit crush + slow tape wow.
+    lofi: bool = False
     custom_slots: list[CustomSlot] = field(
         default_factory=lambda: [CustomSlot() for _ in range(3)]
     )
@@ -166,6 +198,16 @@ class AudioFxState:
             "stereo_width": float(self.stereo_width),
             "compressor": bool(self.compressor),
             "mono": bool(self.mono),
+            "chorus": bool(self.chorus),
+            "flanger": bool(self.flanger),
+            "phaser": bool(self.phaser),
+            "tremolo": bool(self.tremolo),
+            "tremolo_speed": float(self.tremolo_speed),
+            "exciter": bool(self.exciter),
+            "exciter_amount": float(self.exciter_amount),
+            "crossfeed": bool(self.crossfeed),
+            "crossfeed_strength": float(self.crossfeed_strength),
+            "lofi": bool(self.lofi),
             "custom_slots": [
                 {"name": s.name, "bands": [float(v) for v in s.bands]}
                 for s in self.custom_slots
@@ -174,7 +216,10 @@ class AudioFxState:
 
     @classmethod
     def from_dict(cls, data: Mapping | None) -> "AudioFxState":
-        if not data:
+        # The payload comes from a settings string anyone can edit, so
+        # valid JSON that isn't an object ('[1,2,3]', '"hello"') must
+        # fall back to defaults rather than crash attribute lookups.
+        if not isinstance(data, Mapping) or not data:
             return cls()
         state = cls()
         if "master_enabled" in data:
@@ -191,7 +236,25 @@ class AudioFxState:
         state.stereo_width = max(0.0, min(2.5, float(data.get("stereo_width", 1.0))))
         state.compressor = bool(data.get("compressor", False))
         state.mono = bool(data.get("mono", False))
-        slots = data.get("custom_slots") or []
+        # v1.6 fx drawer — every key optional so payloads from older
+        # builds load with these at their defaults (all off).
+        state.chorus = bool(data.get("chorus", False))
+        state.flanger = bool(data.get("flanger", False))
+        state.phaser = bool(data.get("phaser", False))
+        state.tremolo = bool(data.get("tremolo", False))
+        state.tremolo_speed = _clamp(data.get("tremolo_speed", 5.0), 0.5, 10.0, 5.0)
+        state.exciter = bool(data.get("exciter", False))
+        state.exciter_amount = _clamp(data.get("exciter_amount", 2.0), 0.0, 5.0, 2.0)
+        state.crossfeed = bool(data.get("crossfeed", False))
+        state.crossfeed_strength = _clamp(
+            data.get("crossfeed_strength", 0.4), 0.0, 1.0, 0.4
+        )
+        state.lofi = bool(data.get("lofi", False))
+        # custom_slots could be persisted as anything — coerce to a
+        # list first so a dict ({"a": 1}) can't blow up the [:3] slice.
+        slots = data.get("custom_slots")
+        if not isinstance(slots, list):
+            slots = []
         out_slots: list[CustomSlot] = []
         for raw in slots[:3]:
             try:
@@ -216,11 +279,13 @@ class AudioFxState:
 
     @classmethod
     def from_json(cls, payload: str) -> "AudioFxState":
+        """Junk in, defaults out — this runs at startup on a persisted
+        string, so no payload shape may ever raise past here."""
         if not payload:
             return cls()
         try:
             return cls.from_dict(json.loads(payload))
-        except (ValueError, TypeError):
+        except Exception:
             return cls()
 
 
@@ -231,26 +296,80 @@ def _clamp_db(value) -> float:
         return 0.0
 
 
+def _clamp(value, lo: float, hi: float, default: float) -> float:
+    try:
+        return max(lo, min(hi, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
 # ---------- chain builder ----------
 
-# Reverb wet multiplier rule: at wet=0 the preset is bypassed; at wet=1
-# the preset emits its native out_gain. In between we scale the
-# preset's out_gain (the second colon-separated field of the aecho
-# arg) linearly. This is a useful-enough approximation of a dry/wet
-# blend without a parallel filter graph.
-def _scaled_aecho_arg(arg: str, wet: float) -> str | None:
-    if not arg or wet <= 0.0:
+def _ffmpeg_quote(text: str) -> str:
+    """One layer of ffmpeg token quoting (av_get_token): wrap in single
+    quotes, and a literal quote becomes ``'\\''`` — close the quote,
+    backslash-escape the quote character, reopen."""
+    return "'" + text.replace("'", r"'\''") + "'"
+
+
+def _reverb_lavfi_entry(preset: str, wet: float) -> str | None:
+    """Build the mpv af entry for the convolution reverb, or None when
+    the reverb is bypassed (preset off/unknown, wet at 0, or the IR
+    could not be generated).
+
+    The entry is a full lavfi graph inside one af-list item:
+
+        lavfi=%len%asplit[dry][srcw];amovie=filename=<ir>[ir];
+               [srcw][ir]afir=…[wet];[dry][wet]amix=…
+
+    Two quoting layers, both verified empirically against mpv 0.41 /
+    ffmpeg 9 with hostile cache paths (apostrophes, colons, unbalanced
+    brackets, commas, semicolons, percent signs, backslashes — a themed
+    $XDG_CACHE_HOME can contain any of them):
+
+      * mpv af-list layer — ``%len%`` length-prefixed quoting hands mpv
+        the whole graph verbatim. The balanced-``[...]`` form used
+        previously dies at option parse on an unbalanced ``]`` in the
+        path, taking all playback with it.
+      * lavfi layer — the IR filename crosses two ffmpeg tokenizer
+        passes (the graph splitter, then the filter's own arg splitter),
+        each of which strips one layer of quoting, so the path gets
+        ``_ffmpeg_quote`` applied twice. A single shell-style layer
+        (the old code) mangled apostrophes and left ``:`` bare, which
+        killed af init and with it all audio.
+
+    Why the parallel graph: afir's own dry/wet params are just I/O
+    gains around the convolution — there is no unprocessed passthrough
+    (measured: dry=1 leaves the dry signal 40+ dB down). So we split,
+    convolve one branch (``irnorm=-1`` — afir's auto IR normalization
+    also crushed the level ~40 dB on our long unit-energy IRs), and
+    amix it back against the untouched branch. amix weights carry the
+    user's wet knob; ``normalize=0`` keeps the dry branch at exact
+    unity so wet→0 converges on bypass. afir adds no latency (measured
+    with an impulse: wet onset = pre-delay exactly), so the branches
+    stay time-aligned. The IR carries no impulse at t=0 — the wet
+    branch is pure room.
+    """
+    gain = REVERB_PRESETS.get(preset, 0.0)
+    w = max(0.0, min(1.0, float(wet))) * gain
+    if w <= 0.0:
         return None
-    parts = arg.split(":")
-    if len(parts) < 4:
+    from . import fx_ir  # lazy — keeps this module import-light (numpy)
+    path = fx_ir.ensure_ir(preset)
+    if path is None:
         return None
-    try:
-        original_out_gain = float(parts[1])
-    except ValueError:
-        return None
-    scaled = max(0.0, min(1.0, float(wet))) * original_out_gain
-    parts[1] = f"{scaled:.3f}"
-    return ":".join(parts)
+    # Quoted twice: once for the graph splitter, once for the filter
+    # arg splitter (each strips one layer — see docstring).
+    escaped = _ffmpeg_quote(_ffmpeg_quote(str(path)))
+    graph = (
+        "asplit[dry][srcw];"
+        f"amovie=filename={escaped}[ir];"
+        "[srcw][ir]afir=dry=1:wet=1:irnorm=-1[wet];"
+        f"[dry][wet]amix=inputs=2:weights='1 {w:.3f}':normalize=0"
+    )
+    # %len% counts bytes, not characters — encode before measuring so a
+    # non-ascii cache path doesn't truncate the graph mid-token.
+    return f"lavfi=%{len(graph.encode('utf-8'))}%{graph}"
 
 
 def build_filter_chain(state: AudioFxState) -> str:
@@ -276,19 +395,37 @@ def build_filter_chain(state: AudioFxState) -> str:
             f"equalizer=f={freq}:t=o:w={EQ_BAND_WIDTH_OCTAVES}:g={g:g}"
         )
 
-    # 2. Bass shelf at 120 Hz.
+    # 2. Exciter (crystalizer) — synthesized top-end sparkle, placed
+    # right after the EQ so the shelves below still get the last word
+    # on overall brightness.
+    if state.exciter and state.exciter_amount > 0.05:
+        chain.append(f"crystalizer=i={state.exciter_amount:g}")
+
+    # 3. Bass shelf at 120 Hz.
     if abs(state.bass_db) >= 0.05:
         chain.append(f"bass=g={state.bass_db:g}:f=120")
 
-    # 3. Treble shelf at 8 kHz.
+    # 4. Treble shelf at 8 kHz.
     if abs(state.treble_db) >= 0.05:
         chain.append(f"treble=g={state.treble_db:g}:f=8000")
 
-    # 4. Stereo width (1.0 == identity, skip).
+    # 5. Lofi composite — thin the lows, roll the top, crush the bit
+    # depth (log mode + heavy anti-aliasing so it's gritty, not harsh),
+    # and add a slow shallow vibrato for tape wow. Early in the chain
+    # because it reshapes the *source* character; everything after
+    # (width, reverb, crossfeed) then treats the lofi'd signal as the
+    # song.
+    if state.lofi:
+        chain.append("highpass=f=120")
+        chain.append("lowpass=f=5800")
+        chain.append("acrusher=bits=10:mode=log:aa=0.8:mix=0.35")
+        chain.append("vibrato=f=0.4:d=0.04")
+
+    # 6. Stereo width (1.0 == identity, skip).
     if abs(state.stereo_width - 1.0) >= 0.01:
         chain.append(f"extrastereo=m={state.stereo_width:g}")
 
-    # 5. Compressor.
+    # 7. Compressor.
     if state.compressor:
         # Conservative defaults that catch peaks without pumping the
         # signal. makeup=4 dB recovers the headroom the threshold ate.
@@ -296,22 +433,42 @@ def build_filter_chain(state: AudioFxState) -> str:
             "acompressor=threshold=-20dB:ratio=4:attack=20:release=250:makeup=4"
         )
 
-    # 6. Reverb.
-    aecho_arg = _scaled_aecho_arg(
-        REVERB_PRESETS.get(state.reverb_preset, ""),
-        state.reverb_wet,
-    )
-    if aecho_arg is not None:
-        chain.append(f"aecho={aecho_arg}")
+    # 8–11. Modulation family, always ahead of the reverb (motion into
+    # space, not space into motion). Two-voice chorus (positional sox
+    # args: in_gain:out_gain:delays:decays:speeds:depths), a slow
+    # feedback flanger, a wide triangular phaser, and tremolo with the
+    # one exposed knob (rate).
+    if state.chorus:
+        chain.append("chorus=0.6:0.9:50|60:0.4|0.32:0.25|0.4:2|1.3")
+    if state.flanger:
+        chain.append("flanger=delay=1:depth=3:regen=20:width=70:speed=0.4")
+    if state.phaser:
+        chain.append("aphaser=in_gain=0.6:out_gain=0.9:delay=3:decay=0.5:speed=0.6")
+    if state.tremolo:
+        chain.append(f"tremolo=f={state.tremolo_speed:g}:d=0.6")
 
-    # 7. Loudness normalization (EBU R128 target -14 LUFS — streaming-
+    # 12. Reverb — convolution against the preset's synthesized IR.
+    reverb_entry = _reverb_lavfi_entry(state.reverb_preset, state.reverb_wet)
+    if reverb_entry is not None:
+        chain.append(reverb_entry)
+
+    # 13. Headphone crossfeed — after the reverb so the room itself
+    # gets blended between the ears too, which is the point.
+    if state.crossfeed:
+        chain.append(f"crossfeed=strength={state.crossfeed_strength:g}")
+
+    # 14. Loudness normalization (EBU R128 target -14 LUFS — streaming-
     # platform-typical so cross-source queues feel level).
     if state.loudness_norm:
         chain.append("loudnorm=I=-14:LRA=11:tp=-1.5")
 
-    # 8. Mono fold (channel-collapse via pan filter).
+    # 15. Mono fold (channel-collapse via pan). Wrapped in a lavfi
+    # graph because mpv 0.41's native af param parser splits on ':' and
+    # chokes on pan's 'mono|c0=…' layout syntax ("AVOption 'mono|c0'
+    # not found" at filter creation) — inside lavfi brackets ffmpeg
+    # parses its own syntax and it just works.
     if state.mono:
-        chain.append("pan=mono|c0=0.5*c0+0.5*c1")
+        chain.append("lavfi=[pan=mono|c0=0.5*c0+0.5*c1]")
 
     return ",".join(chain)
 

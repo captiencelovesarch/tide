@@ -38,7 +38,7 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from .. import config
+from .. import audio_capture, config
 from ..player import PlayState
 from .base import PlaybackBackend
 
@@ -410,11 +410,16 @@ class LibrespotBackend(PlaybackBackend):
             self.error.emit(f"librespot launch failed: {exc}")
             return False
 
+        # Claim librespot's audio streams for the visualizer/pulse feed's
+        # auto capture — its sink inputs carry the child's pid, not tide's.
+        audio_capture.register_stream_pid(self._proc.pid)
+
         # Give librespot a beat to register with Spotify before we ask
         # for our device id. 800ms is typically enough on a wired link.
         time.sleep(0.8)
         if self._proc.poll() is not None:
             self.error.emit("librespot exited immediately — check that no other librespot is running")
+            audio_capture.unregister_stream_pid(self._proc.pid)
             self._proc = None
             return False
         # If credentials aren't cached yet, surface a one-time toast so
@@ -434,6 +439,7 @@ class LibrespotBackend(PlaybackBackend):
         with self._proc_lock:
             if self._proc is None:
                 return
+            audio_capture.unregister_stream_pid(self._proc.pid)
             try:
                 self._proc.terminate()
                 try:

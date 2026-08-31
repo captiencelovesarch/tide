@@ -319,6 +319,18 @@ class ThemeManager(QObject):
     def current(self) -> Theme | None:
         return self._current
 
+    def current_effective(self) -> Theme | None:
+        """The active theme WITH the runtime override layers applied —
+        the same view of the tokens that ``theme_changed`` subscribers
+        last received. ``current()`` is the base theme: a widget built
+        mid-session that anchors its colors from it misses the adaptive
+        palette until the next emission, which never comes while the
+        same song keeps playing (replace_dynamic_tokens skips no-op
+        pushes). Token-painting widgets should anchor from this."""
+        if self._current is None:
+            return None
+        return self._with_overrides(self._current)
+
     def apply(self, slug: str) -> Theme | None:
         if not self._themes:
             self.refresh()

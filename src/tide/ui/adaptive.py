@@ -16,7 +16,6 @@ look muddy instead of clean.
 from __future__ import annotations
 
 import colorsys
-from collections import Counter
 
 from PySide6.QtCore import (
     QObject,
@@ -33,9 +32,60 @@ from . import art_cache
 
 # Picker tuning. Album colors should read as the album, not as the loudest
 # tiny detail. Hue families are selected mostly by pixel mass, with chroma
-# acting as a confidence term only after a color has enough presence.
+# acting as a confidence term only after a color has enough presence — and
+# "no accent at all" is a first-class outcome: a grayscale cover must fall
+# through to the theme baseline instead of wearing whatever whisper of
+# chroma survived JPEG compression.
 _MIN_HUEFULNESS = 0.020
 _MIN_HUE_GROUP_FREQ = 0.055
+# A winning hue family must be confidently colored, not merely non-grey.
+# Uniform scanner/JPEG toning on a b/w cover forms a "hue family" that
+# spans the whole image, but its chroma never rises above a whisper: even
+# a +8-per-channel cast tops out around 0.031 mean huefulness, while
+# genuinely muted album art (saturation ~0.12–0.2) sits at 0.045 and up.
+# This gate is what separates "toned scan" from "faded pastel sleeve".
+_MIN_GROUP_HUEFULNESS = 0.036
+# ...and its colored mass (huefulness-weighted share of ALL pixels, not
+# just the family's) must be a real slice of the image. This is the
+# relative check: a few-percent smear of chroma noise on an otherwise
+# neutral cover used to win simply by being the only family standing. An
+# 8%-area solid logo (huefulness ~0.4) still clears this many times over.
+_MIN_CHROMA_MASS = 0.012
+# The vivid escape hatch: a SMALL but saturated element — the red glyph on
+# a b/w sleeve, a neon sticker — is real color the eye latches onto, and
+# such covers kept their accent for years (fake bucket chroma used to
+# inflate those families past the area gate; the true-mean rework took
+# that crutch away). A family this confidently colored passes on a couple
+# percent of area alone. Toning and JPEG grain never get near this bar:
+# their mean huefulness stays under ~0.05. The floor is set a hair under
+# the nominal 2%: the 64×64 downscale bleeds a small glyph's edge pixels
+# into the background, so its counted area lands below its printed area.
+_VIVID_MIN_FREQ = 0.015
+_VIVID_HUEFULNESS = 0.22
+# And the muted counterpart: a dusty-rose or olive panel at huefulness
+# ~0.1 would need ~12% of the cover to clear the mass gate alone. A real
+# tenth of the image with clearly-non-grey color is not noise, so there
+# area stands in for mass (again a hair under nominal for downscale bleed).
+_MUTED_PANEL_FREQ = 0.085
+_MUTED_PANEL_HUEFULNESS = 0.08
+# The dark path: huefulness scales chroma DOWN with value, which is right
+# for telling toned scans from pastel sleeves but wrong for near-black
+# covers — a clearly-navy cover at HSV value 15 tops out around 0.028 mean
+# huefulness and used to read as "toned grey". Saturation (chroma over
+# value) is what actually separates the two down there: the navy stays at
+# 0.2+ while a uniform +12 cast on a mid-grey gradient reaches only ~0.10
+# and grayscale sensor noise ~0.13 with almost no chroma at all. So dark
+# families get a second door: saturated enough, carrying real (if small)
+# chroma, over most of the cover. The chroma floor is what keeps per-pixel
+# noise on a near-black cover out — its bucket means stay under 0.008.
+_DARK_MIN_FREQ = 0.20
+_DARK_MIN_SAT = 0.16
+_DARK_MIN_CHROMA = 0.010
+# Per-bucket membership ramps for the dark path (see _dominant_hue_groups):
+# buckets fade in as their chroma clears the noise floor and their
+# saturation clears the cast/grain band, mirroring the huefulness ramp.
+_DARK_CHROMA_RAMP = (0.008, 0.008)
+_DARK_SAT_RAMP = (0.14, 0.14)
 _HUE_BIN_DEGREES = 24.0
 _ALT_MIN_WEIGHT_RATIO = 0.32
 _ALT_MIN_HUE_SEP = 32.0
@@ -46,8 +96,12 @@ _ALT_MIN_HUE_SEP = 32.0
 
 def extract_palette(image: QImage) -> list[tuple[QColor, int]]:
     """Return up to 32 dominant colors and their pixel counts via a cheap
-    4-bit-per-channel histogram on a 64×64 downscale. Runs on whatever thread
-    calls it.
+    4-bit-per-channel histogram on a 64×64 downscale. Each bucket reports the
+    TRUE mean color of the pixels that landed in it, not the bucket center:
+    reading centers back moves each channel by up to 16, so a neutral pixel
+    whose channels straddle a bucket edge (e.g. 127,127,133) came back with
+    chroma 17/255 — fake color that let grayscale covers pass the hue gates.
+    Runs on whatever thread calls it.
     """
     if image is None or image.isNull():
         return []
@@ -58,20 +112,26 @@ def extract_palette(image: QImage) -> list[tuple[QColor, int]]:
     w = small.width()
     h = small.height()
     bytes_per_line = small.bytesPerLine()
-    # Voting: quantize to a 4-bits-per-channel cube (4096 buckets).
-    counts: Counter = Counter()
+    # Voting: quantize to a 4-bits-per-channel cube (4096 buckets), but
+    # accumulate the real channel sums per bucket so the readback below is
+    # the mean of what's actually there.
+    buckets: dict[tuple[int, int, int], list[int]] = {}
     raw = bytes(bits[: bytes_per_line * h])
     for y in range(h):
         row_start = y * bytes_per_line
         for x in range(0, w * 3, 3):
-            r = raw[row_start + x] >> 4
-            g = raw[row_start + x + 1] >> 4
-            b = raw[row_start + x + 2] >> 4
-            counts[(r, g, b)] += 1
-    if not counts:
+            r = raw[row_start + x]
+            g = raw[row_start + x + 1]
+            b = raw[row_start + x + 2]
+            acc = buckets.setdefault((r >> 4, g >> 4, b >> 4), [0, 0, 0, 0])
+            acc[0] += 1
+            acc[1] += r
+            acc[2] += g
+            acc[3] += b
+    if not buckets:
         return []
-    # ×17 maps 4-bit (0..15) back to 8-bit (0..255).
-    return [(QColor(r * 17, g * 17, b * 17), n) for (r, g, b), n in counts.most_common(32)]
+    top = sorted(buckets.values(), key=lambda acc: acc[0], reverse=True)[:32]
+    return [(QColor(rs // n, gs // n, bs // n), n) for n, rs, gs, bs in top]
 
 
 # ---------- color helpers ----------
@@ -89,6 +149,13 @@ def _huefulness(c: QColor) -> float:
     chroma = max(r, g, b) - min(r, g, b)
     value = max(r, g, b)
     return chroma * (0.45 + 0.55 * value)
+
+
+def _smooth_ramp(v: float, start: float, span: float) -> float:
+    """Smoothstep membership: 0 at ``start``, 1 past ``start + span``."""
+    t = (v - start) / span
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
 
 
 def _hue_deg(c: QColor) -> float:
@@ -121,32 +188,128 @@ def _dominant_hue_groups(
     dominated by count, with huefulness only nudging confidence; this keeps
     a green/grey cover from turning yellow or pink because of small bright
     text or stickers in the art.
+
+    A family only makes it out at all when it is confidently colored: the
+    body path wants enough area (_MIN_HUE_GROUP_FREQ), enough chroma on
+    average (_MIN_GROUP_HUEFULNESS), and enough colored mass relative to
+    the whole image (_MIN_CHROMA_MASS, with area standing in for mass on
+    big muted panels); the vivid path lets a small saturated element — the
+    red glyph on a b/w sleeve — through on confidence alone; the dark path
+    lets a near-black but clearly saturated cover — a navy sleeve at HSV
+    value 15 — through on saturation where huefulness goes blind. An empty
+    result means "this cover has no real color" and the pickers pass
+    through to the theme baseline.
     """
     total = sum(n for _, n in palette) or 1
     bins = max(1, round(360.0 / _HUE_BIN_DEGREES))
     groups: dict[int, dict[str, object]] = {}
     for color, count in palette:
         huefulness = _huefulness(color)
-        if huefulness < _MIN_HUEFULNESS:
+        # Soft membership near the grey line instead of a hard cut. A hard
+        # threshold made the gates flip with 4-bit bucket boundaries as a
+        # dark cover darkens (tint kept at L 0.10 and 0.12, lost at 0.11 —
+        # whichever greyish buckets happened to straddle the cut swung the
+        # group means). Near-grey buckets now fade in over a band around
+        # _MIN_HUEFULNESS, so no single bucket can flip the outcome.
+        member = _smooth_ramp(
+            huefulness, 0.5 * _MIN_HUEFULNESS, _MIN_HUEFULNESS)
+        # Dark-door membership (the _DARK_* block up top): down near black
+        # saturation, not huefulness, is what separates real color from a
+        # toned grey, so buckets fade in as their chroma clears the noise
+        # floor and their saturation clears the cast/grain band.
+        r, g, b = color.redF(), color.greenF(), color.blueF()
+        value = max(r, g, b)
+        chroma = value - min(r, g, b)
+        saturation = chroma / value if value > 0.0 else 0.0
+        dark_member = (_smooth_ramp(chroma, *_DARK_CHROMA_RAMP)
+                       * _smooth_ramp(saturation, *_DARK_SAT_RAMP))
+        if member <= 0.0 and dark_member <= 0.0:
             continue
         hue = _hue_deg(color)
         idx = int((hue + _HUE_BIN_DEGREES / 2.0) // _HUE_BIN_DEGREES) % bins
-        confidence = 0.50 + 0.50 * min(1.0, huefulness / 0.24)
-        weight = float(count) * confidence
-        avg_weight = float(count) * (0.65 + 0.35 * confidence)
-        group = groups.setdefault(idx, {"weight": 0.0, "count": 0, "colors": []})
-        group["weight"] = float(group["weight"]) + weight
-        group["count"] = int(group["count"]) + count
-        group["colors"].append((color, avg_weight))
+        group = groups.setdefault(
+            idx,
+            {
+                "weight": 0.0, "count": 0.0, "huef_mass": 0.0, "colors": [],
+                "dark_weight": 0.0, "dark_count": 0.0, "dark_sat_mass": 0.0,
+                "dark_chroma_mass": 0.0, "dark_colors": [],
+            },
+        )
+        if member > 0.0:
+            eff = float(count) * member
+            confidence = 0.50 + 0.50 * min(1.0, huefulness / 0.24)
+            group["weight"] = float(group["weight"]) + eff * confidence
+            group["count"] = float(group["count"]) + eff
+            group["huef_mass"] = float(group["huef_mass"]) + huefulness * eff
+            group["colors"].append((color, eff * (0.65 + 0.35 * confidence)))
+        if dark_member > 0.0:
+            # Mirror of the body accumulation with saturation standing in
+            # for huefulness as the confidence axis — fully confident where
+            # the sat ramp tops out.
+            dark_eff = float(count) * dark_member
+            dark_conf = 0.50 + 0.50 * min(
+                1.0, saturation / (_DARK_SAT_RAMP[0] + _DARK_SAT_RAMP[1]))
+            group["dark_weight"] = (
+                float(group["dark_weight"]) + dark_eff * dark_conf)
+            group["dark_count"] = float(group["dark_count"]) + dark_eff
+            group["dark_sat_mass"] = (
+                float(group["dark_sat_mass"]) + saturation * dark_eff)
+            group["dark_chroma_mass"] = (
+                float(group["dark_chroma_mass"]) + chroma * dark_eff)
+            group["dark_colors"].append(
+                (color, dark_eff * (0.65 + 0.35 * dark_conf)))
     result: list[tuple[float, float, QColor]] = []
     for group in groups.values():
-        weight = float(group["weight"])
-        freq = int(group["count"]) / total
-        if freq < _MIN_HUE_GROUP_FREQ:
+        count = float(group["count"])
+        body = vivid = False
+        freq = 0.0
+        if count > 0.0:
+            freq = count / total
+            huef_mass = float(group["huef_mass"])
+            mean_huef = huef_mass / count
+            # Three ways past the gates. The body path: enough area,
+            # confidently colored on average, and enough colored mass
+            # relative to the whole image — toning/noise families cover
+            # area but carry no real chroma, muted album bodies clear all
+            # three comfortably; a real tenth of the cover in muted color
+            # passes on area standing in for mass. The vivid path: a small
+            # saturated glyph or sticker on an otherwise-grey sleeve,
+            # confident enough to carry the accent on a couple percent of
+            # area alone.
+            body = (
+                freq >= _MIN_HUE_GROUP_FREQ
+                and mean_huef >= _MIN_GROUP_HUEFULNESS
+                and (
+                    huef_mass / total >= _MIN_CHROMA_MASS
+                    or (freq >= _MUTED_PANEL_FREQ
+                        and mean_huef >= _MUTED_PANEL_HUEFULNESS)
+                )
+            )
+            vivid = freq >= _VIVID_MIN_FREQ and mean_huef >= _VIVID_HUEFULNESS
+        if body or vivid:
+            representative = _weighted_average(group["colors"])
+            if representative.isValid():
+                result.append((float(group["weight"]), freq, representative))
             continue
-        representative = _weighted_average(group["colors"])
+        # ...and the dark door: a near-black cover whose color is real but
+        # whose huefulness can't show it — saturated enough on average,
+        # carrying real (if small) chroma, over most of the cover. Built
+        # from the dark-member buckets, not the huefulness ones: the
+        # buckets that matter down here may carry no huefulness weight
+        # at all.
+        dark_count = float(group["dark_count"])
+        if dark_count <= 0.0:
+            continue
+        dark_freq = dark_count / total
+        mean_sat = float(group["dark_sat_mass"]) / dark_count
+        mean_chroma = float(group["dark_chroma_mass"]) / dark_count
+        if (dark_freq < _DARK_MIN_FREQ or mean_sat < _DARK_MIN_SAT
+                or mean_chroma < _DARK_MIN_CHROMA):
+            continue
+        representative = _weighted_average(group["dark_colors"])
         if representative.isValid():
-            result.append((weight, freq, representative))
+            result.append(
+                (float(group["dark_weight"]), dark_freq, representative))
     result.sort(key=lambda item: item[0], reverse=True)
     return result
 
@@ -264,6 +427,11 @@ class _PaletteWorker(QRunnable):
 class AdaptiveDriver(QObject):
     """Owns adaptive theme overrides for the active session."""
 
+    # Full-res cover for consumers that draw the art itself (the liquid
+    # backdrop), emitted with the same generation guarding as the palette:
+    # QImage on fetch, None when nothing is playing or the fetch failed.
+    art_ready = Signal(object)
+
     def __init__(self, queue, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._queue = queue
@@ -377,6 +545,7 @@ class AdaptiveDriver(QObject):
             return
         if track is None or not track.thumbnail:
             theming.manager().clear_accent_override()
+            self.art_ready.emit(None)
             self._current_url = None
             return
         self._current_url = track.thumbnail
@@ -398,7 +567,9 @@ class AdaptiveDriver(QObject):
             # palette stayed on screen for the whole song. Baseline theme
             # colors are the correct fallback.
             theming.manager().clear_accent_override()
+            self.art_ready.emit(None)
             return
+        self.art_ready.emit(img)
         # Extract in worker.
         worker = _PaletteWorker(img)
         self._palette_jobs.add(worker)

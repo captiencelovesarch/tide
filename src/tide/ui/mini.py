@@ -59,6 +59,10 @@ _BACKDROP_CHOICES = [
     ("lightning", "lightning"),
     ("deep water", "depths"),
     ("rim light", "rimlight"),
+    ("liquid cover", "liquid"),
+    ("aurora", "aurora"),
+    ("smoke", "smoke"),
+    ("caustics", "caustics"),
     ("off · flat", "off"),
 ]
 _PROGRESS_CHOICES = [
@@ -109,7 +113,10 @@ class _RingOverlay(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, False)
         self._frac = 0.0
         self._active = False
-        self._theme = theming.manager().current()
+        # Effective, not base: the ring paints with the accent, and the
+        # mini is always built mid-song — the adaptive accent must be
+        # the one already in force (no re-emit comes for the same song).
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
 
     def _on_theme(self, theme) -> None:
@@ -567,6 +574,7 @@ class MiniPlayer(QWidget):
             self.title_lbl.setText(theming.styled_case("nothing playing"))
             self.artist_lbl.setText("")
             self.art.setImage(None)
+            self.central_bg.set_art(None)
             self.progress.reset()
             self.ring.set_progress(0.0, 0.0)
             self._update_time(0.0, 0.0)
@@ -581,6 +589,7 @@ class MiniPlayer(QWidget):
         self._art_url = url or None
         if not url:
             self.art.setImage(None)
+            self.central_bg.set_art(None)
         else:
             img = art_cache.cache().request(
                 url, lambda image, url=url: self._on_art_ready(url, image)
@@ -592,6 +601,8 @@ class MiniPlayer(QWidget):
         if url != self._art_url:
             return
         self.art.setImage(image)
+        # The liquid backdrop melts the cover itself; harmless for the rest.
+        self.central_bg.set_art(image)
 
     def _set_label(self, label: QLabel, text: str, kind: str,
                    animate: bool) -> None:

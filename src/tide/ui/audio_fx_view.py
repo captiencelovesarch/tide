@@ -5,10 +5,12 @@ Sections, top to bottom:
   2. 10-band graphic EQ — vertical sliders with frequency labels.
   3. EQ presets — clickable cards (flat / bass / treble / vocal / v-shape /
      soft warmth).
-  4. Reverb — preset dropdown + wet slider.
-  5. Shelves + glue — bass, treble, loudness norm, stereo width,
+  4. Reverb — preset dropdown + wet slider (convolution, see fx_ir).
+  5. Effects — chorus / flanger / phaser / tremolo / exciter /
+     crossfeed / lofi toggles + their few knobs.
+  6. Shelves + glue — bass, treble, loudness norm, stereo width,
      compressor, mono.
-  6. Custom slots — three [save] / [load] / [clear] rows.
+  7. Custom slots — three [save] / [load] / [clear] rows.
 
 The view owns a single ``AudioFxState`` and emits ``state_changed``
 whenever any control flips. ``app.py`` wires that signal to the playback
@@ -261,9 +263,9 @@ class AudioFxView(QWidget):
         heading.setObjectName("sectionHeading")
 
         sub = QLabel(styled_case(
-            "10-band eq · reverb · loudness norm · the rest of the rack. "
-            "filter chain rebuilds live, no restart needed. "
-            "double-click any eq slider readout to zero it."
+            "10-band eq · reverb · chorus, tremolo, lofi and "
+            "the rest of the rack. filter chain rebuilds live, no restart "
+            "needed. double-click any eq slider readout to zero it."
         ))
         sub.setObjectName("sectionSub")
         sub.setWordWrap(True)
@@ -328,7 +330,35 @@ class AudioFxView(QWidget):
         reverb_row.addWidget(self._reverb_combo)
         reverb_row.addWidget(self._reverb_wet, stretch=1)
 
-        # 5. Shelves + glue.
+        # 5. Effects — the fx drawer. Toggles first, then the few knobs
+        # that earn a slider.
+        self._chorus_box = QCheckBox(styled_case("chorus (doubling)"))
+        self._chorus_box.toggled.connect(self._on_chorus)
+        self._flanger_box = QCheckBox(styled_case("flanger (jet sweep)"))
+        self._flanger_box.toggled.connect(self._on_flanger)
+        self._phaser_box = QCheckBox(styled_case("phaser (swirl)"))
+        self._phaser_box.toggled.connect(self._on_phaser)
+        self._tremolo_box = QCheckBox(styled_case("tremolo (wobble)"))
+        self._tremolo_box.toggled.connect(self._on_tremolo)
+        self._exciter_box = QCheckBox(styled_case("exciter (sparkle)"))
+        self._exciter_box.toggled.connect(self._on_exciter)
+        self._crossfeed_box = QCheckBox(styled_case("crossfeed (headphones)"))
+        self._crossfeed_box.toggled.connect(self._on_crossfeed)
+        self._lofi_box = QCheckBox(styled_case("lofi (tape + crush)"))
+        self._lofi_box.toggled.connect(self._on_lofi)
+
+        self._tremolo_speed_slider = _ShelfSlider(
+            "tremolo speed", 0.5, 10.0, 0.5, suffix=" Hz"
+        )
+        self._tremolo_speed_slider.value_changed.connect(self._on_tremolo_speed)
+        self._exciter_slider = _ShelfSlider("exciter amount", 0.0, 5.0, 0.5, suffix="")
+        self._exciter_slider.value_changed.connect(self._on_exciter_amount)
+        self._crossfeed_slider = _ShelfSlider(
+            "crossfeed amount", 0.0, 1.0, 0.05, suffix="%"
+        )
+        self._crossfeed_slider.value_changed.connect(self._on_crossfeed_strength)
+
+        # 6. Shelves + glue.
         self._bass_slider = _ShelfSlider("bass shelf", EQ_GAIN_MIN_DB, EQ_GAIN_MAX_DB, 0.5)
         self._bass_slider.value_changed.connect(self._on_bass)
         self._treble_slider = _ShelfSlider("treble shelf", EQ_GAIN_MIN_DB, EQ_GAIN_MAX_DB, 0.5)
@@ -343,7 +373,7 @@ class AudioFxView(QWidget):
         self._mono_box = QCheckBox(styled_case("fold to mono"))
         self._mono_box.toggled.connect(self._on_mono)
 
-        # 6. Custom slots.
+        # 7. Custom slots.
         self._slot_rows: list[_SlotRow] = []
         slots_col = QVBoxLayout()
         slots_col.setContentsMargins(0, 0, 0, 0)
@@ -378,6 +408,25 @@ class AudioFxView(QWidget):
         col.addLayout(presets_grid)
         col.addWidget(_section("reverb"))
         col.addLayout(reverb_row)
+        col.addWidget(_section("effects"))
+        fx_row_a = QHBoxLayout()
+        fx_row_a.setSpacing(20)
+        fx_row_a.addWidget(self._chorus_box)
+        fx_row_a.addWidget(self._flanger_box)
+        fx_row_a.addWidget(self._phaser_box)
+        fx_row_a.addWidget(self._tremolo_box)
+        fx_row_a.addStretch(1)
+        col.addLayout(fx_row_a)
+        fx_row_b = QHBoxLayout()
+        fx_row_b.setSpacing(20)
+        fx_row_b.addWidget(self._exciter_box)
+        fx_row_b.addWidget(self._crossfeed_box)
+        fx_row_b.addWidget(self._lofi_box)
+        fx_row_b.addStretch(1)
+        col.addLayout(fx_row_b)
+        col.addWidget(self._tremolo_speed_slider)
+        col.addWidget(self._exciter_slider)
+        col.addWidget(self._crossfeed_slider)
         col.addWidget(_section("shelves + glue"))
         col.addWidget(self._bass_slider)
         col.addWidget(self._treble_slider)
@@ -433,10 +482,20 @@ class AudioFxView(QWidget):
         self._bass_slider.set_value(self._state.bass_db)
         self._treble_slider.set_value(self._state.treble_db)
         self._stereo_slider.set_value(self._state.stereo_width)
+        self._tremolo_speed_slider.set_value(self._state.tremolo_speed)
+        self._exciter_slider.set_value(self._state.exciter_amount)
+        self._crossfeed_slider.set_value(self._state.crossfeed_strength)
         for box, attr in (
             (self._loudness_box, "loudness_norm"),
             (self._compressor_box, "compressor"),
             (self._mono_box, "mono"),
+            (self._chorus_box, "chorus"),
+            (self._flanger_box, "flanger"),
+            (self._phaser_box, "phaser"),
+            (self._tremolo_box, "tremolo"),
+            (self._exciter_box, "exciter"),
+            (self._crossfeed_box, "crossfeed"),
+            (self._lofi_box, "lofi"),
         ):
             box.blockSignals(True)
             box.setChecked(getattr(self._state, attr))
@@ -515,6 +574,53 @@ class AudioFxView(QWidget):
     def _on_mono(self, on: bool) -> None:
         self._ui_sound("toggle_on" if on else "toggle_off")
         self._state.mono = bool(on)
+        self._emit()
+
+    def _on_chorus(self, on: bool) -> None:
+        self._ui_sound("toggle_on" if on else "toggle_off")
+        self._state.chorus = bool(on)
+        self._emit()
+
+    def _on_flanger(self, on: bool) -> None:
+        self._ui_sound("toggle_on" if on else "toggle_off")
+        self._state.flanger = bool(on)
+        self._emit()
+
+    def _on_phaser(self, on: bool) -> None:
+        self._ui_sound("toggle_on" if on else "toggle_off")
+        self._state.phaser = bool(on)
+        self._emit()
+
+    def _on_tremolo(self, on: bool) -> None:
+        self._ui_sound("toggle_on" if on else "toggle_off")
+        self._state.tremolo = bool(on)
+        self._emit()
+
+    def _on_tremolo_speed(self, value: float) -> None:
+        self._state.tremolo_speed = float(value)
+        self._emit()
+
+    def _on_exciter(self, on: bool) -> None:
+        self._ui_sound("toggle_on" if on else "toggle_off")
+        self._state.exciter = bool(on)
+        self._emit()
+
+    def _on_exciter_amount(self, value: float) -> None:
+        self._state.exciter_amount = float(value)
+        self._emit()
+
+    def _on_crossfeed(self, on: bool) -> None:
+        self._ui_sound("toggle_on" if on else "toggle_off")
+        self._state.crossfeed = bool(on)
+        self._emit()
+
+    def _on_crossfeed_strength(self, value: float) -> None:
+        self._state.crossfeed_strength = float(value)
+        self._emit()
+
+    def _on_lofi(self, on: bool) -> None:
+        self._ui_sound("toggle_on" if on else "toggle_off")
+        self._state.lofi = bool(on)
         self._emit()
 
     def _on_save_slot(self, idx: int) -> None:

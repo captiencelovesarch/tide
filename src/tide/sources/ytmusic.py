@@ -271,9 +271,15 @@ class YTMusicSource(MusicSource):
     # re-opening the song page shouldn't re-fetch either.
     _SONG_MEMO_CAP = 32
 
-    def __init__(self, yt: YTMusic) -> None:
-        self.yt = _AuthSentinel(yt, self._on_auth_error)
-        self._signed_out = False
+    def __init__(self, yt: YTMusic | None) -> None:
+        # ``yt`` is None when nothing is signed in yet (no browser.json, or
+        # the user cancelled the import). The source still constructs so it
+        # can be registered and hold down its Sources row; begin_auth() /
+        # reload_client() fill the client in live, no restart needed. Note
+        # the sentinel is NOT wrapped around None — is_authenticated() tests
+        # ``self.yt is not None``, and a wrapper would read as signed in.
+        self.yt = _AuthSentinel(yt, self._on_auth_error) if yt is not None else None
+        self._signed_out = yt is None
         self._auth_expired = False
         # Unix time of the last probe that came back genuinely signed in.
         self._last_auth_ok: float | None = None

@@ -44,7 +44,9 @@ tide can also report plays to your youtube music account, using the same play ev
 
 there is a proper mini player now (v1.3): click the album art and you get a small frameless card where the window border is the progress bar, the backdrop breathes with the bass, a synced lyric ticks under the artist, and the controls fade out when you leave it alone. click the art again to come back. it can pin itself above other windows, KWin willing.
 
-the fx rack (`Ctrl+8`) has a 10-band EQ, reverb presets including one called slowed, bass and treble shelves, loudness normalization, stereo width and a compressor. playback speed goes 0.5× to 2× and shifts pitch by default because that is the point, there is a preserve-pitch toggle for audiobook people. ten visualizer renderers run off a pipewire capture, `Ctrl+6`, F11 for fullscreen.
+v1.6 adds the opposite of the mini: a fullscreen mode. `F11` anywhere, or the `[⤢]` button on the strip. big album art with the title under it, and level with it a pane for synced lyrics or the queue, your backdrop behind everything. the lyrics glide as lines advance, and the queue is the real one: double-click a row to jump. controls and cursor fade out when the mouse goes idle and come back when it moves, and the screen stays awake while music plays. made for putting a song on the speakers and going to do something else. close the pane and the art slides to the center and grows a touch. esc gets you back, `l` and `q` switch the pane, karaoke mode sits in the right-click menu (`k`) next to the backdrop picker.
+
+the fx rack (`Ctrl+8`) has a 10-band EQ, a real reverb since v1.6 (room, hall, plate, cathedral, and one called slowed; it used to be echo taps pretending), bass and treble shelves, loudness normalization, stereo width, a compressor, and an effects drawer: chorus, flanger, phaser, tremolo, exciter, headphone crossfeed and a lofi mode. playback speed goes 0.5× to 2× and shifts pitch by default because that is the point, there is a preserve-pitch toggle for audiobook people. ten visualizer renderers run off a pipewire capture, `Ctrl+6`, F11 for fullscreen.
 
 adaptive accent and the living backdrop are opt-in: the theme accent drifts toward the current cover's dominant color and the whole window (titlebar included) glows with it, optionally swelling on bass.
 
@@ -81,7 +83,8 @@ signing in: google blocks OAuth for the youtube music endpoints, so cookies are 
 | `Ctrl+I` | sleep timer |
 | `Ctrl+M` | mini player |
 | `Ctrl+F` | search |
-| `F11` | fullscreen visualizer |
+| `Ctrl+Shift+R` | refresh yt session |
+| `F11` | fullscreen mode (on the visualizer view: fullscreen visualizer) |
 
 right-click a track row for play now / play next / add to queue / start radio.
 

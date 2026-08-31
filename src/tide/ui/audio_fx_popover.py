@@ -2,8 +2,9 @@
 
 Reads + mutates the same shared ``AudioFxState`` the full panel owns.
 The user clicks the button → small popover with the most-reached-for
-knobs: master enable, preset dropdown, reverb dropdown, bass + treble
-shelves. Right-clicking the button toggles master enable inline.
+knobs: master enable, preset dropdown, reverb dropdown + wet, bass +
+treble shelves, lofi + crossfeed toggles. Everything else lives in the
+full rack. Right-clicking the button toggles master enable inline.
 
 Mirrors the SpeedButton / SpeedPopover pattern in ``speed.py``:
 ``Qt.Popup`` so external clicks auto-close, ``show_above(anchor)`` for
@@ -101,6 +102,7 @@ class AudioFxPopover(QFrame):
     state_changed = Signal(object)   # AudioFxState
 
     SHELF_SCALE = 2   # ½-dB resolution on the int slider
+    WET_SCALE = 20    # 5% resolution on the reverb wet slider
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -138,6 +140,37 @@ class AudioFxPopover(QFrame):
         reverb_row.addWidget(QLabel("reverb"))
         reverb_row.addWidget(self._reverb_combo, stretch=1)
 
+        # reverb wet slider (5% steps)
+        self._wet_slider = QSlider(Qt.Horizontal)
+        self._wet_slider.setMinimum(0)
+        self._wet_slider.setMaximum(self.WET_SCALE)
+        self._wet_slider.setSingleStep(1)
+        self._wet_slider.valueChanged.connect(self._on_wet)
+        self._wet_read = QLabel("50%")
+        self._wet_read.setMinimumWidth(52)
+        self._wet_read.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        wet_row = QHBoxLayout()
+        wet_row.setSpacing(8)
+        wet_lbl = QLabel("wet")
+        wet_lbl.setMinimumWidth(50)
+        wet_row.addWidget(wet_lbl)
+        wet_row.addWidget(self._wet_slider, stretch=1)
+        wet_row.addWidget(self._wet_read)
+
+        # quick fx toggles — just the two that fit the popover's job;
+        # the rest live in the full rack
+        self._lofi_btn = BracketButton("lofi")
+        self._lofi_btn.setCheckable(True)
+        self._lofi_btn.toggled.connect(self._on_lofi)
+        self._crossfeed_btn = BracketButton("crossfeed")
+        self._crossfeed_btn.setCheckable(True)
+        self._crossfeed_btn.toggled.connect(self._on_crossfeed)
+        fx_row = QHBoxLayout()
+        fx_row.setSpacing(8)
+        fx_row.addWidget(self._lofi_btn)
+        fx_row.addWidget(self._crossfeed_btn)
+        fx_row.addStretch(1)
+
         # bass + treble shelf sliders (compact)
         self._bass_slider, bass_row = self._make_shelf("bass", "_bass_read")
         self._treble_slider, treble_row = self._make_shelf("treble", "_treble_read")
@@ -155,8 +188,10 @@ class AudioFxPopover(QFrame):
         root.addWidget(self._master_btn)
         root.addLayout(preset_row)
         root.addLayout(reverb_row)
+        root.addLayout(wet_row)
         root.addLayout(bass_row)
         root.addLayout(treble_row)
+        root.addLayout(fx_row)
         root.addWidget(self._hint)
 
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -186,10 +221,14 @@ class AudioFxPopover(QFrame):
             self._reverb_combo.setCurrentIndex(
                 max(0, self._reverb_combo.findData(state.reverb_preset))
             )
+            self._wet_slider.setValue(int(round(state.reverb_wet * self.WET_SCALE)))
+            self._wet_read.setText(f"{int(round(state.reverb_wet * 100))}%")
             self._bass_slider.setValue(int(round(state.bass_db * self.SHELF_SCALE)))
             self._treble_slider.setValue(int(round(state.treble_db * self.SHELF_SCALE)))
             self._bass_read.setText(f"{_format_db(state.bass_db)} dB")
             self._treble_read.setText(f"{_format_db(state.treble_db)} dB")
+            self._lofi_btn.setChecked(state.lofi)
+            self._crossfeed_btn.setChecked(state.crossfeed)
         finally:
             self._silent = False
 
@@ -230,6 +269,26 @@ class AudioFxPopover(QFrame):
         if self._state is None or self._silent:
             return
         self._state.reverb_preset = self._reverb_combo.currentData() or "off"
+        self._emit()
+
+    def _on_wet(self, raw: int) -> None:
+        if self._state is None or self._silent:
+            return
+        wet = max(0.0, min(1.0, raw / self.WET_SCALE))
+        self._state.reverb_wet = wet
+        self._wet_read.setText(f"{int(round(wet * 100))}%")
+        self._emit()
+
+    def _on_lofi(self, on: bool) -> None:
+        if self._state is None or self._silent:
+            return
+        self._state.lofi = bool(on)
+        self._emit()
+
+    def _on_crossfeed(self, on: bool) -> None:
+        if self._state is None or self._silent:
+            return
+        self._state.crossfeed = bool(on)
         self._emit()
 
     def _on_bass(self, raw: int) -> None:

@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QFontMetrics
+from PySide6.QtCore import (
+    QEasingCurve, QObject, QThread, Qt, QVariantAnimation, Signal, QTimer,
+)
+from PySide6.QtGui import QColor, QFont, QFontMetrics
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -34,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import api, qthreads, theming
+from . import motion as motion_module
 
 
 class _LyricsWorker(QObject):
@@ -76,10 +79,14 @@ class _KaraokeWidget(QWidget):
     next) with the current one bigger, centered, and per-word
     accent-highlighted as time advances through its duration window."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *,
+                 font_scale: float = 1.0) -> None:
         super().__init__(parent)
         self._lines: list[tuple[float, str]] = []
-        self._theme = theming.manager().current()
+        # Effective, not base: built mid-song (mini panel, fullscreen)
+        # the accent must be the adaptive one already in force.
+        self._theme = theming.manager().current_effective()
+        self._font_scale = float(font_scale)
         self._active_idx: int = -1
         self._current_secs: float = 0.0
 
@@ -128,16 +135,18 @@ class _KaraokeWidget(QWidget):
         theme = self._theme
         dim = theme.token("dim", "#6f6f6f") if theme else "#6f6f6f"
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        side_pt = max(1, round(12 * self._font_scale))
+        cur_pt = max(1, round(28 * self._font_scale))
         self.prev_label.setStyleSheet(
-            f"color: {dim}; background: transparent; font-size: 12pt; padding: 0;"
+            f"color: {dim}; background: transparent; font-size: {side_pt}pt; padding: 0;"
         )
         self.next_label.setStyleSheet(
-            f"color: {dim}; background: transparent; font-size: 12pt; padding: 0;"
+            f"color: {dim}; background: transparent; font-size: {side_pt}pt; padding: 0;"
         )
         # The current line's styling is set per-render because we paint
         # the active word in accent and the rest in fg via rich-text spans.
         self.current_label.setStyleSheet(
-            f"color: {fg}; background: transparent; font-size: 28pt; "
+            f"color: {fg}; background: transparent; font-size: {cur_pt}pt; "
             f"font-weight: 700; padding: 12px 0; letter-spacing: 0.02em;"
         )
 
@@ -224,10 +233,14 @@ class LyricsView(QWidget):
     # user toggled it off (swap back to vocal).
     toggle_instrumental_requested = Signal(object, bool)   # track, want_instrumental
 
-    def __init__(self, api_obj: api.Api, parent: QWidget | None = None) -> None:
+    def __init__(self, api_obj: api.Api, parent: QWidget | None = None, *,
+                 font_scale: float = 1.0) -> None:
         super().__init__(parent)
         self.api = api_obj
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
+        # Type multiplier for embeds that are read from farther away (the
+        # fullscreen mode). 1.0 = the classic panel sizes, unchanged.
+        self._font_scale = float(font_scale)
         theming.manager().theme_changed.connect(self._on_theme)
 
         self._current_video_id: str | None = None
@@ -240,6 +253,10 @@ class LyricsView(QWidget):
         self._line_widgets: list[_LineLabel] = []
         self._active_line_index: int = -1
         self._karaoke_mode: bool = False
+        # Line-advance motion (glide scroll + accent fade-in). One of
+        # each at most; stopped whenever the line list is rebuilt.
+        self._scroll_anim: QVariantAnimation | None = None
+        self._active_anim: QVariantAnimation | None = None
         # Last known playback position, used so karaoke can re-render
         # smoothly when the user toggles in mid-line.
         self._last_position: float = 0.0
@@ -289,7 +306,7 @@ class LyricsView(QWidget):
         self._timed_layout.setSpacing(4)
         self._timed_layout.addStretch(1)
 
-        self._karaoke_widget = _KaraokeWidget()
+        self._karaoke_widget = _KaraokeWidget(font_scale=self._font_scale)
         # Named so the adaptive-background QSS transparentizes this container
         # (a QWidget subclass, so it isn't caught by the `.QWidget` rule) and
         # the gradient shows behind the karaoke lines. See theming._CONTENT_BACKDROP_QSS.
@@ -366,11 +383,8 @@ class LyricsView(QWidget):
         self._active_line_index = idx
         if not self._karaoke_mode:
             self._restyle_lines()
-            if 0 <= idx < len(self._line_widgets):
-                target = self._line_widgets[idx]
-                self._scroll.ensureWidgetVisible(
-                    target, 0, max(80, self._scroll.viewport().height() // 3),
-                )
+            self._animate_active_line()
+            self._glide_to_active()
 
     # ---------- async result handling ----------
 
@@ -420,30 +434,119 @@ class LyricsView(QWidget):
             self._scroll.setWidget(self._timed_host)
 
     def _clear_timed(self) -> None:
+        self._stop_line_motion()
         for w in self._line_widgets:
             w.deleteLater()
         self._line_widgets = []
+
+    def _stop_line_motion(self) -> None:
+        for anim in (self._scroll_anim, self._active_anim):
+            if anim is not None:
+                anim.stop()
+        self._scroll_anim = None
+        self._active_anim = None
+
+    def _animate_active_line(self) -> None:
+        """Fade the newly-active line from body color into the accent.
+        The restyle above already snapped the bold + size (so layout
+        settles in one step); the color glide is what makes the handoff
+        read as motion instead of a blink."""
+        if self._active_anim is not None:
+            self._active_anim.stop()
+            self._active_anim = None
+        idx = self._active_line_index
+        if not (0 <= idx < len(self._line_widgets)):
+            return
+        if motion_module.intensity() == motion_module.Intensity.OFF:
+            return   # _restyle_lines already painted the accent
+        theme = self._theme
+        fg = QColor(theme.token("fg", "#e6e6e6") if theme else "#e6e6e6")
+        accent = QColor(
+            theme.token("accent", "#d4b95e") if theme else "#d4b95e")
+        lbl = self._line_widgets[idx]
+        pt = max(1, round(13 * self._font_scale))
+
+        def _tick(t, lbl=lbl, fg=fg, accent=accent, pt=pt) -> None:
+            t = float(t)
+            c = QColor(
+                round(fg.red() + (accent.red() - fg.red()) * t),
+                round(fg.green() + (accent.green() - fg.green()) * t),
+                round(fg.blue() + (accent.blue() - fg.blue()) * t),
+            )
+            try:
+                lbl.setStyleSheet(
+                    f"color: {c.name()}; background: transparent; "
+                    f"font-weight: 700; font-size: {pt}pt; padding: 4px 0;"
+                )
+            except RuntimeError:
+                pass   # line list rebuilt mid-fade; the stop is coming
+
+        anim = QVariantAnimation(self)
+        anim.setDuration(280)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.valueChanged.connect(_tick)
+        self._active_anim = anim
+        anim.start()
+
+    def _glide_to_active(self) -> None:
+        """Teleprompter scroll: park the active line around a third from
+        the top of the viewport. ensureWidgetVisible only moved when a
+        line left the view, so the list sat still and then jumped a
+        page; gliding a little on every line keeps the eye anchored."""
+        idx = self._active_line_index
+        if not (0 <= idx < len(self._line_widgets)):
+            return
+        if self._scroll_anim is not None:
+            self._scroll_anim.stop()
+            self._scroll_anim = None
+        target = self._line_widgets[idx]
+        # Sizes just changed in _restyle_lines; settle geometry before
+        # reading positions or the goal is one restyle stale.
+        host_layout = self._timed_host.layout()
+        if host_layout is not None:
+            host_layout.activate()
+        if motion_module.intensity() == motion_module.Intensity.OFF:
+            self._scroll.ensureWidgetVisible(
+                target, 0, max(80, self._scroll.viewport().height() // 3),
+            )
+            return
+        bar = self._scroll.verticalScrollBar()
+        goal = target.pos().y() - int(self._scroll.viewport().height() * 0.38)
+        goal = max(0, min(int(goal), bar.maximum()))
+        if goal == bar.value():
+            return
+        anim = QVariantAnimation(self)
+        anim.setDuration(motion_module.DUR_MED)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setStartValue(int(bar.value()))
+        anim.setEndValue(goal)
+        anim.valueChanged.connect(lambda v, bar=bar: bar.setValue(int(v)))
+        self._scroll_anim = anim
+        anim.start()
 
     def _restyle_lines(self) -> None:
         theme = self._theme
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
         dim = theme.token("dim", "#6f6f6f") if theme else "#6f6f6f"
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
+        active_pt = max(1, round(13 * self._font_scale))
+        rest_pt = max(1, round(10 * self._font_scale))
         for i, lbl in enumerate(self._line_widgets):
             if i == self._active_line_index:
                 lbl.setStyleSheet(
                     f"color: {accent}; background: transparent; "
-                    f"font-weight: 700; font-size: 13pt; padding: 4px 0;"
+                    f"font-weight: 700; font-size: {active_pt}pt; padding: 4px 0;"
                 )
             elif i < self._active_line_index:
                 lbl.setStyleSheet(
                     f"color: {dim}; background: transparent; "
-                    f"font-size: 10pt; padding: 2px 0;"
+                    f"font-size: {rest_pt}pt; padding: 2px 0;"
                 )
             else:
                 lbl.setStyleSheet(
                     f"color: {fg}; background: transparent; "
-                    f"font-size: 10pt; padding: 2px 0;"
+                    f"font-size: {rest_pt}pt; padding: 2px 0;"
                 )
 
     # ---------- karaoke + swap ----------
