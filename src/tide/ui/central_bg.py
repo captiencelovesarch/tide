@@ -40,7 +40,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QHBoxLayout, QWidget
 
-from .. import theming
+from .. import backdrops, theming
 
 
 # Maps the corner_style setting to a pixel radius. Kept here so the dialog
@@ -116,6 +116,16 @@ _FX_STYLES = frozenset({
     "vbeam", "horizon", "lightning", "depths", "rimlight",
     "aurora", "smoke", "caustics",
 })
+
+# set_style's whitelist, built from the backdrop registry so the pickers
+# and the renderer share one list. The assert pins the registry to the
+# renderer's actual style families — a slug added to backdrops.py without
+# a paint branch here must fail loudly at import, not silently render as
+# "field".
+_STYLES = frozenset(backdrops.SLUGS)
+assert _STYLES == _FX_STYLES | {"field", "band", "liquid"}, (
+    "backdrop registry drifted from central_bg's renderer styles"
+)
 
 _fx_lattice_stack: np.ndarray | None = None
 
@@ -289,12 +299,7 @@ class CentralBg(QWidget):
         self.update()
 
     def set_style(self, style: str) -> None:
-        new_style = (
-            style
-            if style in {"field", "band", "vbeam", "horizon", "lightning", "depths",
-               "rimlight", "liquid", "aurora", "smoke", "caustics"}
-            else "field"
-        )
+        new_style = style if style in _STYLES else "field"
         if new_style == self._style:
             return
         self._style = new_style

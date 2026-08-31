@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from .. import speed_law
 from ..player import PlayState
 from .base import PlaybackBackend
 from .mpv_backend import MpvBackend
@@ -146,7 +147,7 @@ class PlaybackRouter(QObject):
         """Apply to every backend so a speed-change made before a backend
         becomes active still takes effect when it does. Backends that don't
         support speed simply no-op."""
-        rate = max(0.25, min(4.0, float(value)))
+        rate = speed_law.engine_clamp(value)
         changed = rate != self._speed
         self._speed = rate
         for b in self._backends.values():

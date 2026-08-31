@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import theming
+from .. import glyphs, theming
 from .widgets import (
     AlbumArt,
     BracketButton,
@@ -598,12 +598,13 @@ class ControlsBundle(QWidget):
         super().__init__(parent)
         self.variant = variant
         cls = {"large": LargeButton, "compact": CompactButton}.get(variant, BracketButton)
-        self.shuffle_btn = cls("shuffle", glyph="⇋")
-        self.prev_btn = cls("prev", glyph="◂◂")
-        self.play_btn = cls("play", glyph="▶")
-        self.next_btn = cls("next", glyph="▸▸")
-        self.repeat_btn = cls("repeat", glyph="↻")
-        self.like_btn = cls("♡", glyph="♡")
+        self.shuffle_btn = cls("shuffle", glyph=glyphs.glyph("shuffle"))
+        self.prev_btn = cls("prev", glyph=glyphs.glyph("prev"))
+        self.play_btn = cls("play", glyph=glyphs.glyph("play"))
+        self.next_btn = cls("next", glyph=glyphs.glyph("next"))
+        self.repeat_btn = cls("repeat", glyph=glyphs.glyph("repeat"))
+        like = glyphs.glyph("like_off")
+        self.like_btn = cls(like, glyph=like)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)

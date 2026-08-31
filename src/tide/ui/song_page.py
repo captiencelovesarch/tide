@@ -43,6 +43,7 @@ from .. import api, qthreads, theming
 from ..sources.base import Comment, CreditSection, human_count
 from . import art_cache
 from .card import Card, ShelfRow
+from .headings import line_heading as _line_heading
 from .widgets import BracketButton
 
 
@@ -50,12 +51,6 @@ ART_SIZE = 160
 
 # h:mm:ss or m:ss anywhere in a comment. Group so we can rebuild seconds.
 _TIMESTAMP = re.compile(r"\b(?:(\d{1,2}):)?(\d{1,2}):(\d{2})\b")
-
-
-def _line_heading(label: str, total: int = 60) -> str:
-    styled = theming.styled_case(label)
-    line = "─" * max(4, total - len(styled) - 6)
-    return f"── {styled} {line}"
 
 
 def _timestamp_to_secs(m: re.Match) -> float:

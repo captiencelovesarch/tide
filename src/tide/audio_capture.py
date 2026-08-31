@@ -652,28 +652,49 @@ def _own_pids() -> set[str]:
 
 def _pick_own_sink_input(entries: list, pids: set[str]) -> int | None:
     """Pure matcher over ``pactl -f json list sink-inputs`` data: the index
-    of tide's own playback stream, or None. Prefers an uncorked (actually
-    playing) stream — tide can briefly own two (mpv idling while librespot
-    plays, or vice versa) and the corked one is the wrong tap."""
-    own: list[tuple[int, bool]] = []
+    of tide's own playback stream, or None. Candidates are ranked:
+
+      0. a stream whose pid we own or registered — proof of ownership
+      1. a "tide"-named stream carrying no pid at all — mpv's in-process
+         pipewire AO announces no application.process.id (seen live)
+      2. a "tide"-named stream with somebody ELSE's pid — almost certainly
+         a second tide process; last resort only, so two instances can't
+         latch onto each other's audio
+
+    Ranks 0 and 1 are BOTH this process's streams, so between them an
+    uncorked (actually playing) stream wins outright — tide can briefly
+    own two (a corked librespot idling while rank-1 mpv plays, or vice
+    versa) and the corked one is the wrong tap: sorting rank above corked
+    would latch the pulse/visualizer onto silence. Only the foreign-pid
+    rank 2 is demoted below the others regardless of corked state."""
+    own: list[tuple[tuple[bool, bool, int], int]] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         props = entry.get("properties")
         if not isinstance(props, dict):
             continue
-        mine = (
+        pid = props.get("application.process.id")
+        pid_known = pid is not None and str(pid).strip() != ""
+        name_mine = (
             props.get("application.name") in _OWN_APP_NAMES
             or props.get("application.id") in _OWN_APP_NAMES
-            or str(props.get("application.process.id")) in pids
         )
+        if pid_known and str(pid) in pids:
+            rank = 0
+        elif name_mine and not pid_known:
+            rank = 1
+        elif name_mine:
+            rank = 2
+        else:
+            continue
         idx = entry.get("index")
-        if mine and isinstance(idx, int):
-            own.append((idx, bool(entry.get("corked", False))))
-    for idx, corked in own:
-        if not corked:
-            return idx
-    return own[0][0] if own else None
+        if isinstance(idx, int):
+            own.append(
+                ((rank == 2, bool(entry.get("corked", False)), rank), idx))
+    if not own:
+        return None
+    return min(own, key=lambda item: item[0])[1]
 
 
 def _own_sink_input() -> int | None:

@@ -26,6 +26,11 @@ def _app() -> QApplication:
 class RestyleCoalesceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.app = _app()
+        # Flush anything an earlier FILE left queued (a late-landing
+        # palette worker can queue on the global manager right as that
+        # file's last drain window closes) so it hits the real
+        # setStyleSheet now instead of inflating this test's spy count.
+        QTest.qWait(20)
         # Fresh manager per test so scheduled flushes can't leak across tests.
         self.mgr = theming.ThemeManager()
         self.mgr.refresh()

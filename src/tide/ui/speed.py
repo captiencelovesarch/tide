@@ -29,30 +29,18 @@ from PySide6.QtWidgets import (
 from .. import theming
 from .widgets import BracketButton
 
-
-# Public range — kept module-level so window.py / shortcuts share the same
-# clamp as the UI.
-SPEED_PRESETS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-SPEED_MIN = 0.5
-SPEED_MAX = 2.0
-SPEED_STEP = 0.05
-
-
-def format_speed(speed: float) -> str:
-    """Render a speed value for the UI. Prefers a single decimal when the
-    value is "round" so we get ``"1.0×"`` not ``"1.00×"`` or ``"1×"``; for
-    in-between values like 1.25 we keep the two decimals so the user can
-    tell the difference between similar nudges."""
-    if abs(speed * 10 - round(speed * 10)) < 1e-3:
-        return f"{speed:.1f}×"
-    return f"{speed:.2f}×"
-
-
-def _clamp(value: float) -> float:
-    # Quantize to the step grid so floating math doesn't accumulate (e.g. a
-    # chain of −0.05 nudges shouldn't drift off to 1.0500000004×).
-    snapped = round(float(value) / SPEED_STEP) * SPEED_STEP
-    return max(SPEED_MIN, min(SPEED_MAX, round(snapped, 2)))
+# The speed law (range, presets, clamp, formatting) lives at package root
+# in speed_law.py so the player/router can share it without importing ui.
+# Re-exported here because window.py / mpris.py / shortcuts historically
+# import these names from this module.
+from ..speed_law import (  # noqa: F401  (re-exports)
+    SPEED_MAX,
+    SPEED_MIN,
+    SPEED_PRESETS,
+    SPEED_STEP,
+    format_speed,
+)
+from ..speed_law import clamp as _clamp  # noqa: F401  (re-export)
 
 
 class SpeedButton(BracketButton):

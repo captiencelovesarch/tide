@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, cache, history as history_module, layout as layout_module, qthreads, session as session_module, theming
+from .. import api, cache, glyphs, history as history_module, layout as layout_module, qthreads, session as session_module, theming
 from ..player import PlayState, Player
 from ..playback import PlaybackRouter
 from ..playback.prefetch import StreamPrefetch
@@ -46,6 +46,7 @@ from ..sources import StreamRef, registry as source_registry
 from ..queue import Queue, RepeatMode, Role
 from .album import AlbumView
 from .artist import ArtistView
+from .headings import line_heading
 from .history import HistoryView
 from .library import LibraryView
 from .loading_indicator import LoadingIndicator
@@ -391,7 +392,13 @@ class MainWindow(QMainWindow):
         current_theme = theming.manager().current()
         if current_theme is not None:
             self._apply_window_translucency(current_theme)
-        self.resize(1100, 720)
+        # Window size: the active layout's remembered size (persisted per
+        # layout slug in settings.window_sizes) beats its declared default.
+        # Settings aren't attached yet — app.py binds them after the ctor —
+        # so this one read comes straight from disk; bare test windows see
+        # the sandboxed (empty) config and land on the plain default.
+        self._layout_slug = layout_module.manager().current().slug
+        self.resize(*self._initial_window_size())
         self.api = api_obj
         self.player = player
         self.queue = Queue(self)
@@ -963,14 +970,14 @@ class MainWindow(QMainWindow):
         # behind Ctrl+I with no visible surface at all — README-only
         # features don't exist. Label doubles as the armed indicator
         # ("zzz 12m" / "zzz song" / "zzz queue"), updated by the tick.
-        self.sleep_btn = BracketButton("zzz")
+        self.sleep_btn = BracketButton(glyphs.glyph("sleep"))
         self.sleep_btn.setToolTip("sleep timer (ctrl+i)")
         self.sleep_btn.clicked.connect(self.open_sleep_timer)
 
         # Fullscreen mode entry point (v1.6). Keyboard-only features
         # don't exist (see sleep_btn's war story) — the glyph rides the
         # strip's right cluster next to it.
-        self.fullscreen_btn = BracketButton("full", "⤢")
+        self.fullscreen_btn = BracketButton("full", glyphs.glyph("fullscreen"))
         self.fullscreen_btn.setToolTip("fullscreen (f11)")
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen_mode)
 
@@ -1025,9 +1032,7 @@ class MainWindow(QMainWindow):
         self._loading.updated.connect(self.statusBar().showMessage)
 
     def _line_heading(self, label: str, total: int = 60) -> str:
-        styled = theming.styled_case(label)
-        line = "─" * max(4, total - len(styled) - 6)
-        return f"── {styled} {line}"
+        return line_heading(label, total)
 
     def _set_status(self, msg: str) -> None:
         self.statusBar().showMessage(msg)
@@ -1573,11 +1578,20 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(3000, panel.refresh_statuses)
 
     def _persist_settings(self) -> None:
+        """Persist hook for the source panel's settings_changed signal —
+        field-scoped to exactly what the panel can change, so it can't
+        revert whatever another saver (mini, preset flip) wrote since this
+        window's Settings object was last refreshed."""
         if not hasattr(self, "_settings") or self._settings is None:
             return
         try:
             from .. import settings as _settings_module
-            _settings_module.save(self._settings)
+            _settings_module.save_fields(
+                self._settings,
+                "sources_enabled", "active_source", "federated_search",
+                "local_music_dir", "subsonic_url", "subsonic_user",
+                "subsonic_pass", "subsonic_auth_style",
+            )
         except Exception:
             pass
 
@@ -2259,7 +2273,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"couldn't update like: {msg}")
 
     def _refresh_like_button(self) -> None:
-        glyph = "♥" if self._liked_current else "♡"
+        glyph = glyphs.glyph("like_on" if self._liked_current else "like_off")
         self.like_btn.setLabel(glyph)
         self.like_btn.setGlyph(glyph)
         for w in self._companions():
@@ -2568,10 +2582,10 @@ class MainWindow(QMainWindow):
         # color alone doesn't have to say WHICH repeat is on.
         if mode is RepeatMode.ONE:
             self.repeat_btn.setLabel("repeat¹")
-            self.repeat_btn.setGlyph("↻¹")
+            self.repeat_btn.setGlyph(glyphs.glyph("repeat_one"))
         else:
             self.repeat_btn.setLabel("repeat")
-            self.repeat_btn.setGlyph("↻")
+            self.repeat_btn.setGlyph(glyphs.glyph("repeat"))
         for w in self._companions():
             w.set_modes(shuffle_on, mode)
 
@@ -3007,12 +3021,8 @@ class MainWindow(QMainWindow):
         self._maybe_apply_pending_seek(s)
         if s == PlayState.PLAYING:
             self.play_btn.setLabel("pause")
-            # ▮▮ not ⏸: U+23F8 lives only in symbol/emoji fallback fonts
-            # (Noto Symbols 2 etc.) whose metrics ride above the baseline,
-            # so the pause glyph floated over its neighbors. U+25AE is in
-            # Geometric Shapes — the same block as ▶ — so whatever font
-            # serves the play triangle serves this, at the same baseline.
-            self.play_btn.setGlyph("▮▮")
+            # ▮▮ not ⏸ — the baseline war story lives in glyphs.py now.
+            self.play_btn.setGlyph(glyphs.glyph("pause"))
             # Audio actually started — stop the loading indicator.
             self._loading.finish("playing")
             # First PLAYING for this track: fetch insights + (opt-in) report
@@ -3040,13 +3050,13 @@ class MainWindow(QMainWindow):
                 self._perf_t0 = None
         elif s == PlayState.PAUSED:
             self.play_btn.setLabel("play")
-            self.play_btn.setGlyph("▶")
+            self.play_btn.setGlyph(glyphs.glyph("play"))
         elif s == PlayState.LOADING:
-            self.play_btn.setLabel("…")
-            self.play_btn.setGlyph("…")
+            self.play_btn.setLabel(glyphs.glyph("loading"))
+            self.play_btn.setGlyph(glyphs.glyph("loading"))
         else:
             self.play_btn.setLabel("play")
-            self.play_btn.setGlyph("▶")
+            self.play_btn.setGlyph(glyphs.glyph("play"))
 
     def _on_position(self, secs: float) -> None:
         self._last_position = secs
@@ -3250,32 +3260,226 @@ class MainWindow(QMainWindow):
             pass
 
     def _maybe_apply_theme_slot_prefs(self, new_theme, prior_theme) -> None:
-        new_aes = getattr(new_theme, "aesthetic", None)
-        old_aes = getattr(prior_theme, "aesthetic", None) if prior_theme is not None else None
-        slot_prefs = getattr(new_theme, "slots", None) or {}
-        if not slot_prefs:
+        """A theme pick just landed (settings-dialog preview, chooser).
+        v2.0 semantics — this NEVER wipes layout_overrides anymore:
+
+        - programmatic preset flip in progress → nothing; the stash being
+          restored owns theme, slots and overrides (guard flag below).
+        - settings dialog open → nothing; its combo previews every
+          selection through manager().apply, and routing a cross-aesthetic
+          slug into a flip from here turned arrow-key browsing into
+          persisted personality flips mid-dialog (preview became commit,
+          and _on_save then wrote the outgoing personality's widget state
+          over the flip). The dialog's accept path reconciles the final
+          pick instead (_reconcile_preset_after_dialog).
+        - same-personality pick → the theme is already applied by the
+          caller; the user's slot picks stay exactly as they are. (The old
+          code reset layout_overrides to the theme's [slots] on every
+          aesthetic flip — destructive, and what made theme browsing lossy.)
+        - cross-personality pick → the pick means "take me to the other
+          tide": file the picked theme into the target personality's stash,
+          then route through switch_preset so the flip lands ON that theme
+          instead of the personality's remembered one. DEFERRED out of
+          this theme_changed emission: switch_preset re-applies a theme,
+          and a nested apply would resume THIS emission afterwards,
+          delivering the stale pre-flip theme to every subscriber
+          connected after MainWindow (nearly all of them) — mis-themed
+          until an emission that may never come. Same pattern as the
+          deferred translucency remap above.
+        """
+        if getattr(self, "_switching_preset", False):
+            return
+        if getattr(self, "_settings_dialog_open", False):
             return
         settings = getattr(self, "_settings", None)
-        # On aesthetic FLIP (or first-ever apply), reset user overrides to
-        # the new theme's prefs entirely — anything the user picked on the
-        # prior aesthetic almost certainly doesn't translate.
-        # On same-aesthetic theme swap, keep user overrides (their picks
-        # still fit the new theme's vibe).
-        if old_aes is not None and new_aes == old_aes:
+        if settings is None or not settings.preset:
             return
-        if settings is not None:
-            settings.layout_overrides = dict(slot_prefs)
+        from .. import presets
+        new_slug = str(getattr(new_theme, "slug", "") or "")
+        target = str(getattr(new_theme, "aesthetic", "") or "")
+        if (not new_slug or target not in presets.BUILTINS
+                or target == settings.preset):
+            return
+
+        def _deferred_flip() -> None:
+            if getattr(self, "_switching_preset", False):
+                return
+            if getattr(self, "_settings_dialog_open", False):
+                return
+            live = getattr(self, "_settings", None)
+            if live is None or not live.preset or live.preset == target:
+                return
+            # Superseded pick: another theme landed before this turn ran.
+            # Its own emission schedules its own flip (or none) — flipping
+            # onto OUR captured slug now would fight it.
+            current = theming.manager().current()
+            if current is None or str(getattr(current, "slug", "")) != new_slug:
+                return
+            self._seed_cross_pick(live, target, new_slug, new_theme)
+            self.switch_preset(target)
+
+        QTimer.singleShot(0, _deferred_flip)
+
+    @staticmethod
+    def _seed_cross_pick(settings, target: str, new_slug: str, new_theme) -> None:
+        """File a picked theme into ``target``'s stash so the flip lands
+        ON that theme instead of the personality's remembered one. First
+        visit seeds the theme's [slots] prefs as overrides too (restore()
+        backfills the rest from builtin defaults) — the one good part of
+        the old aesthetic-flip wipe, kept. An existing stash keeps every
+        remembered tweak; only its theme updates."""
+        stashed = settings.preset_state.get(target)
+        if stashed is None:
+            settings.preset_state[target] = {
+                "theme": new_slug,
+                "layout_overrides": dict(
+                    getattr(new_theme, "slots", None) or {}),
+            }
+        else:
+            stashed["theme"] = new_slug
+
+    # ---------- personality flip (v2.0) ----------
+
+    def switch_preset(self, preset_id: str) -> None:
+        """Mid-session personality flip. presets.apply_preset stashes the
+        outgoing personality, restores the incoming one, and pushes the
+        managers (theme+font+size+case through ONE apply_bundle → one
+        queued restyle); this method then lands the effective layout on
+        the window in ONE apply_layout pass.
+
+        Reentry-guarded: apply_bundle's theme_changed emission re-enters
+        _on_theme_changed while this runs, and without the flag the
+        slot-prefs handler would clobber the overrides the stash just
+        restored (and cost a second apply_layout).
+        """
+        if getattr(self, "_switching_preset", False):
+            return
+        settings = getattr(self, "_settings", None)
+        if settings is None:
+            return
+        from .. import presets
+        if (preset_id != settings.preset
+                and preset_id not in settings.preset_state):
+            # First visit via a direct flip (chooser): seed the incoming
+            # builtin theme's [slots] prefs as overrides — no window code
+            # observes theme slot prefs during a programmatic flip (guard
+            # above), so without this a first visit to modern would wear
+            # brutalist slot variants and stash them that way forever.
+            # Same seeding the wizard handoff and the cross-personality
+            # theme pick do.
             try:
-                from .. import settings as settings_module
-                settings_module.save(settings)
+                theme_slug = presets.builtin(preset_id).theme
+                for t in theming.manager().list_themes():
+                    if t.slug == theme_slug and getattr(t, "slots", None):
+                        settings.preset_state[preset_id] = {
+                            "layout_overrides": dict(t.slots),
+                        }
+                        break
+            except KeyError:
+                pass   # non-builtin id — restore() handles/raises below
+        self._switching_preset = True
+        try:
+            presets.apply_preset(settings, preset_id, window=self)
+            # apply_preset already pushed the layout manager; one pass
+            # here rebuilds the slots/visibility/size on this window.
+            self.apply_layout(layout_module.manager().current())
+        finally:
+            self._switching_preset = False
+
+    def apply_preset_visuals(self) -> None:
+        """Push every preset-owned visual from self._settings onto the
+        live widgets and drivers. Mirrors the settings-dialog apply block
+        (same helpers, no new signal paths). Called by presets.apply_preset
+        when handed a window, and once at startup from app.py — which runs
+        BEFORE ui_sounds exists, hence the getattr guards throughout.
+        """
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        # Adaptive accent + backdrop drivers (constructed by app.py;
+        # absent on bare test windows).
+        adaptive = getattr(self, "_adaptive", None)
+        if adaptive is not None:
+            adaptive.set_enabled(s.adaptive_accent)
+            adaptive.set_background_enabled(s.adaptive_background)
+        from .central_bg import corner_radius as _corner_radius
+        if hasattr(self, "central_bg"):
+            self.central_bg.set_enabled(s.adaptive_background)
+            self.central_bg.set_style(s.adaptive_background_style or "field")
+            self.central_bg.set_motion(s.motion or "lite")
+            self.central_bg.set_radius(_corner_radius(s.corner_style))
+        ambient = getattr(self, "_ambient", None)
+        if ambient is not None:
+            ambient.set_pulse_enabled(s.adaptive_pulse and s.adaptive_background)
+        # Corner style may change whether the window needs an alpha
+        # channel. Presets never touch the CSD flag, so the CSD-before-
+        # translucency ordering holds without a set_csd_titlebar call.
+        self._apply_window_translucency(self._theme)
+        # Companion windows re-read settings live if they're up.
+        self._apply_mini_backdrop()
+        if self._fs is not None and self._fs_mode:
+            try:
+                self._fs.apply_settings()
             except Exception:
                 pass
-        # Push to the layout manager + re-build the strip so new variants
-        # take effect immediately.
+        self.apply_nav_icons(s.nav_icon_set or "off")
+        # Thumbnails are preset-owned (brutalist keeps them ON — art is
+        # content, not chrome).
+        from .track_row import set_thumbnail_override
+        set_thumbnail_override(s.show_thumbnails or "theme")
+        # UI-sounds master toggle. Not built yet at the startup call site.
+        ui_sounds = getattr(self, "ui_sounds", None)
+        if ui_sounds is not None:
+            ui_sounds.set_enabled(bool(s.ui_sounds_enabled))
+
+    def _reconcile_preset_after_dialog(self, before, new) -> None:
+        """Preset bookkeeping for an ACCEPTED settings dialog. Cross-
+        personality previews are suppressed while the dialog is open
+        (_maybe_apply_theme_slot_prefs), so the final accepted state is
+        reconciled here, on our own event-loop turn:
+
+        - same-personality accept → refresh the active preset's stash so
+          the next flip round-trips the dialog's tweaks instead of
+          reverting them (the dialog full-saves the live fields but
+          never touches preset_state);
+        - accepted theme belongs to the OTHER personality → the exact
+          flip a live cross-personality pick performs: the accepted
+          widget edits stay with the outgoing personality (they were
+          made looking at its values — including its theme, which a
+          browse-away pick doesn't change), and the flip lands ON the
+          picked theme with the target's remembered state (or builtin
+          defaults on a first visit). Never adopt the accepted widget
+          bundle as the target's state wholesale — that persists a
+          preset wearing the other personality's look and clobbers the
+          target's remembered tweaks.
+        """
+        from .. import presets
+        if new is None or not getattr(new, "preset", ""):
+            return
+        target = ""
+        picked = None
         try:
-            effective = layout_module.manager().update_overrides(dict(slot_prefs))
-            if effective is not None and hasattr(self, "apply_layout"):
-                self.apply_layout(effective)
+            for t in theming.manager().list_themes():
+                if t.slug == new.theme:
+                    picked = t
+                    target = str(getattr(t, "aesthetic", "") or "")
+                    break
+        except Exception:
+            target = ""
+        if target in presets.BUILTINS and target != new.preset:
+            self._seed_cross_pick(new, target, new.theme, picked)
+            # The picked theme rides to the target; the outgoing
+            # personality keeps the theme it wore when the dialog opened
+            # (switch_preset stashes the live fields as the outgoing
+            # state, and _on_save already wrote the pick onto new.theme).
+            if before is not None:
+                new.theme = before.theme
+            self.switch_preset(target)
+            return
+        presets.stash(new)
+        try:
+            from .. import settings as settings_module
+            settings_module.save_fields(new, "preset_state")
         except Exception:
             pass
 
@@ -3339,19 +3543,16 @@ class MainWindow(QMainWindow):
 
     def _on_volume_changed(self, value: int) -> None:
         self.player.set_volume(value)
-        # Persist on every change (cheap — small toml). Falls back gracefully
-        # if settings injection didn't happen.
+        # Persist debounced (see _schedule_settings_save) — a wheel spin
+        # or slider drag writes the TOML once, not per tick. Falls back
+        # gracefully if settings injection didn't happen.
         current = getattr(self, "_settings", None)
         if current is None:
             return
         if current.volume == value:
             return
         current.volume = value
-        try:
-            from .. import settings as settings_module
-            settings_module.save(current)
-        except Exception:
-            pass
+        self._schedule_settings_save("volume")
 
     def apply_initial_volume(self, value: int) -> None:
         """Called once at startup so the widget + mpv start in sync without
@@ -3363,17 +3564,49 @@ class MainWindow(QMainWindow):
         # Push to the playback router → mpv. Backends that don't support
         # variable speed (future Librespot/MusicKit) silently no-op.
         self.player.set_speed(value)
-        # Persist. Same lazy-save pattern as volume — cheap, gracefully
-        # skipped if settings hasn't been attached yet (e.g. mid-startup).
+        # Persist debounced, same shared timer as volume — a held [ or ]
+        # key repeats fast enough to matter. Gracefully skipped if settings
+        # hasn't been attached yet (e.g. mid-startup).
         current = getattr(self, "_settings", None)
         if current is None:
             return
         if abs(current.playback_speed - value) < 1e-4:
             return
         current.playback_speed = float(value)
+        self._schedule_settings_save("playback_speed")
+
+    def _schedule_settings_save(self, *names: str) -> None:
+        """Trailing-edge debounce for high-frequency settings fields
+        (volume wheel, speed nudges) — same shape as the FX debounce
+        below. One shared timer + a pending name-set; the flush writes
+        only those fields via save_fields so a stale in-memory Settings
+        can't revert what another saver wrote meanwhile. closeEvent
+        flushes so the last tick before quit is never lost."""
+        from PySide6.QtCore import QTimer as _QT
+        timer = getattr(self, "_settings_save_timer", None)
+        if timer is None:
+            timer = _QT(self)
+            timer.setInterval(300)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._flush_settings_save)
+            self._settings_save_timer = timer
+        pending = getattr(self, "_pending_settings_fields", None)
+        if pending is None:
+            pending = set()
+            self._pending_settings_fields = pending
+        pending.update(names)
+        timer.start()
+
+    def _flush_settings_save(self) -> None:
+        pending = getattr(self, "_pending_settings_fields", None)
+        current = getattr(self, "_settings", None)
+        if not pending or current is None:
+            return
+        names = tuple(sorted(pending))
+        pending.clear()
         try:
             from .. import settings as settings_module
-            settings_module.save(current)
+            settings_module.save_fields(current, *names)
         except Exception:
             pass
 
@@ -3467,7 +3700,7 @@ class MainWindow(QMainWindow):
             return
         try:
             from .. import settings as settings_module
-            settings_module.save(current)
+            settings_module.save_fields(current, "audio_fx_state")
         except Exception:
             pass
 
@@ -3495,20 +3728,21 @@ class MainWindow(QMainWindow):
         if mode == SleepMode.MINUTES:
             self._sleep_deadline = _t.time() + minutes * 60
             self._sleep_timer.start()
-            self.sleep_btn.setLabel(f"zzz {minutes}m")
+            self.sleep_btn.setLabel(f"{glyphs.glyph('sleep')} {minutes}m")
             self.statusBar().showMessage(f"sleep: pausing in {minutes} min")
             if hasattr(self, "_settings") and self._settings is not None:
                 self._settings.sleep_preset_minutes = minutes
                 try:
                     from .. import settings as settings_module
-                    settings_module.save(self._settings)
+                    settings_module.save_fields(
+                        self._settings, "sleep_preset_minutes")
                 except Exception:
                     pass
         elif mode == SleepMode.AFTER_SONG:
-            self.sleep_btn.setLabel("zzz song")
+            self.sleep_btn.setLabel(f"{glyphs.glyph('sleep')} song")
             self.statusBar().showMessage("sleep: will pause after current song")
         elif mode == SleepMode.AFTER_QUEUE:
-            self.sleep_btn.setLabel("zzz queue")
+            self.sleep_btn.setLabel(f"{glyphs.glyph('sleep')} queue")
             self.statusBar().showMessage("sleep: will pause after current queue")
 
     def _sleep_cancel(self, silent: bool = False) -> None:
@@ -3516,7 +3750,7 @@ class MainWindow(QMainWindow):
         self._sleep_mode = None
         self._sleep_deadline = None
         self._sleep_timer.stop()
-        self.sleep_btn.setLabel("zzz")
+        self.sleep_btn.setLabel(glyphs.glyph("sleep"))
         if was_active and not silent:
             self.statusBar().showMessage("sleep timer cancelled")
 
@@ -3532,7 +3766,8 @@ class MainWindow(QMainWindow):
             return
         mins, secs = divmod(int(remaining), 60)
         # Ceil so the label never reads "zzz 0m" while a minute still runs.
-        self.sleep_btn.setLabel(f"zzz {mins + (1 if secs else 0)}m")
+        self.sleep_btn.setLabel(
+            f"{glyphs.glyph('sleep')} {mins + (1 if secs else 0)}m")
         self.statusBar().showMessage(f"sleep: {mins}:{secs:02d}")
 
     # ---------- strip layout builders ----------
@@ -3680,14 +3915,63 @@ class MainWindow(QMainWindow):
 
     # ---------- layout ----------
 
+    def _sane_size(self, entry, fallback) -> tuple[int, int]:
+        """A window_sizes [w, h] entry validated into a usable size —
+        missing/malformed/absurd values fall back to the layout default."""
+        try:
+            w, h = int(entry[0]), int(entry[1])
+        except Exception:
+            return (int(fallback[0]), int(fallback[1]))
+        if 320 <= w <= 16384 and 240 <= h <= 16384:
+            return (w, h)
+        return (int(fallback[0]), int(fallback[1]))
+
+    def _initial_window_size(self) -> tuple[int, int]:
+        """Ctor-time window size: the active layout's remembered size from
+        the on-disk settings (window._settings isn't attached yet), else
+        the layout's declared default."""
+        layout = layout_module.manager().current()
+        remembered = None
+        try:
+            from .. import settings as settings_module
+            remembered = (settings_module.load().window_sizes or {}).get(
+                layout.slug)
+        except Exception:
+            remembered = None
+        return self._sane_size(remembered, layout.window_default)
+
+    def _remember_window_size(self) -> None:
+        """File the current window size under the layout slug this window
+        is showing. In-memory only — closeEvent persists the dict (a
+        crash loses at most a size)."""
+        settings = getattr(self, "_settings", None)
+        slug = getattr(self, "_layout_slug", "")
+        if settings is None or not slug:
+            return
+        if self.isMaximized() or self.isFullScreen():
+            # size() is the screen here; restoring it later would produce
+            # a screen-sized-but-normal window.
+            return
+        size = self.size()
+        if size.width() > 0 and size.height() > 0:
+            settings.window_sizes[slug] = [int(size.width()),
+                                           int(size.height())]
+
     def apply_layout(self, layout) -> None:
         """Apply a new layout: swap slot variants in the now-playing strip,
-        toggle nav/status visibility, resize window per layout's window_default.
+        toggle nav/status visibility, resize window per the layout's
+        remembered size (settings.window_sizes) or its window_default.
 
         Structural mode changes (classic/compact/stage) are partially handled
         — compact triggers mini-mode style hiding; stage is currently treated
         like classic (TODO: side-by-side art + lyrics).
         """
+        # Remember the outgoing layout's window size FIRST, before any
+        # slot swap or the resize below moves anything. Keyed by the slug
+        # this window is currently showing — the layout manager may
+        # already point at the incoming layout (the settings dialog
+        # applies there before calling here).
+        self._remember_window_size()
         # Slot swap — rebuild whichever widgets changed.
         new_progress = layout.slots.get("progress", "blocks")
         new_volume   = layout.slots.get("volume", "blocks")
@@ -3731,7 +4015,15 @@ class MainWindow(QMainWindow):
             # also call set_mini_mode, which now opens a separate window —
             # and whose old behavior was redundant here anyway.)
             self._rebuild_strip("compact" if new_mode == "compact" else "classic")
-        self.resize(*layout.window_default)
+        # Remembered size for the incoming layout wins over its declared
+        # default — a layout (or personality) switch shouldn't stomp a
+        # window the user already sized. Also un-breaks the old snap-back:
+        # a same-layout slot tweak used to force window_default every time.
+        settings = getattr(self, "_settings", None)
+        remembered = ((settings.window_sizes or {}).get(layout.slug)
+                      if settings is not None else None)
+        self.resize(*self._sane_size(remembered, layout.window_default))
+        self._layout_slug = layout.slug
 
         self.statusBar().showMessage(
             theming.styled_case(f"layout · {layout.name}")
@@ -4076,9 +4368,15 @@ class MainWindow(QMainWindow):
             current = settings_module.load()
         dlg = SettingsDialog(current, parent=self)
         self._ui_sound("modal_open")
+        # While the dialog is up, its pickers preview through the live
+        # managers; the flag keeps _maybe_apply_theme_slot_prefs from
+        # turning a theme preview into a personality flip. The accept
+        # path below reconciles the final pick instead.
+        self._settings_dialog_open = True
         try:
             result = dlg.exec()
         finally:
+            self._settings_dialog_open = False
             self._ui_sound("modal_close")
         if result != dlg.DialogCode.Accepted:
             dlg.deleteLater()
@@ -4086,6 +4384,7 @@ class MainWindow(QMainWindow):
         new = dlg.updated_settings()
         dlg.deleteLater()
         self._settings = new
+        self._reconcile_preset_after_dialog(current, new)
         # Hot-swap the UI sounds master toggle.
         ui_sounds = getattr(self, "ui_sounds", None)
         if ui_sounds is not None:
@@ -4297,6 +4596,23 @@ class MainWindow(QMainWindow):
             try:
                 w.close()
             except RuntimeError:
+                pass
+        # Flush the debounced settings savers — the last volume/speed/FX
+        # tick before quit must land, not die on a stopped timer.
+        for timer_attr in ("_settings_save_timer", "_audio_fx_save_timer"):
+            timer = getattr(self, timer_attr, None)
+            if timer is not None and timer.isActive():
+                timer.stop()
+        self._flush_settings_save()
+        self._flush_audio_fx_state()
+        # Remember + persist the final window size for the active layout.
+        self._remember_window_size()
+        settings = getattr(self, "_settings", None)
+        if settings is not None:
+            try:
+                from .. import settings as settings_module
+                settings_module.save_fields(settings, "window_sizes")
+            except Exception:
                 pass
         if self._session_dirty:
             self._save_session_now()

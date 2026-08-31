@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QStyledItemDelegate, QVBoxLayout, QWidget,
 )
 
-from .. import theming
+from .. import glyphs, theming
 from ..player import PlayState
 from ..queue import Role as QueueRole
 from . import art_cache, motion as motion_module, scale as _scale
@@ -312,12 +312,13 @@ class FullscreenPlayer(QWidget):
         col.addLayout(center, stretch=1)
 
         # Bottom chrome (fades in zen): transport + seekable progress.
-        self.shuffle_btn = BracketButton("⇋", "⇋")
-        self.prev_btn = BracketButton("prev", "◂◂")
-        self.play_btn = BracketButton("play", "▶")
-        self.next_btn = BracketButton("next", "▸▸")
-        self.repeat_btn = BracketButton("↻", "↻")
-        self.like_btn = BracketButton("♡", "♡")
+        _g = glyphs.glyph
+        self.shuffle_btn = BracketButton(_g("shuffle"), _g("shuffle"))
+        self.prev_btn = BracketButton("prev", _g("prev"))
+        self.play_btn = BracketButton("play", _g("play"))
+        self.next_btn = BracketButton("next", _g("next"))
+        self.repeat_btn = BracketButton(_g("repeat"), _g("repeat"))
+        self.like_btn = BracketButton(_g("like_off"), _g("like_off"))
         self.shuffle_btn.setToolTip("shuffle")
         self.repeat_btn.setToolTip("repeat: off / all / one")
         for btn in (self.shuffle_btn, self.prev_btn, self.play_btn,
@@ -646,14 +647,14 @@ class FullscreenPlayer(QWidget):
     def _on_state(self, state) -> None:
         if state == PlayState.PLAYING:
             self.play_btn.setLabel("pause")
-            # ▮▮ not ⏸ — same-font baseline alignment; see window.py.
-            self.play_btn.setGlyph("▮▮")
+            # ▮▮ not ⏸ — same-font baseline alignment; see glyphs.py.
+            self.play_btn.setGlyph(glyphs.glyph("pause"))
         elif state == PlayState.LOADING:
-            self.play_btn.setLabel("…")
-            self.play_btn.setGlyph("…")
+            self.play_btn.setLabel(glyphs.glyph("loading"))
+            self.play_btn.setGlyph(glyphs.glyph("loading"))
         else:
             self.play_btn.setLabel("play")
-            self.play_btn.setGlyph("▶")
+            self.play_btn.setGlyph(glyphs.glyph("play"))
         self._reconcile_inhibit()
 
     def _on_position(self, secs: float) -> None:
@@ -713,7 +714,7 @@ class FullscreenPlayer(QWidget):
     # ---------- like / nav state pushed by MainWindow ----------
 
     def set_liked(self, liked: bool) -> None:
-        glyph = "♥" if liked else "♡"
+        glyph = glyphs.glyph("like_on" if liked else "like_off")
         self.like_btn.setLabel(glyph)
         self.like_btn.setGlyph(glyph)
 
@@ -729,7 +730,8 @@ class FullscreenPlayer(QWidget):
         mode = RepeatMode.parse(repeat_mode)
         self.shuffle_btn.setActiveState(bool(shuffle_on))
         self.repeat_btn.setActiveState(mode is not RepeatMode.OFF)
-        glyph = "↻¹" if mode is RepeatMode.ONE else "↻"
+        glyph = glyphs.glyph(
+            "repeat_one" if mode is RepeatMode.ONE else "repeat")
         self.repeat_btn.setLabel(glyph)
         self.repeat_btn.setGlyph(glyph)
 

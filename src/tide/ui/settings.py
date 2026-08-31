@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import auth, settings as settings_module, theming
+from .. import auth, backdrops, settings as settings_module, theming
 
 
 DISCORD_HELP_URL = "https://discord.com/developers/applications"
@@ -121,17 +121,8 @@ class SettingsDialog(QDialog):
             "tint central area with album-derived gradient"
         )
         self.adaptive_style_picker = QComboBox()
-        self.adaptive_style_picker.addItem("living fields · layered ambience", "field")
-        self.adaptive_style_picker.addItem("diagonal band · classic sweep", "band")
-        self.adaptive_style_picker.addItem("bass arch · hazy hill swells on bass", "vbeam")
-        self.adaptive_style_picker.addItem("sunset horizon · sun low over water", "horizon")
-        self.adaptive_style_picker.addItem("lightning · strikes on the beat", "lightning")
-        self.adaptive_style_picker.addItem("deep water · glow wells up from below", "depths")
-        self.adaptive_style_picker.addItem("rim light · edges hold the light", "rimlight")
-        self.adaptive_style_picker.addItem("liquid cover · the album art, melted", "liquid")
-        self.adaptive_style_picker.addItem("aurora · slow curtains of light", "aurora")
-        self.adaptive_style_picker.addItem("smoke · drifts, glows from within", "smoke")
-        self.adaptive_style_picker.addItem("caustics · underwater light web", "caustics")
+        for slug, label in backdrops.choices():
+            self.adaptive_style_picker.addItem(label, slug)
 
         # Bass pulse — swells / brightens that gradient on heavy bass while
         # playing. Needs the monitor capture, so it's gated on the gradient
@@ -289,20 +280,12 @@ class SettingsDialog(QDialog):
         # opened by clicking the now-playing art or Ctrl+M). Everything
         # here is also reachable from the mini's own right-click menu.
         self.mini_default_toggle = QCheckBox("start in mini player")
+        # "follow" leads and "off" trails the real styles — the mini can
+        # mirror the main window or decline to paint at all.
         self.mini_backdrop_picker = QComboBox()
-        self.mini_backdrop_picker.addItem("follow main backdrop style", "follow")
-        self.mini_backdrop_picker.addItem("living fields · layered ambience", "field")
-        self.mini_backdrop_picker.addItem("diagonal band · classic sweep", "band")
-        self.mini_backdrop_picker.addItem("bass arch · hazy hill swells on bass", "vbeam")
-        self.mini_backdrop_picker.addItem("sunset horizon · sun low over water", "horizon")
-        self.mini_backdrop_picker.addItem("lightning · strikes on the beat", "lightning")
-        self.mini_backdrop_picker.addItem("deep water · glow wells up from below", "depths")
-        self.mini_backdrop_picker.addItem("rim light · edges hold the light", "rimlight")
-        self.mini_backdrop_picker.addItem("liquid cover · the album art, melted", "liquid")
-        self.mini_backdrop_picker.addItem("aurora · slow curtains of light", "aurora")
-        self.mini_backdrop_picker.addItem("smoke · drifts, glows from within", "smoke")
-        self.mini_backdrop_picker.addItem("caustics · underwater light web", "caustics")
-        self.mini_backdrop_picker.addItem("off · flat card", "off")
+        for slug, label in (*backdrops.choices_with_follow(),
+                            (backdrops.OFF, backdrops.OFF_LABEL)):
+            self.mini_backdrop_picker.addItem(label, slug)
         self.mini_progress_picker = QComboBox()
         self.mini_progress_picker.addItem("border ring · the window edge fills", "ring")
         self.mini_progress_picker.addItem("thin bar", "thin")

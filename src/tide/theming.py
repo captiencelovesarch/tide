@@ -189,6 +189,15 @@ _TITLEBAR_QSS = """
 """
 
 
+# Status colors (`status_color` + the @ok/@warn/@error QSS tokens). Themes
+# may declare their own in [tokens]; when they don't, these fallbacks keep
+# status UI legible — the dark set matches the palette source_panel.py
+# hardcoded before tokens existed, the light set is the same hues darkened
+# so they read on paper-ish backgrounds.
+_STATUS_FALLBACKS_DARK = {"ok": "#5aaf6a", "warn": "#d4b95e", "error": "#a05a5a"}
+_STATUS_FALLBACKS_LIGHT = {"ok": "#3c7d4a", "warn": "#8a6d1e", "error": "#8f4a4a"}
+
+
 def _substitute(qss: str, theme: Theme) -> str:
     # tokens come from the [tokens] table plus a couple synthetic ones from
     # [layout] (border, radius, spacing) so QSS can reference them uniformly.
@@ -196,6 +205,12 @@ def _substitute(qss: str, theme: Theme) -> str:
     lookups.setdefault("border", f"{int(theme.t('layout', 'border_px', 1))}px")
     lookups.setdefault("radius", f"{int(theme.t('layout', 'radius_px', 0))}px")
     lookups.setdefault("spacing", f"{int(theme.t('layout', 'spacing_px', 8))}px")
+    # status tokens always resolve: theme-declared values ride in via
+    # theme.tokens above, everything else gets the dark/light-aware fallback.
+    for kind, color in (
+        _STATUS_FALLBACKS_DARK if theme.dark else _STATUS_FALLBACKS_LIGHT
+    ).items():
+        lookups.setdefault(kind, color)
     lookups.setdefault("font_family", str(theme.t("typography", "family", "monospace")))
     # Pull the scaled font size through scale.round_pt so QSS rules that use
     # @font_size track the active UI scale preset.
@@ -240,6 +255,25 @@ def effective_radius_px(theme: "Theme | None") -> int:
         return max(0, int(theme.t("layout", "radius_px", 0) or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def status_color(kind: str) -> str:
+    """Resolve a status color ("ok" / "warn" / "error") for the active theme.
+
+    A theme-declared ``[tokens]`` value wins (via the effective theme, so
+    user/dynamic overrides can retint it too); otherwise a dark/light-aware
+    fallback matching the theme's polarity. Unknown kinds get a neutral gray
+    rather than raising — status dots would rather be gray than crash a
+    paintEvent.
+    """
+    theme = manager().current_effective()
+    if theme is not None:
+        tok = str(theme.token(kind, "")).strip()
+        if tok:
+            return tok
+    dark = theme.dark if theme is not None else True
+    fallbacks = _STATUS_FALLBACKS_DARK if dark else _STATUS_FALLBACKS_LIGHT
+    return fallbacks.get(kind, "#888888" if dark else "#666666")
 
 
 # ---------- font registration ----------
@@ -375,6 +409,51 @@ class ThemeManager(QObject):
         self._current = theme
         self.theme_changed.emit(effective_theme)
         return effective_theme
+
+    def apply_bundle(self, slug: str | None = None, *,
+                     font_family: str | None = None,
+                     font_size: int | None = None,
+                     case: str | None = None,
+                     user_overrides: dict[str, str | None] | None = None,
+                     ) -> Theme | None:
+        """Set several theming axes at once with ONE apply.
+
+        The preset switcher flips theme + font + size + case together; going
+        through the single setters would re-apply the whole theme once per
+        axis (four repolish-queues, four theme_changed emits, and widgets
+        repainting against half-switched state in between). This writes the
+        same state the setters own — no duplicate fields — then applies once.
+
+        ``None`` means "leave that axis alone"; the falsy values the setters
+        treat as clears ("" family, 0 size, "" case) stay meaningful here.
+        ``user_overrides`` merges per key, ``None`` value removes (same
+        semantics as :meth:`set_user_override`), and survives theme switches
+        exactly like overrides set one at a time.
+
+        Applies ``slug`` when given, else re-applies the current theme; with
+        neither there is nothing to apply — state is stored for the first
+        real apply and ``None`` returns. Dynamic overrides keep their
+        clear-only-on-slug-change behavior because :meth:`apply` owns that.
+        """
+        if font_family is not None:
+            self._user_font = (font_family or "").strip()
+        if font_size is not None:
+            self._user_font_size = max(0, int(font_size))
+        if case is not None:
+            # same validation as set_case_override, minus its re-apply —
+            # the single apply below re-cases everything.
+            global _CASE_OVERRIDE
+            _CASE_OVERRIDE = case if case in CASE_MODES else ""
+        if user_overrides is not None:
+            for key, value in user_overrides.items():
+                if value is None:
+                    self._user_overrides.pop(key, None)
+                else:
+                    self._user_overrides[key] = str(value)
+        target = slug or (self._current.slug if self._current is not None else "")
+        if not target:
+            return None
+        return self.apply(target)
 
     # ---------- deferred full-app restyle ----------
 

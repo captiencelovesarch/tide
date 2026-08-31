@@ -23,14 +23,9 @@ from PySide6.QtWidgets import (
 )
 
 from .. import api, history, qthreads, theming
+from .headings import line_heading as _line_heading
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
-
-
-def _line_heading(label: str, total: int = 60) -> str:
-    styled = theming.styled_case(label)
-    line = "─" * max(4, total - len(styled) - 6)
-    return f"── {styled} {line}"
 
 
 class _RemoteHistoryWorker(QObject):

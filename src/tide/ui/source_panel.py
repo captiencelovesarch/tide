@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from ..settings import Settings
 from ..sources import MusicSource, NotSupportedError, registry as source_registry
-from ..theming import styled_case
+from ..theming import status_color, styled_case
 
 
 class _StatusDot(QFrame):
@@ -54,14 +54,14 @@ class _StatusDot(QFrame):
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        # Resolve color from object name → palette via theme overrides.
-        colors = {
-            "ok": "#5aaf6a",
-            "warn": "#d4b95e",
-            "off": "#555",
-        }
         from PySide6.QtGui import QColor
-        c = QColor(colors.get(self._state, "#555"))
+        # ok/warn resolve through the theme's status tokens (@ok/@warn,
+        # dark/light-aware fallbacks). "off" isn't a status — it's the
+        # disabled-neutral, so it keeps its flat gray.
+        if self._state in ("ok", "warn"):
+            c = QColor(status_color(self._state))
+        else:
+            c = QColor("#555")
         p.setBrush(c)
         p.setPen(Qt.NoPen)
         r = self.rect().adjusted(0, 0, -1, -1)

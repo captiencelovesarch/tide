@@ -1,10 +1,14 @@
-"""Launch-time regressions (v1.3.x): CSD hide-on-map, wizard [next] staleness,
-and disabled-Spotify expiry noise.
+"""Launch-time regressions: CSD hide-on-map, wizard [next] staleness,
+disabled-Spotify expiry noise, and the v2.0 startup fixes (deferred
+single-instance raise, first-run modern-pick-on-brutalist-slots).
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen python -m pytest tests/
 """
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
@@ -185,6 +189,108 @@ class DisabledSpotifyStaysQuietTest(_RegistrySandbox):
             toast_module.show_toast = real
             w.close()
             QTest.qWait(30)
+
+
+class InstanceRaiseDeferralTest(unittest.TestCase):
+    """The single-instance 'raise' command arrives mid-signal-emission
+    (socket readyRead), so presenting the window must defer to a later
+    event-loop turn — and unknown commands / no-window-yet must no-op."""
+
+    class _FakeWindow:
+        def __init__(self) -> None:
+            self.presented = 0
+
+        def present_active(self) -> None:
+            self.presented += 1
+
+    def test_raise_defers_and_filters(self) -> None:
+        _app()
+        from tide.app import _instance_message_handler
+        target: list = [None]
+        handler = _instance_message_handler(target)
+        handler("raise")                    # no window yet — dropped
+        QTest.qWait(20)
+        win = self._FakeWindow()
+        target[0] = win
+        handler("bogus")                    # unknown commands ignored
+        QTest.qWait(20)
+        self.assertEqual(win.presented, 0)
+        handler("raise")
+        # NOT synchronous — the show/raise must unwind the emitting stack
+        # first (the modal-from-click crash family).
+        self.assertEqual(win.presented, 0)
+        QTest.qWait(30)
+        self.assertEqual(win.presented, 1)
+
+
+class WizardPickLandsBeforeWindowTest(unittest.TestCase):
+    """First-run regression (fixed in 2.0): theme+layout were applied
+    pre-wizard only, and the window-side slot sync fires solely on
+    aesthetic flips it can observe — so a modern wizard pick rendered on
+    the brutalist DEFAULT_SLOTS forever. run_onboarding_if_needed now
+    re-applies the pick as a preset before MainWindow exists."""
+
+    def setUp(self) -> None:
+        app = _app()
+        from tide import config
+        self._tmp = tempfile.TemporaryDirectory(prefix="tide-launch-")
+        self.addCleanup(self._tmp.cleanup)
+        self._config = config
+        self._real_settings_file = config.SETTINGS_FILE
+        config.SETTINGS_FILE = Path(self._tmp.name) / "settings.toml"
+        from tide.ui import onboarding as onboarding_module
+        self._onb = onboarding_module
+        self._real_dialog = onboarding_module.OnboardingDialog
+        # Suppress real app-wide QSS pushes (test_restyle_coalesce's spy
+        # pattern) — the wizard handoff + tearDown reset each queue one,
+        # and a real push repolishes every window earlier suite files
+        # leaked. Manager/slot state stays fully real.
+        mock.patch.object(app, "setStyleSheet").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self) -> None:
+        self._onb.OnboardingDialog = self._real_dialog
+        self._config.SETTINGS_FILE = self._real_settings_file
+        from tide import layout as layout_module
+        from tide.ui import motion as motion_module
+        theming.manager().set_user_override("radius", None)
+        theming.manager().apply_bundle(
+            slug="brutalist-mono", font_family="", font_size=0, case="")
+        layout_module.manager().apply("classic", {})
+        motion_module.set_intensity("lite")
+
+    def test_modern_pick_gets_modern_slot_variants(self) -> None:
+        from tide import app as app_module
+        from tide import layout as layout_module
+        from tide.ui.onboarding import OnboardingResult
+
+        result = OnboardingResult(
+            completed=True, aesthetic="modern", theme_slug="nord",
+            adaptive_accent=True, adaptive_background=True, motion="full",
+        )
+
+        class _AcceptingWizard:
+            DialogCode = QDialog.DialogCode
+
+            def exec(self):
+                return QDialog.DialogCode.Accepted
+
+            def result_data(self):
+                return result
+
+        self._onb.OnboardingDialog = _AcceptingWizard
+        s = Settings()                          # true first launch
+        app_module._bootstrap_preset(s)         # pre-wizard startup state
+        self.assertTrue(app_module.run_onboarding_if_needed(s))
+        # The state MainWindow will construct from: picked theme applied,
+        # and the picked theme's slot prefs on the layout — not the
+        # brutalist blocks/bracket defaults.
+        self.assertEqual(theming.manager().current().slug, "nord")
+        slots = layout_module.manager().current().slots
+        self.assertEqual(slots["progress"], "bar")
+        self.assertEqual(slots["controls"], "large")
+        self.assertEqual(slots["now_label"], "inline")
+        self.assertEqual(s.layout_overrides.get("progress"), "bar")
 
 
 if __name__ == "__main__":

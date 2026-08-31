@@ -43,12 +43,10 @@ if TYPE_CHECKING:
     from .queue import Queue
 
 # The rate window we advertise over D-Bus mirrors what the in-app speed UI
-# allows, so external clients can't push tide outside its own range. Guarded
-# import: a UI-module failure must never take the MPRIS service down with it.
-try:
-    from .ui.speed import SPEED_MAX, SPEED_MIN
-except Exception:  # pragma: no cover
-    SPEED_MIN, SPEED_MAX = 0.5, 2.0
+# allows, so external clients can't push tide outside its own range. Comes
+# from the Qt-free speed law at package root — the old guarded ui.speed
+# import (with its own 0.5/2.0 fallback literals) is gone with it.
+from .speed_law import SPEED_MAX, SPEED_MIN
 
 
 MPRIS_PATH = "/org/mpris/MediaPlayer2"

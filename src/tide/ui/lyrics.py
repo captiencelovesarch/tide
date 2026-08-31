@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from .. import api, qthreads, theming
 from . import motion as motion_module
+from .headings import line_heading as _line_heading
 
 
 class _LyricsWorker(QObject):
@@ -53,12 +54,6 @@ class _LyricsWorker(QObject):
             self.done.emit(self.track.video_id, self.api.get_lyrics_for_track(self.track))
         except Exception as exc:
             self.failed.emit(self.track.video_id, str(exc))
-
-
-def _line_heading(label: str, total: int = 60) -> str:
-    styled = theming.styled_case(label)
-    line = "─" * max(4, total - len(styled) - 6)
-    return f"── {styled} {line}"
 
 
 class _LineLabel(QLabel):

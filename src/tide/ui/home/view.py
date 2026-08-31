@@ -42,14 +42,9 @@ from PySide6.QtWidgets import (
 
 from ... import api, history as history_module, qthreads, session as session_module, theming
 from ..card import Card, CardGrid
+from ..headings import line_heading as _line_heading
 from ..widgets import BracketButton
 from . import patterns
-
-
-def _line_heading(label: str, total: int = 60) -> str:
-    styled = theming.styled_case(label)
-    line = "─" * max(4, total - len(styled) - 6)
-    return f"── {styled} {line}"
 
 
 def _country_from_env() -> str:

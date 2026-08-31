@@ -8,6 +8,7 @@ import sys
 # mpv requires LC_NUMERIC=C; set it before anything else can touch locale.
 locale.setlocale(locale.LC_NUMERIC, "C")
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
 
 from . import audio_fx, auth, auth_spotify, cache, config, qthreads, session as session_module, settings as settings_module, theming, ui_sounds as ui_sounds_module
@@ -104,11 +105,119 @@ def run_onboarding_if_needed(user_settings):
         user_settings.report_plays = bool(r.report_plays)
         user_settings.report_plays_answered = True
     user_settings.first_launch_complete = True
+    # v2.0: the aesthetic step's pick IS the personality pick. File the
+    # wizard's field state under the chosen preset and re-apply it all
+    # BEFORE MainWindow exists. The 1.x flow applied theme+layout before
+    # the wizard only, so a modern pick rendered on the brutalist default
+    # slot variants forever — the window-side slot sync only fires on
+    # aesthetic flips it can observe, and the wizard's flip happened while
+    # no window was listening.
+    from . import presets
+    preset_id = r.aesthetic if r.aesthetic in presets.BUILTINS else "modern"
+    # Seed the layout slot prefs from the picked theme — the same reset a
+    # live aesthetic flip performs (window._maybe_apply_theme_slot_prefs),
+    # done by hand here for the flip nobody observed.
+    try:
+        for t in theming.manager().list_themes():
+            if t.slug == r.theme_slug and t.slots:
+                user_settings.layout_overrides = dict(t.slots)
+                break
+    except Exception:
+        pass
+    # Scale before theme (ordering contract): the wizard's scale pick must
+    # be live before apply_preset re-applies the theme, or the whole first
+    # session renders at the pre-wizard scale.
+    from .ui import scale as scale_module
+    scale_module.set_factor(user_settings.ui_scale)
+    # Drop the pre-wizard adoption scaffolding: it was bookkeeping, not a
+    # visit, and the wizard only runs when no settings file exists — a
+    # later flip to the other personality should start from its builtin
+    # defaults, not a phantom snapshot of pre-wizard state.
+    if user_settings.preset and user_settings.preset != preset_id:
+        user_settings.preset_state.pop(user_settings.preset, None)
+    user_settings.preset = preset_id
+    presets.stash(user_settings)   # the wizard's picks ARE this preset's stash
+    user_settings.preset_chosen = True
     try:
         settings_module.save(user_settings)
     except Exception:
         pass
+    presets.apply_preset(user_settings, preset_id, window=None)
     return True
+
+
+def _bootstrap_preset(user_settings, cli_theme: str | None = None) -> None:
+    """Startup preset bootstrap — pre-window, pre-wizard.
+
+    A pre-2.0 config (``preset == ""``) gets silently filed under the
+    personality its theme belongs to; the stash snapshots every field
+    verbatim, so an upgrader's first 2.0 frame is identical to their last
+    1.x one. Then the active preset is pushed through the managers in
+    contract order (theme bundle, layout, motion, corner override).
+
+    Adoption persists only for real upgraders: on a true first launch the
+    wizard saves its own explicit pick minutes later, and a cancelled
+    wizard should keep leaving no settings file behind (as it always has).
+
+    ``cli_theme`` (--theme) applies on top as a run-only override — it
+    never lands in settings or the stash.
+    """
+    from . import presets
+    theming.manager().refresh()
+    from . import layout as layout_module
+    layout_module.manager().refresh()
+    # An unrecognized preset with nothing to restore from (hand-edited
+    # file, a downgrade past a future version's third preset) must not
+    # crash the launch — treat it as pre-2.0 and re-adopt from the live
+    # fields. An unknown id WITH a stash keeps working as-is.
+    if (user_settings.preset
+            and user_settings.preset not in presets.BUILTINS
+            and user_settings.preset not in user_settings.preset_state):
+        user_settings.preset = ""
+    adopted = not user_settings.preset
+    if adopted:
+        presets.adopt_current(user_settings)
+        if user_settings.first_launch_complete:
+            # Migration invariant, size half: 1.x resized to 1100x720 at
+            # every launch no matter the layout (window_default only ever
+            # applied on live layout switches), so seed that exact size
+            # as the active layout's remembered one. Without it a
+            # focused/dj-deck upgrader's first 2.0 frame would come up at
+            # the layout's declared default instead of the size they
+            # launched at yesterday.
+            user_settings.window_sizes.setdefault(
+                user_settings.layout or "classic", [1100, 720])
+    presets.apply_preset(user_settings, user_settings.preset, window=None,
+                         persist=False)
+    if adopted and user_settings.first_launch_complete:
+        try:
+            settings_module.save_fields(user_settings, "preset",
+                                        "preset_state", "window_sizes")
+        except Exception:
+            pass
+    if cli_theme:
+        theming.manager().apply(cli_theme)
+    # Keep the old `or DEFAULT_THEME` guarantee: an empty (or vanished)
+    # theme slug falls back instead of leaving the app unstyled.
+    if theming.manager().current() is None:
+        theming.manager().apply(DEFAULT_THEME)
+
+
+def _instance_message_handler(raise_target: list):
+    """Command router for pokes from a second tide launch (instance.py).
+
+    ``raise_target`` is a one-slot list run() fills with the MainWindow
+    once it exists; commands arriving before that are dropped. Delivery
+    happens mid-signal-emission (the guard's socket readyRead), so the
+    actual show/raise defers via singleShot(0) — presenting a window from
+    inside a handler is the modal-from-click crash family.
+    """
+    def _on_command(command: str) -> None:
+        window = raise_target[0]
+        if command != "raise" or window is None:
+            return
+        QTimer.singleShot(0, window.present_active)
+    return _on_command
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -146,7 +255,25 @@ def run(argv: list[str] | None = None) -> int:
     app.setOrganizationName("tide")
     app.setDesktopFileName("tide")
 
+    # One tide per config dir: a second launch pokes the live instance and
+    # bows out instead of double-running (two mpris services, two trays,
+    # two audio-capture consumers named "tide"). Claimed right after the
+    # QApplication exists — command delivery rides the event loop.
+    from . import instance as instance_module
+    raise_target: list = [None]   # filled with the MainWindow once built
+    guard = instance_module.acquire(_instance_message_handler(raise_target))
+    if guard is None:
+        delivered = instance_module.notify_running("raise")
+        print("tide is already running"
+              + (" — asked it to come forward" if delivered else ""))
+        sys.exit(0)
+
     user_settings = settings_module.load()
+    # 2.0 downgrade shield: archive the last 1.x settings file (once)
+    # before any 2.0 save stamps the preset fields into it — a later 1.x
+    # run would silently drop them on its next save. Must precede the
+    # first save_fields() below (the adoption persist).
+    settings_module.ensure_v1_backup()
 
     # Initialize the motion system once, before any UI is built. Reduced-
     # motion detection needs QGuiApplication.instance() (created above) to
@@ -167,28 +294,17 @@ def run(argv: list[str] | None = None) -> int:
     set_thumbnail_override(user_settings.show_thumbnails or "theme")
 
     # Register tide's bundled fonts so they're available regardless of
-    # what's installed system-wide, and push the user's font override (if
-    # any) into the theming manager BEFORE the first apply so the very
-    # first frame uses the right family.
+    # what's installed system-wide. The user's font/size/case overrides
+    # ride the preset bootstrap below — apply_bundle pushes all of them
+    # before its one theme apply, so the very first frame already uses
+    # the right family.
     theming.register_bundled_fonts()
-    theming.manager().set_user_font(user_settings.font_family_override or "")
-    theming.manager().set_user_font_size(user_settings.font_size_override_pt or 0)
-    # Text-case override rides the same "before first apply" train so the
-    # first frame is already cased the way the user asked.
-    theming.set_case_override(user_settings.text_case_override or "")
 
-    # Apply the theme as early as possible so the wizard renders with it.
-    theming.manager().refresh()
-    theming.manager().apply(args.theme or user_settings.theme or DEFAULT_THEME)
-
-    # Layout — pick + overrides. Applied before window construction so the
-    # initial UI uses the right variants.
-    from . import layout as layout_module
-    layout_module.manager().refresh()
-    layout_module.manager().apply(
-        user_settings.layout or "classic",
-        user_settings.layout_overrides or {},
-    )
+    # v2.0: theme + layout + motion + corners travel together as a
+    # personality preset. Applied as early as possible so the wizard
+    # renders themed, and before window construction so the initial UI
+    # uses the right variants.
+    _bootstrap_preset(user_settings, cli_theme=args.theme)
 
     # First-launch wizard. Runs once; subsequent launches skip past.
     if not run_onboarding_if_needed(user_settings):
@@ -317,6 +433,10 @@ def run(argv: list[str] | None = None) -> int:
     # v1.2.2+ will append MusicKitBackend here.
     player = router
     window = MainWindow(api_obj, player)
+    # Route second-launch "raise" pokes at the real window from here on,
+    # and keep the instance guard alive (and findable) for the app's life.
+    raise_target[0] = window
+    window._instance_guard = guard
 
     # Restore last session (queue + paused at last position) before showing.
     saved_session = session_module.load()
@@ -410,8 +530,8 @@ def run(argv: list[str] | None = None) -> int:
     window.central_bg.set_motion(user_settings.motion or "lite")
     radius_px = _corner_radius(user_settings.corner_style)
     window.central_bg.set_radius(radius_px)
-    if radius_px > 0:
-        theming.manager().set_user_override("radius", f"{radius_px}px")
+    # (The sticky @radius theming override is owned by the preset
+    # bootstrap above — apply_preset sets or clears it pre-window.)
 
     # Ambient bass-pulse — drives the central gradient's swell from the audio
     # monitor while playing. App-wide, gated by the adaptive_pulse setting.
@@ -424,6 +544,13 @@ def run(argv: list[str] | None = None) -> int:
 
     # Nav-rail icons (per the user's nav_icon_set preference).
     window.apply_nav_icons(user_settings.nav_icon_set or "off")
+
+    # v2.0: one window-side push of every preset-owned visual (backdrops,
+    # pulses, nav icons, thumbnails, ui sounds). hasattr-guarded while the
+    # method lands in window.py; the wiring above stays regardless — it
+    # CONSTRUCTS the adaptive/ambient drivers the method only re-pushes.
+    if hasattr(window, "apply_preset_visuals"):
+        window.apply_preset_visuals()
 
     # Cookie-death probe. Imported YT Music cookies expire silently: every
     # API call starts 401ing and the views above just render empty, so the
@@ -568,6 +695,13 @@ def run(argv: list[str] | None = None) -> int:
         pass
 
     rc = app.exec()
+    # Release the single-instance name first: a relaunch racing this
+    # teardown should get a clean listen, not a probe against a dying
+    # server.
+    try:
+        guard.close()
+    except Exception:
+        pass
     # Best-effort teardown so threads + native handles close cleanly.
     try:
         window.visualizer_view.teardown()

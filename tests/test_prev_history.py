@@ -95,6 +95,11 @@ class PrevHistoryTest(unittest.TestCase):
         before mpv delivers its next position tick."""
         seeks: list[float] = []
         self.w.player.seek = lambda s: seeks.append(s)
+        # Swap the CLASS property (instances can't shadow a descriptor) and
+        # put the original back after — a bare `del` here removed
+        # PlaybackRouter.duration for the rest of the process and broke the
+        # first later test to read it (window-size memory's slot swap).
+        orig_duration = type(self.w.player).duration
         type(self.w.player).duration = property(lambda _s: 200.0)
         try:
             self.w._play_now(_track(1))
@@ -110,7 +115,7 @@ class PrevHistoryTest(unittest.TestCase):
             self.assertEqual(seeks, [0], "second press must not restart again")
             self.assertEqual(self.played, ["v0"])
         finally:
-            del type(self.w.player).duration
+            type(self.w.player).duration = orig_duration
 
 
 if __name__ == "__main__":

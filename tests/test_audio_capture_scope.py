@@ -68,6 +68,29 @@ class SinkInputMatcherTest(unittest.TestCase):
         ]
         self.assertEqual(_pick_own_sink_input(entries, {"555"}), 8)
 
+    def test_playing_mpv_beats_corked_registered_child(self):
+        # The other direction of the two-own-streams state: librespot's
+        # registered-pid stream idles corked while the pidless in-process
+        # mpv actually plays. Pid-proof must NOT outrank corked here —
+        # both streams are ours, and picking the corked one latches the
+        # bass pulse / visualizer onto silence while music plays.
+        entries = [
+            _entry(4, corked=True, **{"application.name": "librespot",
+                                      "application.process.id": "555"}),
+            _entry(9, corked=False, **{"application.name": "tide"}),
+        ]
+        self.assertEqual(_pick_own_sink_input(entries, {"555"}), 9)
+
+    def test_both_own_streams_corked_prefers_pid_proof(self):
+        # Nothing playing at all: fall back to the strongest ownership
+        # proof (the registered pid) rather than the name-only match.
+        entries = [
+            _entry(4, corked=True, **{"application.name": "librespot",
+                                      "application.process.id": "555"}),
+            _entry(9, corked=True, **{"application.name": "tide"}),
+        ]
+        self.assertEqual(_pick_own_sink_input(entries, {"555"}), 4)
+
     def test_corked_only_stream_still_claimed(self):
         # Paused-but-open is still tide's stream — capture stays scoped
         # and simply reads silence until playback resumes.
@@ -82,6 +105,51 @@ class SinkInputMatcherTest(unittest.TestCase):
             {"index": 2, "properties": {"application.id": "tide"}},
         ]
         self.assertEqual(_pick_own_sink_input(entries, set()), 2)
+
+
+class PidPreferenceTest(unittest.TestCase):
+    """Two processes named "tide" must not latch onto each other's audio:
+    a stream whose pid we actually own outranks any name-only match."""
+
+    def test_own_corked_beats_foreign_uncorked_tide(self):
+        # A second tide instance is playing (uncorked, its pid) while ours
+        # idles corked — the name match must NOT steal its stream.
+        entries = [
+            _entry(3, corked=False, **{"application.name": "tide",
+                                       "application.process.id": "9999"}),
+            _entry(6, corked=True, **{"application.name": "tide",
+                                      "application.process.id": "123"}),
+        ]
+        self.assertEqual(_pick_own_sink_input(entries, {"123"}), 6)
+
+    def test_own_pid_beats_foreign_tide_when_both_playing(self):
+        entries = [
+            _entry(3, corked=False, **{"application.name": "tide",
+                                       "application.process.id": "9999"}),
+            _entry(6, corked=False, **{"application.process.id": "123"}),
+        ]
+        self.assertEqual(_pick_own_sink_input(entries, {"123"}), 6)
+
+    def test_pidless_tide_beats_foreign_pid_tide(self):
+        # No pid on the entry is our in-process mpv (its pipewire AO
+        # announces none); a "tide" carrying somebody ELSE's pid is
+        # almost certainly the other instance.
+        entries = [
+            _entry(4, corked=False, **{"application.name": "tide",
+                                       "application.process.id": "9999"}),
+            _entry(5, corked=True, **{"application.name": "tide"}),
+        ]
+        self.assertEqual(_pick_own_sink_input(entries, {"123"}), 5)
+
+    def test_foreign_pid_tide_is_still_a_last_resort(self):
+        # Preference, not exclusion: if the ONLY candidate is a
+        # tide-named stream with an unowned pid, claiming it still beats
+        # falling back to the whole desktop's monitor.
+        entries = [
+            _entry(7, corked=False, **{"application.name": "tide",
+                                       "application.process.id": "9999"}),
+        ]
+        self.assertEqual(_pick_own_sink_input(entries, {"123"}), 7)
 
 
 class StreamPidRegistryTest(unittest.TestCase):

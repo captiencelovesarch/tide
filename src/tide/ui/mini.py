@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 # PySide6 doesn't export it (PYSIDE-1135), so mirror the C++ value.
 QWIDGETSIZE_MAX = (1 << 24) - 1
 
-from .. import audio_capture, settings as settings_module, theming
+from .. import audio_capture, backdrops, glyphs, settings as settings_module, theming
 from ..lyric_tracker import LyricTracker
 from ..player import PlayState
 from . import art_cache, motion as motion_module, scale as _scale
@@ -50,21 +50,15 @@ from .visualizer import _Canvas
 from .widgets import AlbumArt, BracketButton, _color
 
 
-_BACKDROP_CHOICES = [
-    ("follow main", "follow"),
-    ("living fields", "field"),
-    ("diagonal band", "band"),
-    ("bass arch", "vbeam"),
-    ("sunset horizon", "horizon"),
-    ("lightning", "lightning"),
-    ("deep water", "depths"),
-    ("rim light", "rimlight"),
-    ("liquid cover", "liquid"),
-    ("aurora", "aurora"),
-    ("smoke", "smoke"),
-    ("caustics", "caustics"),
-    ("off · flat", "off"),
-]
+# (label, slug) rows for the mini/fullscreen context menus, built from the
+# backdrop registry. The menus keep only the name half of the registry's
+# "name · description" labels — a QMenu column that wide reads terrible —
+# and wrap the styles in the menu-short sentinel labels.
+_BACKDROP_CHOICES = (
+    [("follow main", backdrops.FOLLOW)]
+    + [(label.split(" · ")[0], slug) for slug, label in backdrops.choices()]
+    + [("off · flat", backdrops.OFF)]
+)
 _PROGRESS_CHOICES = [
     ("border ring", "ring"),
     ("thin bar", "thin"),
@@ -302,12 +296,13 @@ class MiniPlayer(QWidget):
         transport.setSpacing(_scale.px(6))
         # Glyph-only shuffle/repeat (like ♡): text labels here out-measure
         # the art and widen the whole window in bracket-style themes.
-        self.shuffle_btn = BracketButton("⇋", "⇋")
-        self.prev_btn = BracketButton("prev", "◂◂")
-        self.play_btn = BracketButton("play", "▶")
-        self.next_btn = BracketButton("next", "▸▸")
-        self.repeat_btn = BracketButton("↻", "↻")
-        self.like_btn = BracketButton("♡", "♡")
+        _g = glyphs.glyph
+        self.shuffle_btn = BracketButton(_g("shuffle"), _g("shuffle"))
+        self.prev_btn = BracketButton("prev", _g("prev"))
+        self.play_btn = BracketButton("play", _g("play"))
+        self.next_btn = BracketButton("next", _g("next"))
+        self.repeat_btn = BracketButton(_g("repeat"), _g("repeat"))
+        self.like_btn = BracketButton(_g("like_off"), _g("like_off"))
         self.shuffle_btn.setToolTip("shuffle")
         self.repeat_btn.setToolTip("repeat: off / all / one")
         for btn in (self.shuffle_btn, self.prev_btn, self.play_btn,
@@ -334,7 +329,7 @@ class MiniPlayer(QWidget):
         self.pin_btn = BracketButton("📌", "📌")
         self.pin_btn.setFocusPolicy(Qt.NoFocus)
         self.pin_btn.setToolTip("keep on top of other windows")
-        self.exit_btn = BracketButton("expand", "⤢")
+        self.exit_btn = BracketButton("expand", glyphs.glyph("fullscreen"))
         self.exit_btn.setFocusPolicy(Qt.NoFocus)
         bottom.addWidget(self.lyrics_btn)
         bottom.addStretch(1)
@@ -685,14 +680,14 @@ class MiniPlayer(QWidget):
     def _on_state(self, state) -> None:
         if state == PlayState.PLAYING:
             self.play_btn.setLabel("pause")
-            # ▮▮ not ⏸ — same-font baseline alignment; see window.py.
-            self.play_btn.setGlyph("▮▮")
+            # ▮▮ not ⏸ — same-font baseline alignment; see glyphs.py.
+            self.play_btn.setGlyph(glyphs.glyph("pause"))
         elif state == PlayState.LOADING:
-            self.play_btn.setLabel("…")
-            self.play_btn.setGlyph("…")
+            self.play_btn.setLabel(glyphs.glyph("loading"))
+            self.play_btn.setGlyph(glyphs.glyph("loading"))
         else:
             self.play_btn.setLabel("play")
-            self.play_btn.setGlyph("▶")
+            self.play_btn.setGlyph(glyphs.glyph("play"))
         self._reconcile_vis()
 
     def _on_position(self, secs: float) -> None:
@@ -792,7 +787,7 @@ class MiniPlayer(QWidget):
     # ---------- like / nav state pushed by MainWindow ----------
 
     def set_liked(self, liked: bool) -> None:
-        glyph = "♥" if liked else "♡"
+        glyph = glyphs.glyph("like_on" if liked else "like_off")
         self.like_btn.setLabel(glyph)
         self.like_btn.setGlyph(glyph)
 
@@ -808,7 +803,8 @@ class MiniPlayer(QWidget):
         mode = RepeatMode.parse(repeat_mode)
         self.shuffle_btn.setActiveState(bool(shuffle_on))
         self.repeat_btn.setActiveState(mode is not RepeatMode.OFF)
-        glyph = "↻¹" if mode is RepeatMode.ONE else "↻"
+        glyph = glyphs.glyph(
+            "repeat_one" if mode is RepeatMode.ONE else "repeat")
         self.repeat_btn.setLabel(glyph)
         self.repeat_btn.setGlyph(glyph)
 

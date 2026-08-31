@@ -7,6 +7,7 @@ the user to hand-edit this file.
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import tomllib
 from dataclasses import asdict, dataclass, field, fields
@@ -161,9 +162,9 @@ class Settings:
     subsonic_auth_style: str = "salt"
     # v1.2.2 — Audio FX rack (10-band EQ + reverb + loudness norm + more).
     # ``audio_fx_state`` is the AudioFxState dataclass round-tripped as
-    # JSON. Stored as a string field because the existing TOML serializer
-    # only handles one level of nesting and the FX state has list-of-dict
-    # slots inside it.
+    # JSON. Stored as a string field because at the time the TOML
+    # serializer only handled one level of nesting (it learned sub-tables
+    # in 2.0); it stays a JSON string so 1.x files keep round-tripping.
     audio_fx_state: str = ""
     # v1.2.3 — UI sounds (nav clicks, modal pops, toggle chirps). Auto-
     # muted while music is playing. Default off so a fresh install is
@@ -197,6 +198,50 @@ class Settings:
     # Fullscreen backdrop swells with the bass envelope (shares the mini's
     # capture consumer; only runs while the window is up).
     fullscreen_pulse: bool = True
+    # v2.0 "two tides" — personality presets. ``preset`` is the active
+    # personality id: "" (pre-2.0 config that was never adopted),
+    # "brutalist", or "modern". ``preset_chosen`` flips True only on an
+    # EXPLICIT pick in the chooser/onboarding — silently adopting an
+    # upgrader's existing look keeps it False so the chooser can still
+    # offer itself later.
+    preset: str = ""
+    preset_chosen: bool = False
+    # Per-personality stash of the look/feel fields (presets.STASH_FIELDS):
+    # preset id -> {settings field -> stashed value}. Switching
+    # personalities round-trips through here so each side keeps its own
+    # tweaks instead of resetting to the builtin defaults every time.
+    preset_state: dict = field(default_factory=dict)
+    # Remembered main-window size per layout: layout slug -> [w, h].
+    window_sizes: dict = field(default_factory=dict)
+
+
+_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _toml_key(k: str) -> str:
+    k = str(k)
+    if _BARE_KEY.match(k):
+        return k
+    return '"' + k.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _toml_value(v) -> str:
+    """One value → toml source. Handles the shapes settings actually hold:
+    scalars, lists of scalars, and dicts of scalars (rendered inline)."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_toml_value(x) for x in v) + "]"
+    if isinstance(v, dict):
+        if not v:
+            return "{}"
+        inner = ", ".join(f"{_toml_key(k)} = {_toml_value(x)}" for k, x in v.items())
+        return "{ " + inner + " }"
+    # naive string quoting — values are alphanumeric/punctuation only here
+    sv = str(v).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{sv}"'
 
 
 def _to_toml(s: Settings) -> str:
@@ -204,25 +249,26 @@ def _to_toml(s: Settings) -> str:
     tables: list[str] = []
     for f in fields(s):
         val = getattr(s, f.name)
-        if isinstance(val, bool):
-            out.append(f"{f.name} = {'true' if val else 'false'}")
-        elif isinstance(val, (int, float)):
-            out.append(f"{f.name} = {val}")
-        elif isinstance(val, dict):
-            # Serialize as a [table] at the bottom.
+        if isinstance(val, dict):
+            # Serialize as a [table] at the bottom. Scalar/list entries sit
+            # right under the header; dict values (preset_state's per-preset
+            # stashes) become [field.sub] sub-tables. Sub-tables must trail
+            # the scalars — toml assigns everything after a sub-header to
+            # that sub-table.
             tables.append(f"\n[{f.name}]")
+            subs: list[str] = []
             for k, v in val.items():
-                if isinstance(v, bool):
-                    tables.append(f"{k} = {'true' if v else 'false'}")
-                elif isinstance(v, (int, float)):
-                    tables.append(f"{k} = {v}")
+                if isinstance(v, dict):
+                    subs.append(f"\n[{f.name}.{_toml_key(k)}]")
+                    subs.extend(
+                        f"{_toml_key(sk)} = {_toml_value(sv)}"
+                        for sk, sv in v.items()
+                    )
                 else:
-                    sv = str(v).replace("\\", "\\\\").replace('"', '\\"')
-                    tables.append(f'{k} = "{sv}"')
+                    tables.append(f"{_toml_key(k)} = {_toml_value(v)}")
+            tables.extend(subs)
         else:
-            # naive string quoting — values are alphanumeric/punctuation only here
-            escaped = str(val).replace("\\", "\\\\").replace('"', '\\"')
-            out.append(f'{f.name} = "{escaped}"')
+            out.append(f"{f.name} = {_toml_value(val)}")
     return "\n".join(out) + "\n" + "\n".join(tables) + ("\n" if tables else "")
 
 
@@ -316,5 +362,56 @@ def save(s: Settings) -> None:
     # successful load() rewrites it from the good main file.
     try:
         _atomic_write(_backup_path(path), payload, fsync=False)
+    except Exception:
+        pass
+
+
+def save_fields(s: Settings, *names: str) -> None:
+    """Load-modify-save: re-parse the file on disk and copy ONLY the named
+    fields from ``s`` onto that fresh copy before writing it back.
+
+    Concurrent savers (main window, mini, the preset switcher) each hold
+    their own stale ``Settings`` object — a whole-object ``save()`` from
+    one silently reverts whatever another wrote in between. Merging at the
+    field level fixes that last-writer-wins clobber. Falls back to a full
+    ``save(s)`` when there's nothing parseable on disk to merge into.
+    """
+    known = {f.name for f in fields(Settings)}
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise ValueError(f"unknown settings field(s): {', '.join(unknown)}")
+    raw = _try_parse(config.SETTINGS_FILE)
+    if raw is None:
+        # Same fallback chain as load(): the .bak is the last known good.
+        raw = _try_parse(_backup_path(config.SETTINGS_FILE))
+    if raw is None:
+        save(s)
+        return
+    filtered = {k: v for k, v in raw.items() if k in known}
+    # Match load()'s upgrade stamp so a merge over a pre-wizard file can't
+    # write first_launch_complete = false and re-onboard the user.
+    filtered.setdefault("first_launch_complete", True)
+    disk = Settings(**filtered)
+    for name in names:
+        setattr(disk, name, getattr(s, name))
+    save(disk)
+
+
+def ensure_v1_backup() -> None:
+    """One-shot downgrade shield for 2.0: archive the last 1.x settings
+    file as settings.toml.v1.bak before the preset fields ever land in it.
+    A 1.x tide run after a 2.0 one drops every unknown key on its next
+    save(), so without this a downgrade would silently shed the whole
+    preset state. Best-effort — never raises."""
+    try:
+        path = config.SETTINGS_FILE
+        v1 = path.with_name(path.name + ".v1.bak")
+        if v1.exists():
+            return
+        raw = _try_parse(path)
+        if raw is None or "preset" in raw:
+            # Missing/corrupt, or already written by a 2.0 build.
+            return
+        _atomic_write(v1, path.read_text(encoding="utf-8"), fsync=False)
     except Exception:
         pass

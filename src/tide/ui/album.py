@@ -27,17 +27,12 @@ from PySide6.QtWidgets import (
 
 from .. import api, qthreads, theming
 from . import art_cache
+from .headings import line_heading as _line_heading
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
 
 
 COVER_SIZE = 200
-
-
-def _line_heading(label: str, total: int = 60) -> str:
-    styled = theming.styled_case(label)
-    line = "─" * max(4, total - len(styled) - 6)
-    return f"── {styled} {line}"
 
 
 class _AlbumWorker(QObject):

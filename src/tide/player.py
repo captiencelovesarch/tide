@@ -12,6 +12,8 @@ from enum import Enum
 import mpv
 from PySide6.QtCore import QObject, Signal, Slot
 
+from . import speed_law
+
 
 # Schemes we hand to libmpv. Legit inputs are remote CDN streams (http/https)
 # and local files (a bare filesystem path, or file://). Everything else —
@@ -184,9 +186,9 @@ class Player(QObject):
     def set_speed(self, value: float) -> None:
         """Change playback speed. With pitch-correction disabled (the
         default for tide's slowed/sped aesthetic), this also shifts pitch.
-        Clamped to 0.25–4.0 — mpv accepts wider but anything outside this
-        is unintelligible."""
-        rate = max(0.25, min(4.0, float(value)))
+        Clamped to speed_law's engine range (0.25–4.0) — mpv accepts wider
+        but anything outside this is unintelligible."""
+        rate = speed_law.engine_clamp(value)
         try:
             self._mpv["speed"] = rate
         except Exception:
