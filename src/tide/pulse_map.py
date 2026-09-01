@@ -14,6 +14,7 @@ import zlib
 from PySide6.QtCore import QObject, Signal
 
 from . import cache
+from .audio_capture import PULSE_SUSTAIN_FLOOR
 
 
 NAMESPACE = "pulse-maps-v2"
@@ -31,6 +32,12 @@ ONSET_LEAVE = 0.08
 HIT_DEBOUNCE = 0.050
 HIT_HOLD = 0.025
 MATCH_WINDOW = 0.060
+# recorded-silence vs live-bass disagreement. a release tail passes through
+# low values on its way down, so silence only counts when the map was also
+# quiet a stretch earlier; 0.6 covers the tail's descent at 1x record speed
+# and the look-back disqualifies itself for slower tails at higher speeds.
+SILENCE_LEVEL = 0.05
+SILENCE_LOOKBACK = 0.6
 
 
 def track_key(track) -> str | None:
@@ -127,7 +134,10 @@ class PulseMap:
         end = bisect_right(self._hit_times, position)
         start = max(end - 32, bisect_left(
             self._hit_times, max(self.coverage[span][0], position - 1.2 * speed)))
-        level = 0.0
+        # the live detector breathes up to the sustain ceiling on onset-free
+        # bass; without this floor a replayed drone passage goes dark.
+        reference = self.reference_at(position)
+        level = min(reference, PULSE_SUSTAIN_FLOOR) if reference is not None else 0.0
         for index in range(start, end):
             hit = self.hits[index]
             age = (position - hit.media_time) / speed
@@ -142,9 +152,13 @@ class PulseMap:
     def payload(self) -> dict:
         raw = json.dumps([[e.media_time, round(e.strength, 5), e.kind]
                           for e in self.events], separators=(",", ":")).encode()
+        # times keep full precision — merge boundaries are nextafter-spaced
+        # and rounding would collapse them into an invalid payload.
         hits = None if self.hits is None else [
-            [h.media_time, h.strength, h.kind, h.confidence, h.energy,
-             h.period, h.rhythm_confidence] for h in self.hits]
+            [h.media_time, round(h.strength, 5), h.kind, round(h.confidence, 5),
+             None if h.energy is None else round(h.energy, 6),
+             None if h.period is None else round(h.period, 6),
+             round(h.rhythm_confidence, 5)] for h in self.hits]
         return {"version": 2, "coverage": self.coverage, "hits": hits,
                 "trace": base64.b64encode(zlib.compress(raw)).decode("ascii")}
 
@@ -276,8 +290,34 @@ def merge_maps(old: PulseMap | None, new: PulseMap) -> PulseMap:
             joined.append((a, b))
     hits = None
     if new.hits is not None:
-        retained = [h for h in old.hits if new.reference_at(h.media_time) is None]
-        hits = tuple(sorted(retained + list(new.hits), key=lambda h: h.media_time))
+        retained = []
+        ratios = []
+        new_times = [h.media_time for h in new.hits]
+        for h in old.hits:
+            if new.reference_at(h.media_time) is None:
+                retained.append(h)
+                continue
+            # hit energy is raw capture rms, which scales with the app volume
+            # at record time. beats both listens heard give the gain change
+            # directly — dynamics cancel in the per-beat ratio.
+            if not h.energy:
+                continue
+            index = bisect_left(new_times, h.media_time)
+            near = [j for j in (index - 1, index) if 0 <= j < len(new_times)
+                    and abs(new_times[j] - h.media_time) <= MATCH_WINDOW]
+            if near:
+                j = min(near, key=lambda j: abs(new_times[j] - h.media_time))
+                if new.hits[j].energy:
+                    ratios.append(h.energy / new.hits[j].energy)
+        incoming = list(new.hits)
+        if len(ratios) >= 5:
+            # median over a handful of pairs so one clipped or missed beat
+            # can't set the scale. no overlap → no evidence → energies stay
+            # raw, same as a first listen.
+            scale = statistics.median(ratios)
+            incoming = [h if h.energy is None else replace(h, energy=h.energy * scale)
+                        for h in incoming]
+        hits = tuple(sorted(retained + incoming, key=lambda h: h.media_time))
         if len(hits) > MAX_HITS:
             return old
         hits = _rhythm_hints(hits, joined)
@@ -289,6 +329,9 @@ class PulseRecorder:
         self._segments: list[list[PulseSample]] = []
         self._segment: list[PulseSample] | None = None
         self._count = 0
+        # checkpoint watermark: first segment / first sample not yet drained
+        self._pending_segment = 0
+        self._pending_offset = 0
 
     def gap(self) -> None:
         self._segment = None
@@ -316,6 +359,91 @@ class PulseRecorder:
 
     def snapshot(self) -> PulseMap | None:
         return map_from_segments(self.segments())
+
+    def _quiet_cut(self, segment, start: int) -> int | None:
+        # only cut where the hit extractor's state machine is idle and the
+        # last attack has cleared the debounce, so no hit can be derived
+        # half from one checkpoint and half from the next.
+        cut = None
+        last_loud = None
+        for index in range(start, len(segment)):
+            sample = segment[index]
+            if (sample.onset or 0.0) > ONSET_LEAVE:
+                last_loud = sample.media_time
+            elif (last_loud is None
+                  or (sample.media_time - last_loud) / sample.speed >= HIT_DEBOUNCE):
+                cut = index
+        return cut
+
+    def drain_pending(self, *, final: bool = False):
+        """Samples recorded since the last drain; advances the watermark.
+        The previous cut sample leads each partial slice so checkpoint
+        coverage spans share an endpoint and merge back into one. A live
+        attack at the tail stays pending (unless ``final``) so its hit is
+        derived from one contiguous stretch."""
+        result = []
+        index = self._pending_segment
+        while index < len(self._segments):
+            segment = self._segments[index]
+            start = self._pending_offset if index == self._pending_segment else 0
+            live = segment is self._segment and not final
+            if live:
+                cut = self._quiet_cut(segment, start)
+                end = 0 if cut is None else cut + 1
+            else:
+                end = len(segment)
+            if end > start:
+                piece = tuple(segment[max(0, start - 1):end])
+                if len(piece) >= 2:
+                    result.append(piece)
+            if live:
+                self._pending_segment = index
+                self._pending_offset = max(start, end)
+                return tuple(result)
+            index += 1
+        self._pending_segment = len(self._segments)
+        self._pending_offset = 0
+        return tuple(result)
+
+    def has_pending(self) -> bool:
+        if self._pending_segment >= len(self._segments):
+            return False
+        if self._pending_segment < len(self._segments) - 1:
+            return True
+        return self._pending_offset < len(self._segments[self._pending_segment])
+
+    def discard_tail(self, wall_seconds: float) -> None:
+        """Drop the last ``wall_seconds`` of recording — capture that may
+        already belong to the next track when a backend reports an external
+        advance late. Gap durations are unknown and count as zero, so the
+        trim errs long. Already-drained samples stay (a 30s checkpoint can
+        race the advance; replay's disagree fallback covers that sliver)."""
+        if not math.isfinite(wall_seconds) or wall_seconds <= 0:
+            return
+        remaining = float(wall_seconds)
+        removed = False
+        index = len(self._segments) - 1
+        while remaining > 0 and index >= self._pending_segment:
+            segment = self._segments[index]
+            floor = self._pending_offset if index == self._pending_segment else 0
+            if len(segment) > floor:
+                speed = segment[-1].speed
+                newest = segment[-1].media_time
+                span = (newest - segment[floor].media_time) / speed
+                threshold = newest - remaining * speed
+                kept = len(segment)
+                while kept > floor and segment[kept - 1].media_time > threshold:
+                    kept -= 1
+                if kept < len(segment):
+                    self._count -= len(segment) - kept
+                    del segment[kept:]
+                    removed = True
+                if kept > floor:
+                    break
+                remaining -= span
+            index -= 1
+        if removed:
+            self.gap()
 
 
 def _extract_hits(segment) -> tuple[PulseHit, ...]:
@@ -416,6 +544,22 @@ class PulseScheduler:
             # erase a persistent extra attack between every pair of beats.
             self._conflicts = max(0.0, self._conflicts - elapsed / 4.0)
             self._observe_hits(position, max(0.0, min(1.0, onset)), speed)
+            # attack matching cannot see a map that stayed dark where the
+            # speakers hold sustained bass — no attacks, no conflicts. level
+            # comparison is unsafe across replay speeds (the recorded release
+            # runs in record-time wall seconds), but recorded *silence* is
+            # speed-proof once the look-back rejects a tail still descending.
+            dark = (expected <= SILENCE_LEVEL
+                    and level >= PULSE_SUSTAIN_FLOOR / 2)
+            if dark:
+                earlier = self.pulse_map.reference_at(position - SILENCE_LOOKBACK)
+                dark = earlier is not None and earlier <= SILENCE_LEVEL
+            if dark:
+                self._bad_time += elapsed
+            else:
+                self._bad_time = max(0.0, self._bad_time - elapsed * 0.5)
+            if self._bad_time >= 0.30:
+                self.disagreed = True
             return
         if abs(expected - level) > 0.25:
             self._bad_time += elapsed
@@ -527,18 +671,24 @@ class PulseMapStore(QObject):
         self._closed = True
         if self._thread is not None:
             self._jobs.put(None)
-            self._thread.join(timeout=1.0)
+            # the drain owns the last listen's save; a bounded join here
+            # silently dropped it whenever the final write ran long.
+            self._thread.join()
 
     def _run(self) -> None:
+        # pre-2.0 builds parked maps in the shared data store, which kept the
+        # whole namespace resident; drop that file once.
+        cache.clear_namespace(NAMESPACE)
         while (job := self._jobs.get()) is not None:
             operation, generation, key, pulse_map = job
             try:
-                old = PulseMap.from_payload(cache.get_json(NAMESPACE, key))
+                old = PulseMap.from_payload(cache.get_blob_json(NAMESPACE, key))
                 if operation == "recording":
                     pulse_map = map_from_segments(pulse_map)
                 if operation in ("save", "recording") and pulse_map is not None:
                     merged = merge_maps(old, pulse_map)
-                    cache.put_json(NAMESPACE, key, merged.payload(), TTL_SECONDS)
+                    cache.put_blob_json(NAMESPACE, key, merged.payload(),
+                                        TTL_SECONDS, MAX_PAYLOAD_BYTES)
                 elif operation == "load" and not self._closed:
                     self.loaded.emit(generation, key, old)
             except Exception:

@@ -5,6 +5,7 @@ import math
 import unittest
 import zlib
 
+from tide.audio_capture import PULSE_SUSTAIN_FLOOR
 from tide.pulse_map import (
     PulseEvent, PulseHit, PulseMap, PulseRecorder, PulseScheduler, merge_maps,
 )
@@ -70,7 +71,8 @@ class PulseEventExtractionTest(unittest.TestCase):
             recorder.record(index / 100, 0.85, "sustain", onset=0.0, energy=0.3)
         learned = recorder.snapshot()
         self.assertEqual(learned.hits, ())
-        self.assertEqual(learned.value_at(0.5), 0.0)
+        # no hits, but the passage still breathes at the live sustain ceiling
+        self.assertAlmostEqual(learned.value_at(0.5), PULSE_SUSTAIN_FLOOR)
         self.assertAlmostEqual(learned.reference_at(0.5), 0.85)
 
     def test_silence_has_coverage_without_events(self):
@@ -156,7 +158,15 @@ class PulseEventShapeTest(unittest.TestCase):
         learned = _hit_map((PulseHit(1.0, 0.9),), reference=0.2)
         self.assertAlmostEqual(learned.reference_at(1.0), 0.2)
         self.assertAlmostEqual(learned.value_at(1.0), 0.9)
-        self.assertEqual(learned.value_at(0.5), 0.0)
+        # between hits the recorded envelope glows through, sub-ceiling
+        self.assertAlmostEqual(learned.value_at(0.5), 0.2)
+
+    def test_sustain_glow_is_capped_at_the_live_ceiling(self):
+        learned = _hit_map((PulseHit(1.0, 0.9),), reference=0.9)
+        self.assertAlmostEqual(learned.value_at(0.5), PULSE_SUSTAIN_FLOOR)
+        self.assertAlmostEqual(learned.value_at(1.0), 0.9)
+        dark = _hit_map((PulseHit(1.0, 0.9),), reference=0.0)
+        self.assertEqual(dark.value_at(0.5), 0.0)
 
 
 class PulseDynamicsTest(unittest.TestCase):
@@ -191,6 +201,27 @@ class PulseDynamicsTest(unittest.TestCase):
     def test_unknown_energy_does_not_silence_an_observed_hit(self):
         learned = _hit_map((PulseHit(1.0, 0.8, energy=None),))
         self.assertAlmostEqual(learned.value_at(1.0), 0.8)
+
+    def test_relisten_at_another_volume_does_not_split_map_brightness(self):
+        # first listen at full volume covers 0..8; second listen at half
+        # volume re-hears 0..6 and extends into 8..12. the shared beats
+        # give the gain ratio, so the extension lands on the stored scale.
+        loud = _hit_map(tuple(PulseHit(float(t), 0.9, energy=0.3)
+                              for t in range(1, 8)), end=8.0)
+        quiet_hits = tuple(PulseHit(float(t), 0.9, energy=0.15)
+                           for t in (1, 2, 3, 4, 5, 9, 10, 11))
+        quiet = _hit_map(quiet_hits, coverage=((0.0, 6.0), (8.0, 12.0)))
+        merged = merge_maps(loud, quiet)
+        levels = [merged.value_at(float(t)) for t in (1, 7, 9, 11)]
+        self.assertLess(max(levels) - min(levels), 1e-6)
+
+    def test_disjoint_relisten_keeps_raw_energies(self):
+        loud = _hit_map((PulseHit(1.0, 0.9, energy=0.3),), end=2.0)
+        quiet = _hit_map((PulseHit(9.0, 0.9, energy=0.15),),
+                         coverage=((8.0, 10.0),))
+        merged = merge_maps(loud, quiet)
+        # no shared beats → no gain evidence → dynamics read as recorded
+        self.assertLess(merged.value_at(9.0), merged.value_at(1.0))
 
 
 class PulseRhythmTest(unittest.TestCase):
@@ -362,6 +393,36 @@ class PulseEventValidationTest(unittest.TestCase):
             scheduler.observe(index / 100, 0.0, onset=0.0)
         self.assertTrue(scheduler.disagreed)
 
+    def test_sustained_bass_over_recorded_silence_forces_fallback(self):
+        # attack matching alone was structurally blind here: no attacks, no
+        # conflicts, while replays rendered dark against audible bass
+        scheduler = PulseScheduler(_hit_map((), end=10.0, reference=0.0))
+        for index in range(201):
+            scheduler.observe(index / 100, PULSE_SUSTAIN_FLOOR, onset=0.0)
+        self.assertTrue(scheduler.disagreed)
+        self.assertIsNone(scheduler.value_at(5.0))
+
+    def test_matching_sustain_keeps_the_schedule(self):
+        scheduler = PulseScheduler(_hit_map((), end=10.0, reference=0.2))
+        for index in range(201):
+            scheduler.observe(index / 100, 0.2, onset=0.0)
+        self.assertFalse(scheduler.disagreed)
+
+    def test_release_tail_into_silence_is_not_a_disagreement(self):
+        # a hit's live decay crosses the silence threshold on its way down;
+        # the look-back must keep that descent from counting
+        times = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0)
+        learned = _record_attacks(times, end=8.0)
+        scheduler = PulseScheduler(learned)
+        for index in range(801):
+            position = index / 100
+            ages = [position - hit for hit in times if position >= hit - 1e-10]
+            age = min(ages, default=math.inf)
+            onset = 0.9 if -1e-9 <= age < 0.025 else 0.0
+            level = 0.95 * math.exp(-max(0.0, age) / 0.22)
+            scheduler.observe(position, level, onset=onset)
+        self.assertFalse(scheduler.disagreed)
+
 
 class PulseEventPayloadTest(unittest.TestCase):
     def test_hit_and_reference_round_trip(self):
@@ -385,7 +446,7 @@ class PulseEventPayloadTest(unittest.TestCase):
         restored = PulseMap.from_payload(_hit_map((), reference=0.5).payload())
         self.assertIsNotNone(restored)
         self.assertEqual(restored.hits, ())
-        self.assertEqual(restored.value_at(1.0), 0.0)
+        self.assertAlmostEqual(restored.value_at(1.0), PULSE_SUSTAIN_FLOOR)
         self.assertAlmostEqual(restored.reference_at(1.0), 0.5)
 
     def test_malformed_hit_metadata_is_a_cache_miss(self):

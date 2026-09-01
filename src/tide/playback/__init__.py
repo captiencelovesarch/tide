@@ -217,6 +217,11 @@ class PlaybackRouter(QObject):
             return True
         return bool(getattr(self._active, "supports_speed", True))
 
+    def capture_suspect_window(self) -> float:
+        if self._active is None:
+            return 0.0
+        return float(self._active.capture_suspect_window())
+
     # ---------- internals ----------
 
     def _activate(self, slug: str) -> None:

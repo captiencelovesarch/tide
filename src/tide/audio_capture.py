@@ -181,6 +181,9 @@ _PULSE_LO, _PULSE_HI, _PULSE_FLUX_HI = _pulse_bin_range()
 _PULSE_CAPTURE_REQUEST_S = 0.010
 _PULSE_ONSET_LATENCY_S = 0.015
 _PULSE_LATENCY_ENV = "TIDE_PULSE_LATENCY_MS"
+# latency-probe retries: the source output can lag the first audio chunk
+_PULSE_PROBE_TRIES = 4
+_PULSE_PROBE_RETRY_S = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1047,10 +1050,21 @@ class AudioVisualizerFeed(QObject):
             pass
 
     def _measure_pulse_latency(self, proc: subprocess.Popen, stream_idx: int) -> None:
-        latency = _query_capture_latency(proc.pid, stream_idx)
-        if (latency is not None and not self._stop.is_set()
-                and self._proc is proc and self._stream_idx == stream_idx):
-            self._pulse_capture_latency = (proc, latency)
+        # pactl can race the source output's appearance right after the
+        # first chunk (and pipewire's enumeration has its own races); one
+        # miss used to pin the 25 ms fallback for the whole session.
+        for _attempt in range(_PULSE_PROBE_TRIES):
+            if (self._stop.is_set() or self._proc is not proc
+                    or self._stream_idx != stream_idx):
+                return
+            latency = _query_capture_latency(proc.pid, stream_idx)
+            if latency is not None:
+                if (not self._stop.is_set() and self._proc is proc
+                        and self._stream_idx == stream_idx):
+                    self._pulse_capture_latency = (proc, latency)
+                return
+            if self._stop.wait(_PULSE_PROBE_RETRY_S):
+                return
 
     def _emit_pulse_frame(self, state: _PulseState | None,
                           started_at: float | None = None,
@@ -1075,7 +1089,7 @@ class AudioVisualizerFeed(QObject):
             reset=state is None,
             scoped=self._stream_idx is not None,
             onset=_pulse_onset(state.diag, kind) if state is not None else 0.0,
-            # a reset marks a gap, not a measurement of silence.
+            # a reset marks a gap; silence would be a zero-energy measurement.
             energy=energy if state is not None else None,
         ))
 

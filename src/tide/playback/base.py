@@ -62,6 +62,14 @@ class PlaybackBackend(QObject):
     def set_audio_filter_chain(self, chain: str) -> None:
         return None
 
+    def capture_suspect_window(self) -> float:
+        """Wall seconds of just-captured audio that may belong to the NEXT
+        track. Nonzero only right after a poll-based backend noticed an
+        external track change late; the ambient pulse recorder trims this
+        much before saving, so the old track's map can't learn the new
+        track's bass."""
+        return 0.0
+
     def shutdown(self) -> None:
         return None
 

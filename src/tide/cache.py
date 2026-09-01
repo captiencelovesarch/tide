@@ -14,15 +14,18 @@ Storage layout::
 
     ~/.cache/tide/streams/<source_slug>.json   {video_id: {url, expires_at}}
     ~/.cache/tide/data/<namespace>.json        {key: {payload, expires_at}}
+    ~/.cache/tide/blobs/<namespace>/<sha1>.z   one zlib'd {payload, expires_at}
 
 Each source picks its own TTL when calling ``put_stream_url(source, ...)``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 import time
+import zlib
 from pathlib import Path
 
 from . import config
@@ -339,6 +342,101 @@ def clear_namespace(namespace: str) -> None:
         _data_mem.pop(namespace, None)
         try:
             _data_file(namespace).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+# ---------- per-key blob store ----------
+# Pulse maps are ~100-300KB per track and get resaved every 30s while music
+# plays. Through the data store above that meant re-serializing the whole
+# namespace under _DATA_LOCK per save and keeping every payload in _data_mem
+# for the life of the process; one compressed file per key makes a save
+# O(one entry) and shares no lock with the browse caches.
+
+BLOB_MAX_ENTRIES = 400              # per namespace, mtime-pruned on put
+BLOB_MAX_BYTES = 12 * 1024 * 1024   # serialized envelope cap, refused on put
+
+_BLOB_LOCK = threading.Lock()
+
+
+def _blob_dir(namespace: str) -> Path:
+    safe = "".join(c for c in namespace if c.isalnum() or c in "._-") or "default"
+    p = config.CACHE_DIR / "blobs" / safe
+    p.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(p, 0o700)
+    except OSError:
+        pass
+    return p
+
+
+def _blob_file(namespace: str, key: str) -> Path:
+    return _blob_dir(namespace) / (hashlib.sha1(key.encode()).hexdigest() + ".z")
+
+
+def get_blob_json(namespace: str, key: str):
+    """Payload for ``namespace``/``key``, or None if absent/expired/corrupt.
+    Same post-JSON contract as ``get_json``."""
+    path = _blob_file(namespace, key)
+    try:
+        with _BLOB_LOCK:
+            data = path.read_bytes()
+        envelope = json.loads(zlib.decompress(data))
+        if float(envelope["expires_at"]) <= time.time():
+            with _BLOB_LOCK:
+                path.unlink(missing_ok=True)
+            return None
+        return envelope["payload"]
+    except Exception:
+        return None
+
+
+def put_blob_json(namespace: str, key: str, payload, ttl_seconds: float,
+                  max_bytes: int = BLOB_MAX_BYTES) -> bool:
+    """Persist ``payload`` in its own file. Returns False without writing
+    when the serialized form exceeds ``max_bytes`` — readers cap too, so an
+    oversized entry would only burn disk."""
+    raw = json.dumps({"payload": payload,
+                      "expires_at": time.time() + ttl_seconds},
+                     separators=(",", ":")).encode()
+    if len(raw) > max_bytes:
+        return False
+    path = _blob_file(namespace, key)
+    blob = zlib.compress(raw, 6)
+    try:
+        with _BLOB_LOCK:
+            tmp = path.with_suffix(".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(blob)
+            tmp.replace(path)
+            _blob_prune(path.parent)
+    except OSError:
+        return False
+    return True
+
+
+def _blob_prune(directory: Path) -> None:
+    # entry cap by mtime; expiry stays lazy — it lives inside the files and
+    # checking it here would mean decompressing the whole namespace.
+    try:
+        files = sorted((entry.stat().st_mtime, Path(entry.path))
+                       for entry in os.scandir(directory)
+                       if entry.name.endswith(".z"))
+    except OSError:
+        return
+    for _mtime, path in files[:max(0, len(files) - BLOB_MAX_ENTRIES)]:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def clear_blob_namespace(namespace: str) -> None:
+    with _BLOB_LOCK:
+        try:
+            for entry in os.scandir(_blob_dir(namespace)):
+                Path(entry.path).unlink(missing_ok=True)
         except OSError:
             pass
 

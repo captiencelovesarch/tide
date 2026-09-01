@@ -210,7 +210,9 @@ def test_learning_waits_for_real_clock_bracket_despite_render_ticks(h):
     recorded = []
     h.controller._recorder = SimpleNamespace(
         record=lambda position, *_args, **_kwargs: recorded.append(position),
-        gap=lambda: None, segments=lambda: ())
+        gap=lambda: None, segments=lambda: (),
+        drain_pending=lambda **_kwargs: (), has_pending=lambda: False,
+        discard_tail=lambda *_args: None)
     h.position(0.25, 0.27)
     h.frame(0.40, captured=0.40, latency=0.08)
     h.render(0.42)
@@ -423,7 +425,10 @@ def test_detailed_frames_learn_and_replay_off_grid_hit_with_sparse_clock(h):
     drive(3.0)
     assert h.controller._scheduled
     assert not h.controller._scheduler.disagreed
-    assert all(level == 0.0 for wall, level in h.samples if 4.0 <= wall <= 4.12)
+    # between hits the replay glows at the recorded envelope (0.2, under
+    # the sustain ceiling) instead of going dark
+    assert all(level == pytest.approx(0.2) for wall, level in h.samples
+               if 4.0 <= wall <= 4.12)
     caught = [(wall, level) for wall, level in h.samples
               if 4.13 <= wall <= 4.151 and level >= 0.899]
     assert caught

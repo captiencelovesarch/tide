@@ -146,6 +146,7 @@ class LibrespotBackend(PlaybackBackend):
         self._state: PlayState = PlayState.IDLE
         self._duration_s: float = 0.0
         self._position_ms: float = 0.0
+        self._external_advance_at: float = float("-inf")
         # Reference points for position interpolation between syncs.
         self._anchor_ms: float = 0.0           # last server position
         self._anchor_at: float = 0.0           # monotonic time of anchor
@@ -331,6 +332,16 @@ class LibrespotBackend(PlaybackBackend):
     # set_speed / set_pitch_correction left as no-ops from the base
     # class — librespot doesn't support variable speed.
 
+    def capture_suspect_window(self) -> float:
+        # autoplay/remote skips surface at the sync poll, up to
+        # SYNC_INTERVAL_MS after the audio actually changed. the ended →
+        # stop dispatch that consumes this runs in the same event-loop
+        # turn; 1s of slack covers a queued hop without leaving the flag
+        # armed long enough to trim an unrelated later stop.
+        if time.monotonic() - self._external_advance_at <= 1.0:
+            return self.SYNC_INTERVAL_MS / 1000.0
+        return 0.0
+
     def shutdown(self) -> None:
         self._sync_timer.stop()
         self._tick_timer.stop()
@@ -494,6 +505,10 @@ class LibrespotBackend(PlaybackBackend):
             prev_loaded = self._loaded_track_id
             self._loaded_track_id = current_id
             self._loaded_uri = item.get("uri") or f"spotify:track:{current_id}"
+            # The new track has been audible for up to a full poll interval
+            # while we still reported the old one — anything captured in
+            # that window is suspect (see capture_suspect_window).
+            self._external_advance_at = time.monotonic()
             # Queue's auto-advance handler picks up from here.
             self.ended.emit()
             # Don't return — also re-anchor with the new track's progress.

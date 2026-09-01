@@ -225,6 +225,36 @@ class CaptureLatencyTest(unittest.TestCase):
             run.return_value = SimpleNamespace(returncode=0, stdout="invalid json")
             self.assertIsNone(audio_capture._query_capture_latency(2222, 9))
 
+    def test_probe_retries_until_the_source_output_appears(self):
+        # one pactl miss (source output racing the first chunk) used to pin
+        # the hardcoded fallback for the rest of the capture session
+        feed = AudioVisualizerFeed()
+        feed._pulse_latency_override = None
+        feed._proc = SimpleNamespace(pid=2222)
+        feed._stream_idx = 9
+        with mock.patch.object(audio_capture, "_query_capture_latency",
+                               side_effect=[None, None, -0.013]) as query, \
+             mock.patch.object(audio_capture, "_PULSE_PROBE_RETRY_S", 0.0):
+            feed._measure_pulse_latency(feed._proc, 9)
+        self.assertEqual(query.call_count, 3)
+        self.assertEqual(feed._pulse_capture_latency, (feed._proc, -0.013))
+
+    def test_probe_attempts_are_bounded_and_stop_aborts_them(self):
+        feed = AudioVisualizerFeed()
+        feed._pulse_latency_override = None
+        feed._proc = SimpleNamespace(pid=2222)
+        feed._stream_idx = 9
+        with mock.patch.object(audio_capture, "_query_capture_latency",
+                               return_value=None) as query, \
+             mock.patch.object(audio_capture, "_PULSE_PROBE_RETRY_S", 0.0):
+            feed._measure_pulse_latency(feed._proc, 9)
+            self.assertEqual(query.call_count, audio_capture._PULSE_PROBE_TRIES)
+            query.reset_mock()
+            feed._stop.set()
+            feed._measure_pulse_latency(feed._proc, 9)
+            query.assert_not_called()
+        self.assertIsNone(feed._pulse_capture_latency)
+
     def test_stale_probe_cannot_set_next_process_latency(self):
         feed = AudioVisualizerFeed()
         old = SimpleNamespace(pid=2222)

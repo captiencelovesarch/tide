@@ -4,6 +4,7 @@ import json
 import math
 import sys
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -140,6 +141,78 @@ class PulseRecorderTest(unittest.TestCase):
         recorder.record(0.2, 0.0)
         self.assertIsNone(snapshot.value_at(0.2))
         self.assertEqual(recorder.snapshot().value_at(0.2), 0.0)
+
+    def test_drain_returns_only_the_delta_and_spans_still_join(self):
+        recorder = PulseRecorder()
+        for i in range(11):
+            recorder.record(i / 10, 0.5, "sustain", onset=0.0, energy=0.1)
+        first = recorder.drain_pending()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0][0].media_time, 0.0)
+        self.assertEqual(first[0][-1].media_time, 1.0)
+        for i in range(11, 21):
+            recorder.record(i / 10, 0.5, "sustain", onset=0.0, energy=0.1)
+        second = recorder.drain_pending()
+        self.assertEqual(len(second), 1)
+        # the previous cut sample leads the delta so coverage spans abut
+        self.assertEqual(second[0][0].media_time, 1.0)
+        self.assertEqual(second[0][-1].media_time, 2.0)
+        merged = merge_maps(map_from_segments(first), map_from_segments(second))
+        self.assertEqual(merged.coverage, ((0.0, 2.0),))
+        self.assertFalse(recorder.has_pending())
+        # snapshot still sees the whole listen after draining
+        self.assertEqual(recorder.snapshot().coverage, ((0.0, 2.0),))
+
+    def test_drain_leaves_a_live_attack_for_the_next_checkpoint(self):
+        recorder = PulseRecorder()
+        for i in range(10):
+            recorder.record(i / 100, 0.2, "sustain", onset=0.0, energy=0.1)
+        for i in range(10, 13):
+            recorder.record(i / 100, 0.9, "kick", onset=0.9, energy=0.3)
+        partial = recorder.drain_pending()
+        self.assertEqual(partial[0][-1].media_time, 0.09)
+        self.assertTrue(recorder.has_pending())
+        for i in range(13, 30):
+            recorder.record(i / 100, 0.1, "sustain", onset=0.0, energy=0.1)
+        rest = recorder.drain_pending(final=True)
+        # the whole attack rides in one slice, so its hit is derived intact
+        merged = merge_maps(map_from_segments(partial), map_from_segments(rest))
+        self.assertEqual(len(merged.hits), 1)
+        self.assertEqual(len(recorder.snapshot().hits), 1)
+
+    def test_final_drain_flushes_a_loud_tail(self):
+        recorder = PulseRecorder()
+        for i in range(10):
+            recorder.record(i / 100, 0.2, "sustain", onset=0.0, energy=0.1)
+        recorder.record(0.10, 0.9, "kick", onset=0.9, energy=0.3)
+        recorder.record(0.11, 0.8, "kick", onset=0.7, energy=0.3)
+        segments = recorder.drain_pending(final=True)
+        self.assertEqual(segments[0][-1].media_time, 0.11)
+        self.assertFalse(recorder.has_pending())
+        self.assertEqual(len(map_from_segments(segments).hits), 1)
+
+    def test_discard_tail_drops_recent_wall_seconds_across_a_gap(self):
+        recorder = PulseRecorder()
+        for i in range(21):
+            recorder.record(i / 10, 0.5, "sustain", onset=0.0, energy=0.1, speed=2.0)
+        recorder.gap()
+        for i in range(30, 33):
+            recorder.record(i / 10, 0.5, "sustain", onset=0.0, energy=0.1, speed=2.0)
+        # 0.3s wall at 2x: the whole 0.2s-media second segment plus 0.4
+        # media from the first — gaps count as zero wall, erring long
+        recorder.discard_tail(0.3)
+        learned = recorder.snapshot()
+        self.assertEqual(learned.coverage, ((0.0, 1.6),))
+
+    def test_discard_tail_cannot_reach_drained_samples(self):
+        recorder = PulseRecorder()
+        for i in range(11):
+            recorder.record(i / 10, 0.5, "sustain", onset=0.0, energy=0.1)
+        saved = recorder.drain_pending()
+        recorder.discard_tail(60.0)
+        self.assertEqual(saved[0][-1].media_time, 1.0)
+        self.assertFalse(recorder.has_pending())
+        self.assertEqual(recorder.drain_pending(final=True), ())
 
     def test_merge_does_not_fill_holes_in_new_trace(self):
         old = _map([(0.0, 0.8), (6.0, 0.8)])
@@ -345,6 +418,7 @@ class PulseMapStoreTest(unittest.TestCase):
     def setUp(self):
         self.app = QApplication.instance() or QApplication(sys.argv[:1])
         cache.clear_namespace(NAMESPACE)
+        cache.clear_blob_namespace(NAMESPACE)
         self.stores = []
 
     def tearDown(self):
@@ -352,6 +426,7 @@ class PulseMapStoreTest(unittest.TestCase):
             store.close()
         self.app.processEvents()
         cache.clear_namespace(NAMESPACE)
+        cache.clear_blob_namespace(NAMESPACE)
 
     def _store(self):
         store = PulseMapStore()
@@ -432,9 +507,13 @@ class PulseMapStoreTest(unittest.TestCase):
         store, _receiver = self._store()
         store.save("disk-track", original)
         store.close()
-        self.assertTrue(cache._data_file(NAMESPACE).is_file())
+        self.assertTrue(cache._blob_file(NAMESPACE, "disk-track").is_file())
+        # maps must not ride the shared whole-file data store: that design
+        # rewrote every cached track under _DATA_LOCK per checkpoint and
+        # pinned the namespace in RAM for the process lifetime.
+        self.assertFalse(cache._data_file(NAMESPACE).is_file())
         with cache._DATA_LOCK:
-            cache._data_mem.pop(NAMESPACE, None)
+            self.assertNotIn(NAMESPACE, cache._data_mem)
         fresh, receiver = self._store()
         fresh.load(11, "disk-track")
         self._wait_for(receiver, 1)
@@ -444,14 +523,51 @@ class PulseMapStoreTest(unittest.TestCase):
         for event in original.events:
             self.assertAlmostEqual(restored.value_at(event.media_time), event.strength, places=5)
 
+    def test_save_rewrites_one_key_not_the_namespace(self):
+        store, _receiver = self._store()
+        store.save("track-a", _map([(0.0, 0.1), (1.0, 0.5)]))
+        store.save("track-b", _map([(0.0, 0.9), (1.0, 0.2)]))
+        store.close()
+        path_a = cache._blob_file(NAMESPACE, "track-a")
+        before = path_a.read_bytes()
+        again, _receiver = self._store()
+        again.save("track-b", _map([(2.0, 0.9), (3.0, 0.2)]))
+        again.close()
+        self.assertEqual(path_a.read_bytes(), before)
+
+    def test_close_joins_until_queued_save_lands(self):
+        store, _receiver = self._store()
+        real = cache.put_blob_json
+
+        def slow_put(*args, **kwargs):
+            time.sleep(1.2)
+            return real(*args, **kwargs)
+
+        with mock.patch("tide.pulse_map.cache.put_blob_json", side_effect=slow_put):
+            store.save("slow", _map([(0.0, 0.0), (1.0, 1.0)]))
+            store.close()
+        # the bounded join used to return here with the worker still
+        # writing; interpreter exit then dropped the final listen.
+        self.assertFalse(store._thread.is_alive())
+        self.assertIsNotNone(cache.get_blob_json(NAMESPACE, "slow"))
+
+    def test_oversized_payload_is_refused_on_save(self):
+        store, receiver = self._store()
+        with mock.patch("tide.pulse_map.MAX_PAYLOAD_BYTES", 64):
+            store.save("huge", _map([(i / 10, (i % 2) / 2) for i in range(64)]))
+            store.load(1, "huge")
+            self._wait_for(receiver, 1)
+        self.assertIsNone(receiver.results[0][2])
+        self.assertFalse(cache._blob_file(NAMESPACE, "huge").is_file())
+
     def test_missing_corrupt_and_failed_reads_return_live_fallback(self):
         store, receiver = self._store()
-        cache.put_json(NAMESPACE, "corrupt", {"version": 100}, 100)
+        cache.put_blob_json(NAMESPACE, "corrupt", {"version": 100}, 100)
         store.load(1, "missing")
         store.load(2, "corrupt")
         self._wait_for(receiver, 2)
         self.assertEqual(receiver.results, [(1, "missing", None), (2, "corrupt", None)])
-        with mock.patch("tide.pulse_map.cache.get_json", side_effect=OSError("cache unavailable")):
+        with mock.patch("tide.pulse_map.cache.get_blob_json", side_effect=OSError("cache unavailable")):
             store.load(3, "unreadable")
             self._wait_for(receiver, 3)
         self.assertEqual(receiver.results[-1], (3, "unreadable", None))
@@ -467,7 +583,7 @@ class PulseMapStoreTest(unittest.TestCase):
         store.save("ignored", _map([(0.0, 0.0), (1.0, 1.0)]))
         self.app.processEvents()
         self.assertEqual(receiver.results, [])
-        self.assertIsNone(cache.get_json(NAMESPACE, "ignored"))
+        self.assertIsNone(cache.get_blob_json(NAMESPACE, "ignored"))
 
 
 if __name__ == "__main__":

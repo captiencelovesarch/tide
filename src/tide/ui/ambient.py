@@ -185,17 +185,30 @@ class AmbientController(QObject):
         self._scheduler.gap()
         self._accept_after = now + _SETTLE_SECONDS
 
-    def _checkpoint(self) -> None:
+    def _checkpoint(self, *, final: bool = False) -> None:
         if not self._dirty or self._key is None:
             return
-        segments = self._recorder.segments()
+        # deltas only: resubmitting the whole recording made every 30s
+        # checkpoint O(track-so-far) on both sides of the store queue.
+        segments = self._recorder.drain_pending(final=final)
         if segments:
             self._store.save_recording(self._key, segments)
-        self._dirty = False
+        self._dirty = self._recorder.has_pending()
         self._last_save = time.monotonic()
 
     def _finish(self) -> None:
-        self._checkpoint()
+        suspect = 0.0
+        probe = getattr(self._player, "capture_suspect_window", None)
+        if probe is not None:
+            try:
+                suspect = float(probe())
+            except Exception:
+                suspect = 0.0
+        if suspect > 0:
+            # a poll-based backend noticed the track change late; the tail
+            # of the recording is the next track's audio under this key.
+            self._recorder.discard_tail(suspect)
+        self._checkpoint(final=True)
         self._generation += 1
         self._key = None
         self._dirty = False
@@ -232,6 +245,11 @@ class AmbientController(QObject):
             if (elapsed <= 0 or elapsed > MAX_CLOCK_GAP or advance <= 0
                     or abs(advance - elapsed * speed) > max(0.035, elapsed * speed * 0.5)):
                 self._clock_gap(now)
+                # every present track change bounces through LOADING, but a
+                # backend-initiated one (gapless, remote skip) would first
+                # show as a clock break; rekey here so scoped frames of the
+                # new audio cannot keep teaching the old track.
+                self._begin()
         self._anchors.append((now, seconds))
         self._drain_frames()
         self._render_pulse(now)

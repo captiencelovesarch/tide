@@ -117,7 +117,13 @@ class PulseMusicTest(unittest.TestCase):
             with self.subTest(signal=name):
                 learned, _frames = _learn(samples)
                 self.assertEqual(learned.hits, ())
-                self.assertEqual(learned.value_at(2.5), 0.0)
+                # no invented hits; sustained bass still breathes at the
+                # recorded envelope, capped at the live sustain ceiling
+                reference = learned.reference_at(2.5)
+                self.assertEqual(learned.value_at(2.5),
+                                 min(reference, audio_capture.PULSE_SUSTAIN_FLOOR))
+                if name != "bass":
+                    self.assertLess(learned.value_at(2.5), 0.02)
 
     def test_syncopation_missing_beats_and_tempo_changes_preserve_real_attacks(self):
         hits = (0.5, 1.0, 1.5, 2.0, 2.17, 2.5, 3.0, 3.75, 4.5,

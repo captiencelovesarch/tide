@@ -126,12 +126,12 @@ class Harness:
         self.player.position_changed.emit(media)
 
     def frame(self, wall, level=0.7, *, captured=None, latency=0.08,
-              reset=False, scoped=True):
+              reset=False, scoped=True, onset=None, energy=None):
         self.time(wall)
         self.feed.pulse_updated.emit(level)
         self.feed.pulse_frame.emit(PulseFrame(
             100.0 + (wall if captured is None else captured), level,
-            "kick", latency, reset, scoped))
+            "kick", latency, reset, scoped, onset=onset, energy=energy))
 
     def tick(self, wall, media=None, level=0.7, **kwargs):
         self.position(wall, wall if media is None else media)
@@ -379,6 +379,83 @@ def test_shutdown_saves_partial_listen_and_closes_store(h):
     assert not h.controller._holding
 
 
+def test_periodic_checkpoint_submits_only_the_delta(h):
+    h.start()
+    h.learn()
+    h.position(31.0, 31.0)
+    assert len(h.store.saves) == 1
+    first = h.store.saves[0][1]
+    assert first.coverage == (pytest.approx((0.12, 0.72)),)
+    for i in range(4, 17):
+        h.tick(31.0 + i * 0.05, 31.0 + i * 0.05)
+    h.player.change_state(PlayState.IDLE)
+    assert len(h.store.saves) == 2
+    second = h.store.saves[1][1]
+    # the final save carries the second stretch only, not the whole listen
+    assert second.coverage[0][0] >= 31.0
+    merged = h.store.maps[track_key(track("a"))]
+    assert len(merged.coverage) == 2
+
+
+def test_external_advance_trims_the_suspect_tail_before_saving(h):
+    window = [0.0]
+    h.player.capture_suspect_window = lambda: window[0]
+    h.start()
+    h.learn()
+    # the backend noticed a remote/autoplay advance 0.3s of wall late:
+    # that much tail is the next track's audio and must not be learned
+    window[0] = 0.3
+    h.player.change_state(PlayState.IDLE)
+    saved = h.store.maps[track_key(track("a"))]
+    assert saved.coverage == (pytest.approx((0.12, 0.42)),)
+
+
+def test_finish_without_suspect_window_keeps_the_tail(h):
+    window = [0.0]
+    h.player.capture_suspect_window = lambda: window[0]
+    h.start()
+    h.learn()
+    h.player.change_state(PlayState.IDLE)
+    saved = h.store.maps[track_key(track("a"))]
+    assert saved.coverage == (pytest.approx((0.12, 0.72)),)
+
+
+def test_backend_initiated_switch_rekeys_on_the_clock_break(h):
+    h.start()
+    h.learn()
+    a_key = track_key(track("a"))
+    h.current = track("b")
+    # position resets without a LOADING bounce — a backend-driven advance
+    h.position(0.85, 0.10)
+    assert h.controller._key == track_key(track("b"))
+    assert h.store.loads[-1][1] == track_key(track("b"))
+    assert [key for key, _pulse_map in h.store.saves] == [a_key]
+    for i in range(13):
+        h.tick(1.0 + i * 0.05, 0.15 + i * 0.05)
+    h.player.change_state(PlayState.IDLE)
+    assert h.store.maps[a_key].coverage == (pytest.approx((0.12, 0.72)),)
+    b_map = h.store.maps[track_key(track("b"))]
+    assert b_map.coverage[0][1] < 1.0
+
+
+def test_pause_leaves_live_attack_pending_and_stop_flushes_it(h):
+    h.start()
+    for i in range(4, 17):
+        h.tick(i * 0.05, onset=0.0, energy=0.1)
+    h.tick(0.85, onset=0.9, energy=0.3)
+    h.tick(0.90, onset=0.95, energy=0.3)
+    h.player.change_state(PlayState.PAUSED)
+    assert len(h.store.saves) == 1
+    partial = h.store.saves[0][1]
+    # the in-flight attack stays pending so its hit derives from one stretch
+    assert partial.coverage[0][1] == pytest.approx(0.72)
+    assert partial.hits == ()
+    h.player.change_state(PlayState.IDLE)
+    merged = h.store.maps[track_key(track("a"))]
+    assert merged.coverage == (pytest.approx((0.12, 0.82)),)
+    assert len(merged.hits) == 1
+
+
 def test_wrong_beat_grid_triggers_disagreement_despite_crossings():
     def pulse(t):
         return math.exp(-(t % 0.5) / 0.22)
@@ -509,3 +586,68 @@ def test_construction_during_playback_bootstraps_accessor_without_state_signal(m
         assert running.controller._holding
     finally:
         running.controller.shutdown()
+
+
+def test_librespot_arms_suspect_window_before_ended_reaches_listeners(monkeypatch):
+    from unittest import mock
+
+    from tide.playback import librespot_backend as lb
+
+    backend = lb.LibrespotBackend(token_provider=lambda: "token")
+    assert backend.capture_suspect_window() == 0.0
+    backend._loaded_track_id = "old"
+    seen = []
+    backend.ended.connect(lambda: seen.append(backend.capture_suspect_window()))
+    response = {"item": {"id": "new", "uri": "spotify:track:new",
+                         "duration_ms": 200_000},
+                "is_playing": True, "progress_ms": 1500}
+    with mock.patch.object(lb, "_api", return_value=response):
+        backend._sync_state()
+    # armed before ended fires: the stop → finish it triggers must see it
+    assert seen == [lb.LibrespotBackend.SYNC_INTERVAL_MS / 1000.0]
+    backend._external_advance_at -= 2.0
+    assert backend.capture_suspect_window() == 0.0
+
+
+def test_router_reports_active_backend_suspect_window():
+    from tide.playback import PlaybackRouter
+    from tide.playback.base import PlaybackBackend
+
+    class Backend(PlaybackBackend):
+        def __init__(self, slug):
+            super().__init__()
+            self.slug = slug
+
+        def load(self, payload):
+            pass
+
+        def play(self):
+            pass
+
+        def pause(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def seek(self, seconds):
+            pass
+
+        def set_volume(self, percent):
+            pass
+
+        @property
+        def state(self):
+            return PlayState.IDLE
+
+        @property
+        def duration(self):
+            return 0.0
+
+    router = PlaybackRouter()
+    assert router.capture_suspect_window() == 0.0
+    backend = Backend("mpv")
+    router.register(backend)
+    assert router.capture_suspect_window() == 0.0
+    backend.capture_suspect_window = lambda: 2.0
+    assert router.capture_suspect_window() == 2.0
