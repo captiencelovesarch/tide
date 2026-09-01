@@ -827,7 +827,7 @@ class SettingsDialog(QDialog):
         from .. import __version__
         title = QLabel(f"tide  v{__version__}")
         title.setStyleSheet("font-weight: 600;")
-        tagline = QLabel("a brutalist youtube music client.")
+        tagline = QLabel("one music player, two personalities.")
         tagline.setProperty("class", "dim")
         credits = QLabel(
             "built on:  pyside6 · mpv · ytmusicapi · yt-dlp · cryptography\n"

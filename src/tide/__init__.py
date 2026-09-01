@@ -1,4 +1,5 @@
-"""tide — a brutalist multi-source music client."""
+"""tide — a multi-source music player with two personalities, brutalist
+and modern. presets.py flips them; everything under the look is shared."""
 from __future__ import annotations
 
 # Prefer the *installed* package version so a pip/AUR build always reports
@@ -10,4 +11,4 @@ try:
 
     __version__ = _pkg_version("tide")
 except Exception:
-    __version__ = "1.5.0"
+    __version__ = "2.0.0"

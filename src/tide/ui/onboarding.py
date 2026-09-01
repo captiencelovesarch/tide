@@ -296,7 +296,7 @@ class _WelcomeStep(_Step):
         title.setFont(f)
         title.setAlignment(Qt.AlignCenter)
 
-        tagline = QLabel("a brutalist multi-source music client")
+        tagline = QLabel("youtube music, spotify, your server, your files — one queue")
         f2 = QFont(tagline.font())
         f2.setPointSize(f2.pointSize() + 2)
         tagline.setFont(f2)

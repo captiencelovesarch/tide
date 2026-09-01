@@ -14,14 +14,15 @@ import time
 import urllib.request
 from typing import Callable
 
-from . import config
+from . import __version__, config
 
 
 GITHUB_REPO = "captiencelovesarch/tide"
 LATEST_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 CACHE_PATH = config.CACHE_DIR / "update_check.json"
 CHECK_INTERVAL_SECONDS = 24 * 3600
-USER_AGENT = "tide/1.0"
+# Derived, not hardcoded — a literal here drifted behind the real version once.
+USER_AGENT = f"tide/{__version__}"
 
 
 def _parse_semver(tag: str) -> tuple[int, ...] | None:

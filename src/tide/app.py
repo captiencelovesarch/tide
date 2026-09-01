@@ -341,7 +341,7 @@ def _instance_message_handler(raise_target: list):
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="tide", description="a brutalist youtube music client")
+    parser = argparse.ArgumentParser(prog="tide", description="a multi-source music player")
     parser.add_argument("--theme", help="theme slug to load (overrides saved preference)")
     parser.add_argument("--list-themes", action="store_true", help="print available themes and exit")
     return parser.parse_args(argv)

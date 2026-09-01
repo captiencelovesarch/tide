@@ -2,12 +2,12 @@
 Type=Application
 Name=tide
 GenericName=Music Player
-Comment=a brutalist youtube music client
+Comment=a multi-source music player with two personalities
 Exec=tide
 Icon=tide
 Terminal=false
 Categories=AudioVideo;Audio;Player;Music;
-Keywords=music;youtube;ytmusic;player;
+Keywords=music;player;youtube;ytmusic;spotify;subsonic;navidrome;soundcloud;bandcamp;mixcloud;
 MimeType=
 StartupWMClass=tide
 StartupNotify=true

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tide"
-version = "1.6.0"
-description = "a brutalist multi-source music client"
+version = "2.0.0"
+description = "a multi-source music player with two personalities"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "GPL-3.0-or-later" }
@@ -71,7 +71,9 @@ include = [
 # The sdist must additionally carry everything the wheel build consumes
 # from OUTSIDE src/ (shared-data icons + the .desktop file) — without
 # these, building a wheel from the published sdist silently drops the
-# desktop integration.
+# desktop integration. Root-level files keep their leading slash: a bare
+# "PKGBUILD" is a gitwildmatch pattern that matches at ANY depth and
+# pulls in stray copies from ignored working dirs.
 [tool.hatch.build.targets.sdist]
 include = [
   "src/tide/**/*.py",
@@ -83,9 +85,9 @@ include = [
   "src/tide/sounds/**/*.wav",
   "src/tide/sounds/**/*.md",
   "assets/icon-*.png",
-  "tide.desktop",
-  "PKGBUILD",
-  "CHANGELOG.md",
+  "/tide.desktop",
+  "/PKGBUILD",
+  "/CHANGELOG.md",
 ]
 
 [tool.pytest.ini_options]

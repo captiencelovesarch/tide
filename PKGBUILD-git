@@ -3,9 +3,9 @@ pkgname=tide-git
 _pkgname=tide
 pkgver=1.0.0.r0.gHEAD
 pkgrel=1
-pkgdesc="A brutalist YouTube Music desktop client (VCS version)"
+pkgdesc="A multi-source music player with two personalities (VCS version)"
 arch=('any')
-url="https://github.com/milkkjello-del/tide"
+url="https://github.com/captiencelovesarch/tide"
 license=('GPL-3.0-or-later')
 provides=('tide')
 conflicts=('tide')
@@ -18,13 +18,15 @@ depends=(
   'python-ytmusicapi'
   'python-cryptography'
   'python-numpy'
-  'python-sounddevice'
-  'ttf-ibm-plex'
+  'python-mutagen'
+  'python-spotipy'
 )
 optdepends=(
   'python-pypresence: Discord rich presence integration'
   'python-secretstorage: GNOME/libsecret backend for cookie import'
   'kwallet: KDE wallet backend for cookie import'
+  'python-watchdog: live re-indexing of the local files source'
+  'librespot: Spotify Premium playback via the librespot backend'
 )
 makedepends=(
   'git'
