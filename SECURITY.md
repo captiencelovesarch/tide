@@ -2,13 +2,13 @@
 
 ## Supported versions
 
-tide is small and moves fast. Only the latest released minor version receives security fixes — older versions get whatever lands in the next release.
+tide is small and moves fast. Only the latest released minor version receives security fixes, older versions get whatever lands in the next release.
 
 | version | supported |
 |---------|-----------|
-| 1.3.x   | ✅        |
-| 1.2.x   | ❌        |
-| < 1.2   | ❌        |
+| 2.0.x   | ✅        |
+| 1.4.x   | ❌        |
+| < 1.3   | ❌        |
 
 ## Reporting a vulnerability
 
