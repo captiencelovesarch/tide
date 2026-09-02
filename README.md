@@ -2,7 +2,7 @@
 
 a music player for linux that pulls from youtube music, spotify, subsonic/navidrome, soundcloud, bandcamp, mixcloud and your local files, and lets you mix all of them in one queue. native Qt6 on top of mpv. no electron anywhere in the building.
 
-since 2.0 it is also two players. **brutalist**: a music player. nothing else. **modern**: the same songs, alive. same library, same queue underneath — two completely different things to look at.
+since 2.0 it is also two players. **brutalist**: a music player. nothing else. **modern**: the same songs, alive. same library, same queue underneath, two completely different things to look at.
 
 <img src="assets/screenshots/chooser-panes.png" alt="choose your tide" width="780" />
 
