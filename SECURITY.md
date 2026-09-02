@@ -7,8 +7,8 @@ tide is small and moves fast. Only the latest released minor version receives se
 | version | supported |
 |---------|-----------|
 | 2.0.x   | ✅        |
-| 1.4.x   | ❌        |
-| < 1.3   | ❌        |
+| 1.5.x   | ❌        |
+| < 1.4   | ❌        |
 
 ## Reporting a vulnerability
 
