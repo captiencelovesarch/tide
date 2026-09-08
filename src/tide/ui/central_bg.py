@@ -63,20 +63,16 @@ def corner_radius(style: str) -> int:
 # song owns the room before its first chorus.
 _TONE_FADE_MS = 1400.0
 
-_ANIM_INTERVAL_MS = 42          # ~24 fps — a slow drift + bass swell needs no more,
-                                # and the content now composites over it each frame
+_ANIM_INTERVAL_MS = 42          # idle drift stays inexpensive
+_PULSE_INTERVAL_MS = 16         # transients need a display-rate cadence
 _PERIOD_FLOW_S = 43.0
 _PERIOD_FIELD_A_S = 29.0
 _PERIOD_FIELD_B_S = 37.0
 _PERIOD_FIELD_C_S = 53.0
 _BASE_ANGLE = math.radians(56)  # diagonal, top-left → bottom-right
-# Display smoothing for the bass pulse, applied per animation tick. The
-# audio-side envelope already has instant attack and a ~0.35s release, so the
-# paint side must not smooth the onset again — a symmetric 0.5 here used to
-# add ~130ms of visible lag on every kick. Attack near-snaps; release keeps a
-# little easing on top of the envelope's own decay for the slow-settle look.
-_PULSE_ATTACK = 0.85
-_PULSE_RELEASE = 0.5
+# the source already shapes the attack. follow it immediately, easing only
+# the release in wall time so timer cadence cannot smear adjacent hits.
+_PULSE_RELEASE_S = 0.030
 # Offscreen buffer cap (long side, px). The gradient is smooth so a small
 # buffer upscaled bilinearly is visually identical to a full-res fill, but
 # caps the fill cost regardless of window size / desktop scaling.
@@ -233,6 +229,7 @@ class CentralBg(QWidget):
         self._tone_fc = QColor(self._tone_c)
         self._tone_blend: float = 1.0
         self._pulse: float = 0.0            # target from the audio feed
+        self._pulse_peak: float = 0.0       # preserve attacks between paints
         self._pulse_shown: float = 0.0      # smoothed value actually painted
         self._last_tick: float = 0.0        # when _tick last painted
         self._t0 = time.monotonic()
@@ -270,6 +267,7 @@ class CentralBg(QWidget):
         self._fx_last: float | None = None
 
         self._anim = QTimer(self)
+        self._anim.setTimerType(Qt.TimerType.PreciseTimer)
         self._anim.setInterval(_ANIM_INTERVAL_MS)
         self._anim.timeout.connect(self._tick)
 
@@ -370,13 +368,16 @@ class CentralBg(QWidget):
         (still rate-limited to the timer interval) so the swell lands on the
         beat instead of up to a frame later."""
         self._pulse = max(0.0, min(1.0, float(level)))
+        self._pulse_peak = (max(self._pulse_peak, self._pulse)
+                            if self._enabled and self.isVisible() else self._pulse)
         self._sync_timer()
         if (
             self._pulse - self._pulse_shown > 0.08
             and self._anim.isActive()
-            and (time.monotonic() - self._last_tick) * 1000.0 >= _ANIM_INTERVAL_MS
+            and (time.monotonic() - self._last_tick) * 1000.0 >= _PULSE_INTERVAL_MS
         ):
             self._tick()
+            self._anim.start()
 
     # ---------- lifecycle ----------
 
@@ -386,6 +387,7 @@ class CentralBg(QWidget):
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
+        self._pulse_peak = 0.0
         self._anim.stop()
 
     def _sync_timer(self) -> None:
@@ -394,10 +396,17 @@ class CentralBg(QWidget):
             self._motion != "off"
             or self._pulse > 0.001
             or self._pulse_shown > 0.001
+            or self._pulse_peak > 0.001
             or self._tone_blend < 1.0
             or self._liq_blend < 1.0
         )
+        interval = (_PULSE_INTERVAL_MS if max(self._pulse, self._pulse_peak,
+                                             self._pulse_shown) > 0.001
+                    else _ANIM_INTERVAL_MS)
+        if self._anim.interval() != interval:
+            self._anim.setInterval(interval)
         if active and not self._anim.isActive():
+            self._last_tick = time.monotonic()
             self._anim.start()
         elif not active and self._anim.isActive():
             self._anim.stop()
@@ -406,17 +415,23 @@ class CentralBg(QWidget):
         if not self._enabled or not self.isVisible():
             self._anim.stop()
             return
+        now = time.monotonic()
+        dt = max(0.0, now - self._last_tick)
+        self._last_tick = now
         changed = self._motion != "off"
-        delta = self._pulse - self._pulse_shown
+        target = max(self._pulse, self._pulse_peak)
+        self._pulse_peak = 0.0
+        delta = target - self._pulse_shown
         if abs(delta) > 0.003:
-            rate = _PULSE_ATTACK if delta > 0 else _PULSE_RELEASE
+            rate = 1.0 if delta > 0 else -math.expm1(-dt / _PULSE_RELEASE_S)
             self._pulse_shown += delta * rate
             changed = True
         else:
-            self._pulse_shown = self._pulse
+            changed = changed or self._pulse_shown != target
+            self._pulse_shown = target
         if self._tone_blend < 1.0:
             self._tone_blend = min(
-                1.0, self._tone_blend + _ANIM_INTERVAL_MS / _TONE_FADE_MS)
+                1.0, self._tone_blend + dt * 1000.0 / _TONE_FADE_MS)
             # Smoothstep: gentle in, gentle out.
             t = self._tone_blend * self._tone_blend * (3.0 - 2.0 * self._tone_blend)
             self._tone_a = _lerp_color(self._tone_fa, self._tone_ta, t)
@@ -425,14 +440,11 @@ class CentralBg(QWidget):
             changed = True
         if self._liq_blend < 1.0:
             self._liq_blend = min(
-                1.0, self._liq_blend + _ANIM_INTERVAL_MS / _TONE_FADE_MS)
+                1.0, self._liq_blend + dt * 1000.0 / _TONE_FADE_MS)
             changed = True
         if changed:
-            self._last_tick = time.monotonic()
             self.update()
-        else:
-            # Nothing moving (motion off + steady/zero pulse) — idle the timer.
-            self._sync_timer()
+        self._sync_timer()
 
     def _snap_tones(self) -> None:
         self._tone_a = QColor(self._tone_ta)
@@ -465,25 +477,37 @@ class CentralBg(QWidget):
         if not accent_alt.isValid():
             accent_alt = QColor(accent)
 
-        body_has_hue = _hls_saturation(ambient_bg) >= 0.04
-        body = ambient_bg if body_has_hue else surface
-        if not body_has_hue or _hls_saturation(accent) < 0.04:
-            accent = QColor(body)
-        if not body_has_hue or _hls_saturation(accent_alt) < 0.04:
-            accent_alt = QColor(accent)
+        # The adaptive driver flags a cover with no confident colour: the
+        # field goes neutral (greys at the cover's brightness) instead of
+        # borrowing the theme accent, which put a blue glow behind every
+        # black-and-white sleeve.
+        neutral = str(theme.token("ambient_neutral", "")).strip() == "1"
+        if neutral:
+            grey_l = ambient_bg.lightnessF() if ambient_bg.isValid() else 0.5
+            k = 0.7 + 0.6 * grey_l           # darker sleeve, dimmer field
+            neutral_c = QColor(128, 128, 128)
+            body = accent = accent_alt = neutral_c
+        else:
+            k = 1.0
+            body_has_hue = _hls_saturation(ambient_bg) >= 0.04
+            body = ambient_bg if body_has_hue else surface
+            if not body_has_hue or _hls_saturation(accent) < 0.04:
+                accent = QColor(body)
+            if not body_has_hue or _hls_saturation(accent_alt) < 0.04:
+                accent_alt = QColor(accent)
 
         # Album-derived hues placed in a visible band around the theme bg:
         # for a dark theme, tones sit a clear step *lighter* than bg (so the
         # gradient reads against black); for a light theme, a step darker.
         # Content stays legible because these are still well away from fg.
         if self._bg.lightnessF() > 0.5:
-            new_a = _bg_tone(body, 0.78, 0.22)
-            new_b = _bg_tone(accent, 0.70, 0.28)
-            new_c = _bg_tone(accent_alt, 0.62, 0.32)
+            new_a = _bg_tone(body, min(0.92, 0.78 * (2.0 - k)), 0.22)
+            new_b = _bg_tone(accent, min(0.90, 0.70 * (2.0 - k)), 0.28)
+            new_c = _bg_tone(accent_alt, min(0.88, 0.62 * (2.0 - k)), 0.32)
         else:
-            new_a = _bg_tone(body, 0.22, 0.34)
-            new_b = _bg_tone(accent, 0.29, 0.38)
-            new_c = _bg_tone(accent_alt, 0.34, 0.42)
+            new_a = _bg_tone(body, 0.22 * k, 0.34)
+            new_b = _bg_tone(accent, 0.29 * k, 0.38)
+            new_c = _bg_tone(accent_alt, 0.34 * k, 0.42)
 
         # Same targets as the fade already in flight (theme_changed re-fires
         # for scale changes and override re-emits): leave the blend alone.

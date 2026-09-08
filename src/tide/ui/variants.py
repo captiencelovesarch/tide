@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import glyphs, theming
+from . import marquee
 from . import scale
 from .spring_slider import SpringSlider
 from .widgets import (
@@ -664,7 +665,8 @@ class ControlsBundle(QWidget):
     def __init__(self, *, variant: str = "bracket", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.variant = variant
-        cls = {"large": LargeButton, "compact": CompactButton}.get(variant, BracketButton)
+        cls = {"large": LargeButton, "compact": CompactButton,
+               "icons": IconButton}.get(variant, BracketButton)
         self.shuffle_btn = cls("shuffle", glyph=glyphs.glyph("shuffle"))
         self.prev_btn = cls("prev", glyph=glyphs.glyph("prev"))
         self.play_btn = cls("play", glyph=glyphs.glyph("play"))
@@ -672,10 +674,24 @@ class ControlsBundle(QWidget):
         self.repeat_btn = cls("repeat", glyph=glyphs.glyph("repeat"))
         like = glyphs.glyph("like_off")
         self.like_btn = cls(like, glyph=like)
+        buttons = (self.shuffle_btn, self.prev_btn, self.play_btn,
+                   self.next_btn, self.repeat_btn, self.like_btn)
+        # modern faces, one per variant so the strip builder's picker
+        # shows four different rows and not one row at three sizes:
+        #   icons   — 20px icons, play in a filled circle
+        #   large   — 24px icons, play in a circle, roomier
+        #   compact — 16px icons, no circle, tight
+        #   bracket — the typed glyphs (▶ ⇋ ♡) as text pills
+        # brutalist's inline face has no rule for any of this; inert there.
+        if variant == "bracket":
+            for b in buttons:
+                b.setPreferText(True)
+        if variant in ("icons", "large"):
+            self.play_btn.setPrimary(True)
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(2 if variant != "large" else 6)
+        row.setSpacing({"large": 8, "icons": 4}.get(variant, 2))
         row.addWidget(self.shuffle_btn)
         row.addWidget(self.prev_btn)
         row.addWidget(self.play_btn)
@@ -691,10 +707,17 @@ class LargeButton(BracketButton):
     wall of chunky form buttons that fought the "soft controls" brief (and
     six of them no longer fit walkman's 480px window). Now: transparent,
     borderless, glyph-forward, accent text on hover/active.
+
+    modern: the base sheet's transport face with a 24px icon.
     """
+
+    ICON_SIZE_HINT = "large"
+    DEFAULT_ROLE = "transport"
 
     def _apply_theme(self, theme) -> None:
         super()._apply_theme(theme)
+        if self._modern():
+            return
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
         dim = theme.token("dim", "#666") if theme else "#666"
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
@@ -709,15 +732,25 @@ class LargeButton(BracketButton):
         )
 
     def _update_text(self) -> None:
+        if self._modern():
+            super()._update_text()
+            return
         # Large is glyph-forward: the size carries the weight, not a box.
         self.setText(self._glyph or self._label)
 
 
 class CompactButton(BracketButton):
-    """Tiny icon-only buttons for the dj-deck / dense layouts."""
+    """Tiny icon-only buttons for the dj-deck / dense layouts.
+
+    modern: the base sheet's transport face with a 16px icon, no circle."""
+
+    ICON_SIZE_HINT = "compact"
+    DEFAULT_ROLE = "transport"
 
     def _apply_theme(self, theme) -> None:
         super()._apply_theme(theme)
+        if self._modern():
+            return
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
         dim = theme.token("dim", "#666") if theme else "#666"
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
@@ -732,8 +765,20 @@ class CompactButton(BracketButton):
         )
 
     def _update_text(self) -> None:
+        if self._modern():
+            super()._update_text()
+            return
         # Compact always uses glyph (no brackets).
         self.setText(self._glyph or self._label)
+
+
+class IconButton(BracketButton):
+    """The modern personality's transport: SVG icons at 20px, play as a
+    filled circle. Picked by every modern theme's [slots]. In brutalist
+    it has no face of its own and degrades to the bracket button."""
+
+    ICON_SIZE_HINT = "transport"
+    DEFAULT_ROLE = "transport"
 
 
 def make_controls(slug: str) -> ControlsBundle:
@@ -760,14 +805,8 @@ class InlineNowLabel(NowPlayingLabel):
             p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft,
                        theming.styled_case("nothing playing", self._theme))
             return
-        primary = (
-            f"{self._artist} — {self._title}" if (self._artist and self._title)
-            else (self._title or self._artist)
-        )
-        primary = fm.elidedText(theming.styled_case(primary, self._theme),
-                                Qt.ElideRight, rect.width())
-        p.setPen(fg)
-        p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, primary)
+        primary = theming.styled_case(self._primary_text(), self._theme)
+        self._paint_line(p, rect, primary, fm, "primary", color=fg, scroll=True)
 
 
 class CenteredNowLabel(NowPlayingLabel):
@@ -786,10 +825,9 @@ class CenteredNowLabel(NowPlayingLabel):
                        theming.styled_case("nothing playing", self._theme))
             return
         line1 = theming.styled_case(self._title or self._artist, self._theme)
-        line1 = fm.elidedText(line1, Qt.ElideRight, rect.width())
         line1_rect = QRect(rect.x(), rect.y(), rect.width(), fm.height())
-        p.setPen(fg)
-        p.drawText(line1_rect, Qt.AlignHCenter | Qt.AlignVCenter, line1)
+        self._paint_line(p, line1_rect, line1, fm, "primary", color=fg, scroll=True,
+                         flags=Qt.AlignHCenter | Qt.AlignVCenter)
         # line2: artist · album
         parts = []
         if self._artist:
@@ -798,11 +836,66 @@ class CenteredNowLabel(NowPlayingLabel):
             parts.append(theming.styled_case(self._album, self._theme))
         line2 = "  ·  ".join(parts)
         if line2:
-            line2 = fm.elidedText(line2, Qt.ElideRight, rect.width())
             line2_rect = QRect(rect.x(), rect.y() + fm.height() + 2,
                                rect.width(), fm.height())
+            self._paint_line(p, line2_rect, line2, fm, "secondary", color=dim,
+                             flags=Qt.AlignHCenter | Qt.AlignVCenter)
+
+
+class HeadlineNowLabel(NowPlayingLabel):
+    """Title on top at the title size, artist beneath in dim body text.
+
+    The modern strip's label: the song is the headline, the artist the
+    byline. Album, plays/likes and the status ride the byline after the
+    artist, dim and elided, so nothing the stacked label showed is lost.
+    The title scrolls when it overruns the strip, like the others.
+    """
+
+    def _title_font(self) -> QFont:
+        from .. import material
+        f = QFont(self.font())
+        # From the live font, not the theme's size_pt: the app font already
+        # carries the ui scale and any user size override.
+        f.setPointSizeF(max(1.0, self.font().pointSizeF() * material.TITLE_SCALE))
+        f.setWeight(QFont.Weight.Medium)
+        return f
+
+    def paintEvent(self, _ev) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        fg = _qcolor(self._theme, "fg", "#e6e6e6")
+        dim = _qcolor(self._theme, "dim", "#666")
+        rect = self.rect().adjusted(0, 2, -8, -2)
+        body_fm = QFontMetrics(self.font())
+        if not self._title and not self._status:
             p.setPen(dim)
-            p.drawText(line2_rect, Qt.AlignHCenter | Qt.AlignVCenter, line2)
+            p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft,
+                       theming.styled_case("nothing playing", self._theme))
+            return
+
+        title_font = self._title_font()
+        title_fm = QFontMetrics(title_font)
+        headline = theming.styled_case(self._title or self._artist, self._theme)
+
+        byline_parts: list[str] = []
+        if self._title and self._artist:
+            byline_parts.append(theming.styled_case(self._artist, self._theme))
+        for extra in (self._album, self._insights, self._status):
+            if extra:
+                byline_parts.append(theming.styled_case(extra, self._theme))
+        byline = "  ·  ".join(byline_parts)
+
+        block_h = title_fm.height() + (2 + body_fm.height() if byline else 0)
+        top = rect.y() + max(0, (rect.height() - block_h) // 2)
+        line1_rect = QRect(rect.x(), top, rect.width(), title_fm.height())
+        p.setFont(title_font)
+        self._paint_line(p, line1_rect, headline, title_fm, "primary", color=fg, scroll=True)
+
+        if byline:
+            line2_rect = QRect(rect.x(), top + title_fm.height() + 2,
+                               rect.width(), body_fm.height())
+            p.setFont(self.font())
+            self._paint_line(p, line2_rect, byline, body_fm, "secondary", color=dim)
 
 
 def make_now_label(slug: str) -> NowPlayingLabel:
@@ -811,6 +904,8 @@ def make_now_label(slug: str) -> NowPlayingLabel:
         return InlineNowLabel()
     if slug == "centered":
         return CenteredNowLabel()
+    if slug == "headline":
+        return HeadlineNowLabel()
     return NowPlayingLabel()
 
 
@@ -822,8 +917,8 @@ def make_now_label(slug: str) -> NowPlayingLabel:
 PROGRESS_VARIANTS = ["blocks", "bar", "thin", "dotted"]
 VOLUME_VARIANTS = ["blocks", "slider", "knob", "wedge", "spring"]
 ALBUM_ART_VARIANTS = ["square", "circle", "polaroid"]
-CONTROLS_VARIANTS = ["bracket", "large", "compact"]
-NOW_LABEL_VARIANTS = ["stacked", "inline", "centered"]
+CONTROLS_VARIANTS = ["bracket", "large", "compact", "icons"]
+NOW_LABEL_VARIANTS = ["stacked", "inline", "centered", "headline"]
 
 
 def all_variant_slugs() -> dict[str, list[str]]:

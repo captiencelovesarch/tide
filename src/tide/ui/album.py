@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from .. import api, qthreads, theming
 from . import art_cache
-from .headings import line_heading as _line_heading
+from .headings import Heading, line_heading as _line_heading
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
 
@@ -78,9 +78,11 @@ class AlbumView(QWidget):
 
     def _build_ui(self) -> None:
         self.back_btn = BracketButton("back")
+        self.back_btn.setIconKey("back")
+        self.back_btn.setRole("pill")
         self.back_btn.clicked.connect(self.back_requested.emit)
 
-        self.heading = QLabel(_line_heading("album"))
+        self.heading = Heading("album")
         self.heading.setProperty("class", "dim")
         self.heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -182,7 +184,7 @@ class AlbumView(QWidget):
         self._current_browse_id = browse_id
         self._art_for_browse_id = browse_id
         self.add_library_btn.hide()
-        self.heading.setText(_line_heading(f"album · loading…"))
+        self.heading.set_label(f"album · loading…")
         self.title_label.setText(theming.styled_case(title_hint or "loading…"))
         self.artist_label.setText("")
         self.meta_label.setText("")
@@ -216,7 +218,7 @@ class AlbumView(QWidget):
             return  # user already navigated away
         self._current = detail
 
-        self.heading.setText(_line_heading(f"album · {len(detail.tracks)}"))
+        self.heading.set_label(f"album · {len(detail.tracks)}")
         self.title_label.setText(theming.styled_case(detail.title))
         self.artist_label.setText(theming.styled_case(detail.artists or ""))
         meta_parts = [p for p in (detail.year, detail.duration, f"{detail.track_count} tracks") if p]
@@ -241,7 +243,7 @@ class AlbumView(QWidget):
         self.status_message.emit(theming.styled_case(f"{detail.title} · {len(detail.tracks)} tracks"))
 
     def _on_failed(self, msg: str) -> None:
-        self.heading.setText(_line_heading("album load failed"))
+        self.heading.set_label("album load failed")
         self.status_message.emit(f"album: {msg}")
 
     # ---------- add to library (v1.5) ----------

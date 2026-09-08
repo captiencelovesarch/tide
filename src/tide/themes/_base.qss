@@ -39,6 +39,10 @@ QWidget:focus { outline: 0; }
 QLabel { background: transparent; color: @fg; }
 QLabel#dim, QLabel.dim { color: @dim; }
 QLabel#accent, QLabel.accent { color: @accent; }
+/*[if modern]*/
+QLabel.title { font-size: @font_size_title; font-weight: @weight_title; }
+QLabel.display { font-size: @font_size_display; font-weight: @weight_display; }
+/*[endif]*/
 
 /* ---------- inputs ---------- */
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {
@@ -46,14 +50,14 @@ QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {
     background: @bg;
 /*[endif]*/
 /*[if modern]*/
-    background: @bg_alt;
+    background: @surface_1;
 /*[endif]*/
     color: @fg;
 /*[if brutalist]*/
     border: @border solid @border_col;
 /*[endif]*/
 /*[if modern]*/
-    border: @border solid @border_dim;
+    border: @border solid @outline;
 /*[endif]*/
     border-radius: @radius;
 /*[if brutalist]*/
@@ -95,14 +99,14 @@ QPushButton, QToolButton {
     background: @bg;
 /*[endif]*/
 /*[if modern]*/
-    background: @bg_alt;
+    background: @surface_1;
 /*[endif]*/
     color: @fg;
 /*[if brutalist]*/
     border: @border solid @border_col;
 /*[endif]*/
 /*[if modern]*/
-    border: @border solid @border_dim;
+    border: @border solid @outline;
 /*[endif]*/
     border-radius: @radius;
 /*[if brutalist]*/
@@ -118,12 +122,48 @@ QPushButton:pressed, QToolButton:pressed { background: @accent; color: @bg; }
 QPushButton:disabled, QToolButton:disabled { color: @dim; border-color: @border_dim; }
 /*[endif]*/
 /*[if modern]*/
-QPushButton:hover, QToolButton:hover { background: @hover_bg; color: @hover_fg; border-color: @border_col; }
+QPushButton:hover, QToolButton:hover { background: @surface_2; color: @hover_fg; border-color: @outline; }
 QPushButton:pressed, QToolButton:pressed { background: @sel_bg; color: @sel_fg; }
 QPushButton:disabled, QToolButton:disabled { color: @dim; }
 /*[endif]*/
 QPushButton:focus, QToolButton:focus { border-color: @accent; }
 QToolButton::menu-indicator { image: none; }
+/*[if modern]*/
+
+/* ---------- BracketButton, the modern face ---------- */
+/* brutalist styles this widget inline: bracketed text, inverting hover.
+   modern hands it to the sheet: bare labels on a translucent surface, an
+   SVG icon where the action has one. The widget sets `role`: pill (text,
+   the default), icon (icon only), transport (the strip's play row), row
+   (the nav rail). `primary` is the play button; `current` the rail's
+   active view. */
+QPushButton#BracketButton {
+    background: transparent;
+    color: @fg;
+    border: 0;
+    border-radius: @radius;
+    padding: 6px 12px;
+}
+QPushButton#BracketButton:hover { background: @surface_2; color: @fg; }
+QPushButton#BracketButton:pressed { background: @surface_3; }
+QPushButton#BracketButton:disabled { color: @dim; background: transparent; }
+QPushButton#BracketButton[activeState="true"] { color: @accent; }
+QPushButton#BracketButton[role="pill"] { background: @surface_1; padding: 6px 14px; }
+QPushButton#BracketButton[role="pill"]:hover { background: @surface_2; }
+QPushButton#BracketButton[role="pill"][activeState="true"] { background: @surface_2; color: @accent; }
+QPushButton#BracketButton[role="icon"],
+QPushButton#BracketButton[role="transport"] { padding: 6px; }
+QPushButton#BracketButton[role="row"] { text-align: left; padding: 8px 12px; }
+QPushButton#BracketButton[role="row"][current="true"] { background: @surface_2; color: @accent; }
+QPushButton#BracketButton[primary="true"] {
+    background: @fg;
+    color: @bg;
+    border-radius: @radius_round;
+    padding: 10px;
+}
+QPushButton#BracketButton[primary="true"]:hover { background: @accent; color: @bg; }
+QPushButton#BracketButton[primary="true"]:disabled { background: @surface_2; }
+/*[endif]*/
 
 /*[if brutalist]*/
 QDialogButtonBox QPushButton { min-width: 80px; }
@@ -159,7 +199,7 @@ QCheckBox::indicator {
     background: @bg;
 /*[endif]*/
 /*[if modern]*/
-    background: @bg_alt;
+    background: @surface_1;
     border-radius: 4px;
 /*[endif]*/
 }
@@ -172,7 +212,7 @@ QRadioButton::indicator {
     width: 16px;
     height: 16px;
     border: @border solid @border_col;
-    background: @bg_alt;
+    background: @surface_1;
     border-radius: 8px;
 }
 /*[endif]*/
@@ -191,7 +231,7 @@ QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
     background: @bg;
 /*[endif]*/
 /*[if modern]*/
-    background: @bg_alt;
+    background: @surface_1;
 /*[endif]*/
 }
 QCheckBox:disabled, QRadioButton:disabled { color: @dim; }
@@ -202,14 +242,14 @@ QComboBox {
     background: @bg;
 /*[endif]*/
 /*[if modern]*/
-    background: @bg_alt;
+    background: @surface_1;
 /*[endif]*/
     color: @fg;
 /*[if brutalist]*/
     border: @border solid @border_col;
 /*[endif]*/
 /*[if modern]*/
-    border: @border solid @border_dim;
+    border: @border solid @outline;
 /*[endif]*/
     border-radius: @radius;
 /*[if brutalist]*/
@@ -266,30 +306,35 @@ QComboBox QAbstractItemView::item { padding: 6px 12px; }
 /*[endif]*/
 
 /* ---------- slider ---------- */
+/* Grooves are thick on both sides of the split — a hairline bar is a
+   worse target and reads as a divider. Each personality keeps its own
+   shape language: brutalist stays a square block meter, modern is a pill
+   matching the SpringSlider it sits beside. */
 QSlider::groove:horizontal {
-    height: 4px;
-    background: @border_dim;
 /*[if brutalist]*/
+    height: 12px;
     border: 0;
 /*[endif]*/
 /*[if modern]*/
-    border-radius: 2px;
+    height: 14px;
+    border-radius: 7px;
 /*[endif]*/
+    background: @border_dim;
 }
 QSlider::handle:horizontal {
     background: @fg;
 /*[if brutalist]*/
     border: @border solid @border_col;
     width: 10px;
+    height: 18px;
+    margin: -3px 0;
 /*[endif]*/
 /*[if modern]*/
     border: 0;
-    width: 14px;
-    height: 14px;
-/*[endif]*/
-    margin: -6px 0;
-/*[if modern]*/
-    border-radius: 7px;
+    width: 20px;
+    height: 20px;
+    margin: -3px 0;
+    border-radius: 10px;
 /*[endif]*/
 }
 QSlider::handle:horizontal:hover { background: @accent; }
@@ -297,7 +342,7 @@ QSlider::handle:horizontal:hover { background: @accent; }
 QSlider::sub-page:horizontal { background: @accent; }
 /*[endif]*/
 /*[if modern]*/
-QSlider::sub-page:horizontal { background: @accent; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: @accent; border-radius: 7px; }
 /*[endif]*/
 
 /* ---------- group box ---------- */

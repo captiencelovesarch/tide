@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import settings as settings_module, theming
-from .headings import line_heading
+from .headings import Heading, line_heading
+from . import scale
 
 
 # The blurb row doubles as the save-refusal line.
@@ -63,8 +64,7 @@ class KeymapEditor(QDialog):
         super().__init__(parent)
         self.setWindowTitle("tide — keymap")
         self.setModal(True)
-        self.setMinimumWidth(560)
-        self.resize(600, 680)
+        scale.fit_dialog(self, 600, 680, min_width=560)
 
         # Lazy: window.py is heavy — keep it out of import time so the
         # settings dialog can import us cheaply.
@@ -90,7 +90,7 @@ class KeymapEditor(QDialog):
         for action in self._actions:
             if action.group not in seen_groups:
                 seen_groups.append(action.group)
-                heading = QLabel(line_heading(action.group, 40))
+                heading = Heading(action.group, 40)
                 heading.setProperty("class", "dim")
                 if grid is not None:
                     body.addLayout(grid)

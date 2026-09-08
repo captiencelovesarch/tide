@@ -11,6 +11,8 @@ as a tofu box in any of the bundled fonts, it didn't make the cut.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 
 NAV_ICON_SETS: dict[str, dict[str, str]] = {
     # Semantic mono symbols. Hand-validated against IBM Plex Mono +
@@ -59,11 +61,13 @@ def icon_for(set_name: str, slot: str) -> str | None:
     return bag.get(slot)
 
 
+@lru_cache(maxsize=None)
 def svg_text_for(slot: str) -> str | None:
     """Return the raw SVG text for ``slot`` (read from
     ``src/tide/icons/svg/<slot>.svg``) or None if no SVG exists for that
-    slot. The raw text contains ``stroke="currentColor"``; callers substitute
-    the active theme's fg color before rendering."""
+    slot. The raw text contains ``currentColor``; callers substitute the
+    ink before rendering. Cached: the files ship with the package and
+    every modern button re-resolves its icon on each restyle."""
     from pathlib import Path
     p = Path(__file__).resolve().parent.parent / "icons" / "svg" / f"{slot}.svg"
     if not p.is_file():

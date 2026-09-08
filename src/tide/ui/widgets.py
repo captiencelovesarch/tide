@@ -16,20 +16,73 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy, QWidget
 
 from .. import theming
+from . import marquee
+from .marquee import Marquee
 
 
 def _color(theme, name: str, default: str) -> QColor:
     return QColor(theme.token(name, default)) if theme else QColor(default)
 
 
-class BracketButton(QPushButton):
-    """Text button rendered like `[play]`. Hover inverts bg/fg.
+def paint_popover_panel(widget: QWidget, theme) -> None:
+    """Paint an opaque, rounded panel with a hairline for a translucent
+    top-level popover. A stylesheet ``background`` on a QFrame under
+    ``WA_TranslucentBackground`` never reaches the window buffer (the
+    speed and fx popovers floated as bare controls over the backdrop),
+    so the spring faces paint their own."""
+    from .. import material
+    fill, line = material.panel_colors(theme)
+    radius = float(theming.effective_radius_px(theme))
+    p = QPainter(widget)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    rect = QRectF(widget.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+    p.setPen(QPen(line, 1.0))
+    p.setBrush(fill)
+    p.drawRoundedRect(rect, radius, radius)
+    p.end()
 
-    Honors the theme's control_style:
+
+# Rendered SVG pixmaps by (svg text, ink, px). Every modern BracketButton
+# re-resolves its icon on each theme_changed, and the adaptive driver emits
+# that per track — without this each emission would re-rasterize ~100 SVGs
+# twice (normal + disabled). Bounded: a theme flip with a new fg adds one
+# entry per icon, so a few hundred covers a long session.
+_SVG_PIX_CACHE: dict[tuple[str, str, int], QPixmap] = {}
+_SVG_PIX_CACHE_MAX = 512
+
+
+class BracketButton(QPushButton):
+    """Text button rendered like `[play]` — in brutalist. In modern the
+    same widget wears a bare label on a translucent surface, or an SVG
+    icon when the action has one, styled by the base sheet instead of
+    inline (see ``_base.qss``, "BracketButton, the modern face").
+
+    brutalist honors the theme's control_style:
       - "bracket"  -> "[label]"
       - "glyph"    -> uses `glyph` (e.g. "▶") if supplied, else label
-      - "icon"     -> falls back to label (icons land later)
+      - "icon"     -> falls back to label
+
+    modern ignores control_style. Its face is decided per button:
+      - an explicit icon key (``setIconKey``) or a glyph the registry
+        knows (``glyphs.key_for``) that has an SVG → that icon
+      - a glyph the user retyped in the glyph editor → the glyph text,
+        never an icon (the override is the user's face for that button)
+      - otherwise the bare label
+
+    ``role`` shapes it: "pill" (text, the default), "icon" (icon only),
+    "transport" (the strip's play row), "row" (the nav rail). Auto when
+    unset: icon-only for a key-derived icon, pill otherwise. ``primary``
+    marks the play button; ``current`` the rail's active view.
     """
+
+    # Icon pixel sizes before ui-scale, by role / size hint. Every
+    # transport size sits under PRIMARY_ICON_PX so play stays the biggest
+    # thing in the row whichever variant a layout picked.
+    _ICON_PX = {"icon": 18, "pill": 16, "row": 18, "transport": 20,
+                "large": 24, "compact": 16}
+    # Subclasses (LargeButton / CompactButton / IconButton) pin these.
+    ICON_SIZE_HINT: str = ""
+    DEFAULT_ROLE: str = ""
 
     def __init__(self, label: str, glyph: str | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -47,10 +100,29 @@ class BracketButton(QPushButton):
         # using the active theme's fg color (substituted for the SVG's
         # ``currentColor`` token).
         self._svg_text: str | None = None
+        # modern-only: an icon looked up by key in icons/svg (brutalist
+        # ignores it and keeps its text face).
+        self._icon_key: str | None = None
+        self._role: str = ""
+        self._role_applied: str = ""
+        self._primary = False
+        self._current = False
+        self._muted = False
+        self._auto_tooltip = False
+        # True while the modern face has a key-derived SVG in the native
+        # icon slot, so a flip back to brutalist knows to clear it.
+        self._modern_icon = False
+        # True while the modern row role has widened the size policy.
+        self._row_expanded = False
+        # modern: show the glyph as text even when an icon exists (the
+        # "bracket" transport variant keeps its typed faces).
+        self._prefer_text = False
+        # Collapsed rail: icon only, label in the tooltip.
+        self._label_hidden = False
         self.setFlat(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
-        self._apply_theme(theming.manager().current())
+        self._apply_theme(theming.manager().current_effective())
         theming.manager().theme_changed.connect(self._apply_theme)
 
     def setLabel(self, label: str) -> None:
@@ -70,13 +142,92 @@ class BracketButton(QPushButton):
             return
         self._active_state = on
         self.setProperty("activeState", on)
-        st = self.style()
-        st.unpolish(self)
-        st.polish(self)
+        self._repolish()
+        if self._modern():
+            self._update_text()     # icon ink follows the state
         self.update()
 
     def activeState(self) -> bool:
         return self._active_state
+
+    # ----- modern-only shape controls (no-ops for brutalist's face) -----
+
+    def setIconKey(self, key: str | None) -> None:
+        """Name an SVG in icons/svg for the modern face. brutalist keeps
+        its text. Pass None to fall back to the glyph / label."""
+        self._icon_key = key or None
+        self._update_text()
+
+    def iconKey(self) -> str | None:
+        return self._icon_key
+
+    def setRole(self, role: str) -> None:
+        """Force a shape: "pill" / "icon" / "transport" / "row". Empty
+        string returns to automatic."""
+        self._role = str(role or "")
+        self._update_text()
+
+    def role(self) -> str:
+        return self._role_applied
+
+    def setPrimary(self, on: bool) -> None:
+        """The play button's filled circle (modern)."""
+        on = bool(on)
+        if on == self._primary:
+            return
+        self._primary = on
+        self.setProperty("primary", on)
+        self._repolish()
+        self._update_text()
+
+    def setCurrent(self, on: bool) -> None:
+        """The rail's active view (modern: surface + accent)."""
+        on = bool(on)
+        if on == self._current:
+            return
+        self._current = on
+        self.setProperty("current", on)
+        self._repolish()
+        self._update_text()
+
+    def isCurrent(self) -> bool:
+        return self._current
+
+    def setPreferText(self, on: bool) -> None:
+        """modern: keep the glyph as text instead of swapping in its icon."""
+        on = bool(on)
+        if on == self._prefer_text:
+            return
+        self._prefer_text = on
+        self._update_text()
+
+    def setLabelHidden(self, on: bool) -> None:
+        """Icon-only face with the label as tooltip (the collapsed rail).
+        modern: the icon role. brutalist: the glyph prefix alone, or
+        nothing but the SVG."""
+        on = bool(on)
+        if on == self._label_hidden:
+            return
+        self._label_hidden = on
+        self._update_text()
+
+    def setMuted(self, on: bool) -> None:
+        """Dim face for a control whose feature is off but clickable (the
+        fx rack bypassed). Distinct from disabled: still takes input."""
+        on = bool(on)
+        if on == self._muted:
+            return
+        self._muted = on
+        self.setProperty("muted", on)
+        self._repolish()
+        self._update_text()
+
+    def _repolish(self) -> None:
+        st = self.style()
+        st.unpolish(self)
+        st.polish(self)
+
+    # ----- icons -----
 
     def setIcon(self, icon) -> None:  # type: ignore[override]
         """Polymorphic setter. Strings (or None) set the unicode glyph
@@ -105,50 +256,127 @@ class BracketButton(QPushButton):
         self._svg_text = svg_text
         if svg_text is not None:
             self._icon = None
-            self._refresh_svg_icon()
         else:
             super().setIcon(QIcon())
         self._update_text()
 
-    def _refresh_svg_icon(self) -> None:
-        if not self._svg_text:
-            return
-        # Recolor: replace SVG's ``currentColor`` token with the active
-        # theme's fg so the icon sits visually with the label text.
-        fg = "#e6e6e6"
-        if getattr(self, "_theme", None) is not None:
-            fg = self._theme.token("fg", "#e6e6e6")
-        svg = self._svg_text.replace("currentColor", fg)
+    def _modern(self) -> bool:
+        return getattr(self._theme, "aesthetic", "") == "modern"
+
+    def _tok(self, name: str, default: str) -> str:
+        theme = getattr(self, "_theme", None)
+        return theme.token(name, default) if theme is not None else default
+
+    # The primary (play) circle: icon + padding, one size for every
+    # variant so the circle is a circle. ``theming._substitute`` derives
+    # @radius_round from the same numbers — keep the two in step.
+    PRIMARY_ICON_PX = 24
+    PRIMARY_PAD_PX = 10
+
+    @classmethod
+    def primary_diameter(cls) -> int:
+        from . import scale as _scale
+        return _scale.px(cls.PRIMARY_ICON_PX) + 2 * _scale.px(cls.PRIMARY_PAD_PX)
+
+    def _icon_px(self, role: str) -> int:
+        from . import scale as _scale
+        if self._primary:
+            return _scale.px(self.PRIMARY_ICON_PX)
+        hint = type(self).ICON_SIZE_HINT
+        base = self._ICON_PX.get(hint) or self._ICON_PX.get(role) or 18
+        return _scale.px(base)
+
+    def _fit_primary(self) -> None:
+        """Pin the primary button square so QSS's round radius fits; let
+        it go again when the button stops being primary or leaves modern.
+        Qt does not clamp a border-radius wider than the box, it just
+        stops drawing it round, so the box has to match the radius."""
+        if self._primary and self._modern():
+            d = self.primary_diameter()
+            if self.minimumSize() != QSize(d, d):
+                self.setFixedSize(d, d)
+        elif self.minimumSize() == self.maximumSize() and self.minimumWidth() > 0:
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(16777215, 16777215)
+
+    def _render_svg(self, svg_text: str, ink: str, px: int) -> QPixmap | None:
+        key = (svg_text, ink, px)
+        hit = _SVG_PIX_CACHE.get(key)
+        if hit is not None:
+            return hit
         try:
-            renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+            renderer = QSvgRenderer(QByteArray(
+                svg_text.replace("currentColor", ink).encode("utf-8")))
         except Exception:
-            return
-        # Pull scale.px so the icon grows with ui_scale alongside text.
-        try:
-            from . import scale as _scale
-            target = _scale.px(16)
-        except Exception:
-            target = 16
-        pix = QPixmap(target, target)
+            return None
+        pix = QPixmap(px, px)
         pix.fill(Qt.transparent)
         painter = QPainter(pix)
         try:
             renderer.render(painter)
         finally:
             painter.end()
-        super().setIcon(QIcon(pix))
-        self.setIconSize(QSize(target, target))
+        if len(_SVG_PIX_CACHE) >= _SVG_PIX_CACHE_MAX:
+            _SVG_PIX_CACHE.clear()
+        _SVG_PIX_CACHE[key] = pix
+        return pix
+
+    def _refresh_svg_icon(self, svg_text: str | None = None, *,
+                          ink: str | None = None, px: int | None = None) -> None:
+        """Render ``svg_text`` (default: the explicit nav SVG) into the
+        native icon slot. brutalist: fg ink at 16px, as it always was.
+        modern passes ink / size for the role and gets a dim disabled
+        state too, since ``color: @dim`` can't reach a pixmap."""
+        svg_text = svg_text if svg_text is not None else self._svg_text
+        if not svg_text:
+            return
+        if ink is None:
+            ink = self._tok("fg", "#e6e6e6")
+        if px is None:
+            try:
+                from . import scale as _scale
+                px = _scale.px(16)
+            except Exception:
+                px = 16
+        pix = self._render_svg(svg_text, ink, px)
+        if pix is None:
+            return
+        icon = QIcon(pix)
+        if self._modern():
+            dim = self._render_svg(svg_text, self._tok("dim", "#666"), px)
+            if dim is not None:
+                icon.addPixmap(dim, QIcon.Disabled)
+        super().setIcon(icon)
+        self.setIconSize(QSize(px, px))
 
     def _apply_theme(self, theme) -> None:
         self._theme = theme
+        # All styling lives in QSS for BracketButton, set as object name so
+        # the stylesheet can target it precisely.
+        self.setObjectName("BracketButton")
+        if self._modern():
+            # The base sheet owns the face (role / primary / current rules).
+            self.setStyleSheet("")
+            self._update_text()
+            self.update()
+            return
+        self._fit_primary()
+        if self._row_expanded:
+            self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            self._row_expanded = False
+        if self._modern_icon:
+            # Back from modern: drop the icon it put here (an explicit nav
+            # SVG survives — re-rendered just below) and its tooltip.
+            super().setIcon(QIcon())
+            self._modern_icon = False
+            if self._auto_tooltip:
+                self.setToolTip("")
+                self._auto_tooltip = False
         # Re-render SVG icon (if any) against the new fg color so it tracks
         # theme + adaptive accent changes seamlessly.
         if self._svg_text:
             self._refresh_svg_icon()
         self._update_text()
-        # All styling lives in QSS for BracketButton, set as object name so
-        # the stylesheet can target it precisely.
-        self.setObjectName("BracketButton")
         bg = theme.token("bg", "#000") if theme else "#000"
         fg = theme.token("fg", "#fff") if theme else "#fff"
         hover_bg = theme.token("sel_bg", fg) if theme else fg
@@ -163,6 +391,7 @@ class BracketButton(QPushButton):
             f"  padding: 4px 8px;"
             f"}}"
             f'QPushButton#BracketButton[activeState="true"] {{ color: {accent}; }}'
+            f'QPushButton#BracketButton[current="true"] {{ color: {accent}; }}'
             f"QPushButton#BracketButton:hover {{"
             f"  background: {hover_bg};"
             f"  color: {hover_fg};"
@@ -172,6 +401,9 @@ class BracketButton(QPushButton):
         self.update()
 
     def _update_text(self) -> None:
+        if self._modern():
+            self._update_modern_face()
+            return
         style = "bracket"
         if getattr(self, "_theme", None) is not None:
             style = str(self._theme.t("layout", "control_style", "bracket"))
@@ -183,10 +415,114 @@ class BracketButton(QPushButton):
             base = f"[{self._label}]"
         # Decorative icon prefix (nav icon set). Prepended to whatever the
         # style chose so it works in bracket / glyph / icon modes alike.
-        if self._icon:
+        if self._label_hidden and (self._icon or self._svg_text):
+            # Collapsed rail: the glyph prefix alone, or just the SVG.
+            self.setText(self._icon or "")
+            if self._label and not self._auto_tooltip and not self.toolTip():
+                self.setToolTip(self._label)
+                self._auto_tooltip = True
+        elif self._icon:
             self.setText(f"{self._icon} {base}")
+            if self._auto_tooltip:
+                self.setToolTip("")
+                self._auto_tooltip = False
         else:
             self.setText(base)
+            if self._auto_tooltip:
+                self.setToolTip("")
+                self._auto_tooltip = False
+
+    def _resolve_svg(self) -> tuple[str | None, bool]:
+        """(svg text, key_derived). An explicit nav SVG wins; then the
+        icon key; then a glyph the registry recognises. A glyph the user
+        retyped resolves to no key (glyphs.key_for), so it stays text."""
+        if self._svg_text:
+            return self._svg_text, False
+        if self._prefer_text:
+            return None, False
+        from .. import glyphs
+        from . import nav_icons
+        key = self._icon_key or glyphs.key_for(self._glyph or "")
+        if key and not glyphs.is_overridden(key):
+            svg = nav_icons.svg_text_for(key)
+            if svg:
+                return svg, True
+        return None, False
+
+    def _update_modern_face(self) -> None:
+        from .. import glyphs
+        svg, key_derived = self._resolve_svg()
+
+        # Text candidate: a glyph without an icon shows as itself (bare); a
+        # label shows bare. When the icon carries a glyph face that also
+        # leads the label ("zzz 12m" behind a moon), drop that face.
+        base = self._glyph if (self._glyph and svg is None) else self._label
+        face_stripped = False
+        if svg is not None and self._icon_key in glyphs.DEFAULT_PACK:
+            face = glyphs.glyph(self._icon_key)
+            if face and base.startswith(face):
+                base = base[len(face):].strip()
+                face_stripped = True
+
+        role = self._role or type(self).DEFAULT_ROLE
+        if not role:
+            if svg is not None and key_derived:
+                # Icon-only, unless a state suffix survived the face strip
+                # (an armed sleep timer: moon + "12m").
+                role = "pill" if (face_stripped and base) else "icon"
+            else:
+                role = "pill"
+        if self._label_hidden and (svg is not None or self._icon):
+            role = "icon"
+        text_hidden = (svg is not None and role in ("icon", "transport")) or (
+            self._label_hidden and self._icon is not None and svg is None)
+
+        if svg is not None:
+            if self._primary:
+                ink = self._tok("bg", "#000")
+            elif self._active_state or self._current:
+                ink = self._tok("accent", "#d4b95e")
+            elif self._muted:
+                ink = self._tok("dim", "#666")
+            else:
+                ink = self._tok("fg", "#e6e6e6")
+            self._refresh_svg_icon(svg, ink=ink, px=self._icon_px(role))
+            self._modern_icon = not self._svg_text
+        else:
+            super().setIcon(QIcon())
+            self._modern_icon = False
+
+        if text_hidden and self._label_hidden and self._icon and svg is None:
+            text = self._icon                      # the glyph alone
+        elif text_hidden:
+            text = ""
+        else:
+            text = f"{self._icon} {base}" if (self._icon and svg is None) else base
+        self.setText(text)
+        self._fit_primary()
+
+        # Icon-only buttons keep their name for the tooltip, unless the
+        # caller set a richer one (the strip's shortcut tips).
+        if text_hidden and self._label and self._label != self._glyph:
+            if not self.toolTip() or self._auto_tooltip:
+                self.setToolTip(self._label)
+                self._auto_tooltip = True
+        elif self._auto_tooltip:
+            self.setToolTip("")
+            self._auto_tooltip = False
+
+        # Rail rows fill the rail so the hover / current surface spans it.
+        if role == "row" and not self._row_expanded:
+            self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self._row_expanded = True
+        elif role != "row" and self._row_expanded:
+            self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            self._row_expanded = False
+
+        if role != self._role_applied:
+            self._role_applied = role
+            self.setProperty("role", role)
+            self._repolish()
 
 
 class MonoProgress(QWidget):
@@ -209,7 +545,7 @@ class MonoProgress(QWidget):
         self._position = 0.0
         self._duration = 0.0
         self._enabled = False
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         from . import scale as _scale
         self.setFixedHeight(_scale.px(22))
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -318,7 +654,7 @@ class MonoVolume(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._volume = 80
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
         from . import scale as _scale
         self.setFixedHeight(_scale.px(22))
@@ -440,7 +776,7 @@ class AlbumArt(QLabel):
         # The 1px fg border is part of the tile look in lists/strip; big
         # standalone art (the mini player) turns it off via set_framed.
         self._framed = True
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self._apply_theme(self._theme)
         theming.manager().theme_changed.connect(self._apply_theme)
         self._render_empty()
@@ -599,7 +935,9 @@ class AlbumArt(QLabel):
 
     def _render_empty(self) -> None:
         self.setPixmap(QPixmap())
-        self.setText("[no art]")
+        # brutalist keeps its bracketed placeholder; modern says it plain.
+        modern = getattr(theming.manager().current_effective(), "aesthetic", "") == "modern"
+        self.setText("no art" if modern else "[no art]")
 
 
 class NowPlayingLabel(QWidget):
@@ -622,12 +960,60 @@ class NowPlayingLabel(QWidget):
         # Rides in the dim line beside album/status; empty = absent, so
         # sources without insights change nothing about the paint.
         self._insights = ""
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
         from . import scale as _scale
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMinimumHeight(_scale.px(40))
         self.setCursor(Qt.PointingHandCursor)
+        # A title wider than the strip scrolls instead of losing its tail.
+        # The tooltip is the always-available answer underneath it: it
+        # works at motion OFF, and it's the only one that works while the
+        # marquee is parked at the head of a very long title.
+        self._marquee = Marquee(self)
+        self._marquee.tick.connect(self.update)
+        # Track-change transitions (text_fx): one per painted line, and
+        # the text each line last showed, which is what a reveal starts
+        # from. The variants paint through _paint_line to get both.
+        from . import text_fx as _text_fx
+        self._reveal = {"primary": _text_fx.TextReveal(self, "primary"),
+                        "secondary": _text_fx.TextReveal(self, "secondary")}
+        self._painted = {"primary": "", "secondary": ""}
+
+    def _paint_line(self, p: QPainter, rect, text: str, fm: QFontMetrics, field: str, *,
+                    color: QColor, flags=Qt.AlignVCenter | Qt.AlignLeft,
+                    scroll: bool = False) -> None:
+        """Draw one line, through its transition when one is running."""
+        self._painted[field] = text
+        reveal = self._reveal.get(field)
+        if reveal is not None and reveal.active():
+            accent = _color(self._theme, "accent", "#d4b95e")
+            reveal.paint(p, rect, text, fm, fg=color, accent=accent, flags=flags)
+            return
+        p.setPen(color)
+        if scroll:
+            marquee.draw_text(p, rect, text, fm, self._marquee, flags=flags)
+        else:
+            p.drawText(rect, flags, fm.elidedText(text, Qt.ElideRight, rect.width()))
+
+    def _primary_text(self) -> str:
+        """The 'artist — title' run — what the marquee scrolls and what
+        the tooltip leads with."""
+        if self._artist and self._title:
+            return f"{self._artist} — {self._title}"
+        return self._title or self._artist
+
+    def _refresh_tooltip(self) -> None:
+        parts = [self._primary_text()]
+        for extra in (self._album, self._insights, self._status):
+            if extra:
+                parts.append(extra)
+        self.setToolTip("\n".join(p for p in parts if p))
+
+    def hideEvent(self, ev) -> None:
+        # Nothing to scroll for while we're off screen.
+        self._marquee.stop()
+        super().hideEvent(ev)
 
     def _on_theme(self, theme) -> None:
         self._theme = theme
@@ -644,6 +1030,7 @@ class NowPlayingLabel(QWidget):
         self._artist = artist
         self._title = title
         self._album = album
+        self._refresh_tooltip()
         self.update()
 
     def setTrackAnimated(self, artist: str, title: str, album: str = "") -> None:
@@ -662,11 +1049,30 @@ class NowPlayingLabel(QWidget):
         text that's already on screen would look broken).
         """
         from . import motion as motion_module
+        from . import text_fx as _text_fx
 
         if (
             motion_module.intensity() == motion_module.Intensity.OFF
             or (artist == self._artist and title == self._title and album == self._album)
         ):
+            self.setTrack(artist, title, album)
+            return
+
+        style = _text_fx.effective_style()
+        if style in ("sweep", "rise"):
+            # Painted transitions: the line starts from what it last
+            # showed. FULL runs both lines; LITE runs the primary only.
+            old_primary = self._painted.get("primary", "")
+            old_secondary = self._painted.get("secondary", "")
+            self._artist, self._title, self._album = artist, title, album
+            self._marquee.stop()
+            self._refresh_tooltip()
+            self._reveal["primary"].start(old_primary)
+            if motion_module.intensity() == motion_module.Intensity.FULL:
+                self._reveal["secondary"].start(old_secondary, dur=motion_module.dur("med") + 150)
+            self.update()
+            return
+        if style == "off":
             self.setTrack(artist, title, album)
             return
 
@@ -678,6 +1084,9 @@ class NowPlayingLabel(QWidget):
         self._artist = artist
         self._title = title
         self._album = album
+        # From the target values, not the scramble frames — the tooltip
+        # must read the real title while the decode is still running.
+        self._refresh_tooltip()
 
         # Title always decodes (LITE + FULL).
         motion_module.scramble_text(
@@ -722,17 +1131,21 @@ class NowPlayingLabel(QWidget):
 
     def setStatus(self, text: str) -> None:
         self._status = text
+        self._refresh_tooltip()
         self.update()
 
     def setInsights(self, text: str) -> None:
         if text == self._insights:
             return
         self._insights = text
+        self._refresh_tooltip()
         self.update()
 
     def clear(self) -> None:
         self._artist = self._title = self._album = self._status = ""
         self._insights = ""
+        self._marquee.stop()
+        self._refresh_tooltip()
         self.update()
 
     def paintEvent(self, event) -> None:
@@ -751,14 +1164,10 @@ class NowPlayingLabel(QWidget):
         line1_rect = QRect(rect.x(), rect.y(), rect.width(), fm.height())
         line2_rect = QRect(rect.x(), rect.y() + fm.height() + 2, rect.width(), fm.height())
 
-        # line 1: artist — title
-        p.setPen(fg)
-        line1 = (
-            f"{self._artist} — {self._title}" if (self._artist and self._title)
-            else (self._title or self._artist)
-        )
-        line1 = fm.elidedText(theming.styled_case(line1, self._theme), Qt.ElideRight, line1_rect.width())
-        p.drawText(line1_rect, Qt.AlignVCenter | Qt.AlignLeft, line1)
+        # line 1: artist — title. Scrolls when it overruns the strip;
+        # elides (exactly as it always did) at motion OFF.
+        line1 = theming.styled_case(self._primary_text(), self._theme)
+        self._paint_line(p, line1_rect, line1, fm, "primary", color=fg, scroll=True)
 
         # line 2: album · insights · status (dim)
         line2_parts: list[str] = []
@@ -770,6 +1179,4 @@ class NowPlayingLabel(QWidget):
             line2_parts.append(theming.styled_case(self._status, self._theme))
         line2 = "  ·  ".join(line2_parts)
         if line2:
-            p.setPen(dim)
-            line2 = fm.elidedText(line2, Qt.ElideRight, line2_rect.width())
-            p.drawText(line2_rect, Qt.AlignVCenter | Qt.AlignLeft, line2)
+            self._paint_line(p, line2_rect, line2, fm, "secondary", color=dim)

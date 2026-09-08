@@ -30,7 +30,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .. import theming
@@ -39,6 +39,21 @@ from . import motion, scale
 
 # Magnet reach — converted to value-space so it stays ~6 physical px.
 DETENT_SNAP_PX = 6
+
+# Groove geometry. The groove is a pill (radius is always half its height),
+# thick enough that the detents can live INSIDE it as dots instead of as
+# tick marks floating above — the marks read as debug chrome at this
+# weight, the dots read as part of the control. The handle radius stays
+# larger than half the groove so the disc overhangs the pill on both edges
+# and never dissolves into the accent fill it sits on.
+GROOVE_H = 14
+HANDLE_R = 10
+DETENT_DOT_R = 2
+# Dot ink: fg at partial alpha reads as a light tint on the accent fill and
+# as a grey on the bare track, in dark AND light themes, without needing a
+# per-surface blend. The detent the value is parked on goes full strength.
+DETENT_DOT_ALPHA = 130
+DETENT_DOT_ALPHA_ON = 255
 
 
 def _tok(theme, key: str, default: str) -> QColor:
@@ -94,9 +109,18 @@ class SpringSlider(QWidget):
 
     def set_value(self, v: float, animate: bool = False) -> None:
         """Programmatic set — quantized, clamped, NO signals. ``animate``
-        settles the handle springily (still snaps at motion OFF)."""
+        settles the handle springily (still snaps at motion OFF).
+
+        During a drag only the value moves: the handle stays under the
+        finger. Hosts echo state back while a drag is live (the fx rack
+        syncs all three sliders on every change), and a display snap to
+        the quantized value on each move read as the slider grabbing at
+        its step grid. The release settles to the final value anyway."""
         q = self._quantize(v)
         self._value = q
+        if self._drag:
+            self.update()
+            return
         if animate:
             self._settle_to(q, commit=False)
         else:
@@ -261,7 +285,13 @@ class SpringSlider(QWidget):
         return round(v, 9)
 
     def _handle_r(self) -> int:
-        return scale.px(7)
+        return scale.px(HANDLE_R)
+
+    def _groove_h(self) -> int:
+        return scale.px(GROOVE_H, minimum=8)
+
+    def _dot_r(self) -> float:
+        return float(scale.px(DETENT_DOT_R, minimum=2))
 
     def _bubble_h(self) -> int:
         return QFontMetrics(self.font()).height() + scale.px(4)
@@ -280,7 +310,7 @@ class SpringSlider(QWidget):
 
     def _groove_rect(self) -> QRectF:
         m = float(self._handle_r() + scale.px(2))
-        gh = float(scale.px(4, minimum=2))
+        gh = float(self._groove_h())
         cy = self._groove_cy()
         return QRectF(m, cy - gh / 2.0, max(1.0, self.width() - 2 * m), gh)
 
@@ -361,25 +391,43 @@ class SpringSlider(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(track)
         p.drawRoundedRect(g, radius, radius)
+        # Fill through a clip of the pill rather than as its own rounded
+        # rect: at this groove weight radius is 6px, and a short fill drawn
+        # as a rounded rect of its own collapses into a squashed lozenge
+        # near the left rail. Clipping keeps the left cap and the straight
+        # leading edge honest at every value.
         fill_w = hx - g.left()
         if fill_w > 1.0:
-            p.setBrush(accent)
-            p.drawRoundedRect(
-                QRectF(g.left(), g.top(), fill_w, g.height()), radius, radius)
+            groove_path = QPainterPath()
+            groove_path.addRoundedRect(g, radius, radius)
+            p.save()
+            p.setClipPath(groove_path)
+            p.fillRect(QRectF(g.left(), g.top(), fill_w, g.height()), accent)
+            p.restore()
 
-        tick_h = float(scale.px(4, minimum=3))
+        # Detents live inside the groove as dots. Clamped to the cap
+        # centres so an end detent (volume's 0 and 100) stays a whole
+        # circle instead of being sliced by the pill's rounded end. The
+        # handle paints after, so a dot under the disc is simply covered.
+        dot_r = self._dot_r()
+        dot_lo = g.left() + radius
+        dot_hi = g.right() - radius
         for d in self._detents:
             if d < self._lo - 1e-9 or d > self._hi + 1e-9:
                 continue
-            dx = self._x_for_value(d)
+            dx = min(max(self._x_for_value(d), dot_lo), dot_hi)
             on_it = abs(d - self._value) < 1e-9
-            p.setPen(QPen(accent if on_it else dim, max(1.0, scale.px(1))))
-            p.drawLine(QPointF(dx, g.top() - tick_h - 1.0),
-                       QPointF(dx, g.top() - 1.0))
+            ink = QColor(fg)
+            ink.setAlpha(DETENT_DOT_ALPHA_ON if on_it else DETENT_DOT_ALPHA)
+            p.setPen(Qt.NoPen)
+            p.setBrush(ink)
+            p.drawEllipse(QPointF(dx, hy), dot_r, dot_r)
 
-        # handle — accent disc with a bg ring so it reads over the fill
+        # handle — fg disc with a bg ring. fg, not accent: the disc sits on
+        # the accent fill for most of its travel and an accent-on-accent
+        # disc is only its ring.
         p.setPen(QPen(bg_alt, max(1.0, float(scale.px(2)))))
-        p.setBrush(accent)
+        p.setBrush(fg)
         p.drawEllipse(QPointF(hx, hy), hr, hr)
 
         if (self._drag or self._settle is not None) and self.isEnabled():

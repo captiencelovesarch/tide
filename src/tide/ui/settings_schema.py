@@ -154,7 +154,7 @@ def nav_icon_choices() -> tuple[tuple[str, str], ...]:
         if set_name == "off":
             rows.append(("off", "off · text only"))
         elif set_name == "svg":
-            rows.append(("svg", "svg · brutalist line-art icons"))
+            rows.append(("svg", "svg · line-art icons"))
         else:
             bag = nav_icons.NAV_ICON_SETS[set_name]
             rows.append((set_name, f"{set_name} · {' '.join(bag.values())}"))
@@ -202,6 +202,12 @@ def motion_choices() -> tuple[tuple[str, str], ...]:
         (tier.value, _MOTION_BLURBS[tier.value])
         for tier in motion_module.Intensity
     )
+
+
+def text_transition_choices() -> tuple[tuple[str, str], ...]:
+    """Track-change text styles, in text_fx's order."""
+    from . import text_fx
+    return text_fx.choices()
 
 
 def scale_choices() -> tuple[tuple[str, str], ...]:
@@ -380,6 +386,14 @@ REGISTRY: tuple[OptionDesc, ...] = (
         tooltip="needs the monitor capture running, so it costs a little "
                 "constant cpu during playback.",
     ),
+    OptionDesc(
+        key="adaptive_text_contrast", label="keep text readable over the backdrop",
+        kind="bool", tab="appearance", section="backdrop",
+        per_preset=True, live="apply_text_contrast_setting",
+        tooltip="nudges text and dim text until they clear a contrast "
+                "floor against whatever sits behind them. a colour you "
+                "picked yourself in the theme editor is left alone.",
+    ),
     # ---- appearance · motion & sound ----
     OptionDesc(
         key="motion", label="motion", kind="choice",
@@ -387,6 +401,13 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices="motion_choices", per_preset=True,
         live="apply_motion_setting",
         tooltip="gates every animation in the app.",
+    ),
+    OptionDesc(
+        key="text_transition", label="text transition", kind="choice",
+        tab="appearance", section="motion & sound",
+        choices="text_transition_choices",
+        live="apply_text_transition_setting",
+        tooltip="how the title changes when the track does. motion off makes it instant.",
     ),
     OptionDesc(
         key="ui_sounds_enabled",
@@ -641,6 +662,7 @@ INTERNAL_FIELDS: frozenset[str] = frozenset({
     "report_plays_answered",    # one-time upgrade-pointer stamp
     # remembered widget state — the surface that shows it owns it
     "mini_lyrics_open",         # the mini's lyrics panel remembers itself
+    "nav_rail_collapsed",       # the rail's own chevron (and Ctrl+B) owns it
     "mini_pin",                 # the mini's own right-click menu owns pinning
     "fullscreen_pane",          # the fullscreen window's pane toggles own it
     "volume",                   # the player bar's volume control owns it

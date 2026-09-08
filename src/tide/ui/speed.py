@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 from .. import theming
 from . import scale
 from .spring_slider import SpringSlider
-from .widgets import BracketButton
+from .widgets import BracketButton, paint_popover_panel
 
 # The speed law lives in speed_law.py so the player/router can share it
 # without importing ui; window/mpris/shortcuts still import the names here.
@@ -364,12 +364,13 @@ class SpringSpeedPopover(QFrame):
         self.speed_changed.emit(self._current + SPEED_STEP)
 
     def _apply_theme(self, theme) -> None:
-        # Modern face: quiet border_col (not the bracket's hard fg) and
-        # the active corner radius.
-        bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
-        border = theme.token("border_col", "#2a2a2a") if theme else "#2a2a2a"
-        radius = theme.token("radius", "0px") if theme else "0px"
-        self.setStyleSheet(
-            f"QFrame#SpeedPopover {{ background: {bg}; "
-            f"border: 1px solid {border}; border-radius: {radius}; }}"
-        )
+        # Modern face: the panel is painted (paintEvent) — a QSS background
+        # on a translucent top-level never lands, which left the controls
+        # floating bare over the backdrop. Only the repaint is needed here.
+        self._theme = theme
+        self.setStyleSheet("QFrame#SpeedPopover { background: transparent; border: 0; }")
+        self.update()
+
+    def paintEvent(self, ev) -> None:
+        paint_popover_panel(self, getattr(self, "_theme", None))
+        super().paintEvent(ev)

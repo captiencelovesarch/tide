@@ -769,9 +769,11 @@ def crossfade_stack(
     easing = _ease("out") if easing is None else easing
     snap = current.grab()
     stack.setCurrentIndex(target_idx)
-    overlay = QLabel(target)
+    # The snapshot belongs to the stack, not the incoming page: springy
+    # slides the page in underneath it, and a child would slide along.
+    overlay = QLabel(stack)
     overlay.setPixmap(snap)
-    overlay.setGeometry(target.rect())
+    overlay.setGeometry(target.geometry())
     overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
     overlay.show()
     overlay.raise_()
@@ -794,6 +796,21 @@ def crossfade_stack(
         # lifetime and tears both down together in _finish's deleteLater.
         overlay._motion_overshoot_anim = lift
         lift.start()
+        # And the incoming page rises into place under the fading
+        # snapshot, overshooting a touch on the spring curve. Without it
+        # the switch was a fade and nothing else — a page arriving from
+        # somewhere reads as a change of place.
+        home = target.pos()
+        rise = max(16, target.height() // 14)
+        target.move(home + QPoint(0, rise))
+        slide = QPropertyAnimation(target, b"pos", overlay)
+        slide.setDuration(int(dur * 1.25))
+        slide.setStartValue(home + QPoint(0, rise))
+        slide.setEndValue(home)
+        slide.setEasingCurve(_ease("spring"))
+        slide.finished.connect(lambda t=target, h=home: t.move(h))
+        overlay._motion_slide_anim = slide
+        slide.start()
 
     def _finish() -> None:
         overlay.hide()

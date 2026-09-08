@@ -4,13 +4,15 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections import deque
 import math
+import os
 import time
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QTimer, Slot
 
 from .. import audio_capture, settings as settings_module
+from ..beat_service import BeatMapService
 from ..pulse_map import (
-    MAX_CLOCK_GAP, MAX_FRAME_GAP, PulseBlend, PulseMapStore,
+    MATCH_WINDOW, MAX_CLOCK_GAP, MAX_FRAME_GAP, ONSET_ENTER, PulseBlend, PulseMapStore,
     PulseRecorder, PulseScheduler, track_key,
 )
 
@@ -19,18 +21,42 @@ _CONSUMER = "ambient"
 # buffered audio around a seek/resume still belongs to the old detector baseline.
 _SETTLE_SECONDS = 0.15
 _CHECKPOINT_SECONDS = 30.0
-_RENDER_INTERVAL_MS = 20
+_RENDER_INTERVAL_MS = 16
+
+
+def _beat_lead() -> float:
+    """TIDE_BEAT_LEAD_MS: shift the beat-map pulse earlier (positive) or
+    later (negative) to match a display's own latency. a trial knob."""
+    try:
+        lead = float(os.environ.get("TIDE_BEAT_LEAD_MS", "0")) / 1000.0
+    except ValueError:
+        return 0.0
+    return lead if math.isfinite(lead) else 0.0
+
+
+_BEAT_LEAD_S = _beat_lead()
 
 
 class AmbientController(QObject):
     def __init__(self, player, central_bg, parent: QObject | None = None,
-                 *, track_provider=None) -> None:
+                 *, track_provider=None, stream_provider=None) -> None:
         super().__init__(parent)
         self._player = player
         self._state = player.state
         self._central_bg = central_bg
         self._targets = [central_bg] if central_bg is not None else []
         self._track_provider = track_provider
+        # the current track's StreamRef, when the window has one: what the
+        # beat analyzer decodes. None (spotify, or not resolved yet) means
+        # the map can only come from the cache.
+        self._stream_provider = stream_provider
+        # beat map: the track analyzed whole, scheduled against the player
+        # clock. it needs no capture, so it survives capture resets and
+        # runs from a single anchor; the learned map and live detection
+        # stay underneath as fallbacks.
+        self._beats = BeatMapService(self)
+        self._beat_map = None
+        self._beat_active = False
         self._feed = audio_capture.feed()
         self._enabled = False
         self._mini_active = False
@@ -46,6 +72,9 @@ class AmbientController(QObject):
         self._live = 0.0
         self._last_live_at = -math.inf
         self._scheduled = False
+        self._rescue_level = 0.0
+        self._rescue_at = -math.inf
+        self._rescue_release = 0.17
         self._scoped = False
         self._frame_seen = -math.inf
         self._last_recorded_at: float | None = None
@@ -63,6 +92,7 @@ class AmbientController(QObject):
         self._feed.pulse_updated.connect(self._on_pulse)
         self._feed.pulse_frame.connect(self._on_frame)
         self._store.loaded.connect(self._on_map_loaded)
+        self._beats.updated.connect(self._on_beat_map)
         app = QCoreApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self.shutdown)
@@ -128,9 +158,49 @@ class AmbientController(QObject):
     def _live_value(self, now: float) -> float:
         return self._live if now - self._last_live_at <= MAX_CLOCK_GAP else 0.0
 
-    def _output(self, level: float, scheduled: bool, now: float) -> None:
+    def _output(self, level: float, scheduled: bool, now: float,
+                source=None) -> None:
+        # the blend crossfades whenever the source changes: live, learned
+        # map, beat map, and (for the beat map) each newer map object
         self._scheduled = scheduled
-        self._set_pulse(self._blend.mix(level, scheduled, now))
+        mixed = self._blend.mix(level, scheduled if source is None else source, now)
+        self._set_pulse(max(mixed, self._rescue_value(now)))
+
+    def _rescue_value(self, now: float) -> float:
+        age = max(0.0, now - self._rescue_at)
+        if age > 6 * self._rescue_release:
+            return 0.0
+        return self._rescue_level * math.exp(-age / self._rescue_release)
+
+    def _rescue_hit(self, frame, now: float) -> None:
+        pulse_map = self._scheduler.pulse_map
+        if (not self._scheduled or self._beat_active
+                or pulse_map is None or pulse_map.hits is None
+                or not self._anchors or frame.onset is None
+                or not math.isfinite(frame.onset) or frame.onset < ONSET_ENTER
+                or frame.kind == "sustain" or not math.isfinite(frame.level)
+                or not math.isfinite(frame.latency)
+                or not 0 <= now - frame.captured_at <= MAX_FRAME_GAP):
+            return
+        wall, position = self._anchors[-1]
+        if not 0 <= now - wall <= MAX_CLOCK_GAP:
+            return
+        speed = self._speed()
+        position += (frame.captured_at - wall - frame.latency) * speed
+        # a cached hit already landed on time. its delayed capture must not
+        # fire it a second time; only rescue attacks missing from the map.
+        times = pulse_map._hit_times
+        index = bisect_right(times, position)
+        if any(abs(times[i] - position) <= MATCH_WINDOW * speed
+               for i in (index - 1, index) if 0 <= i < len(times)):
+            return
+        self._rescue_level = max(self._rescue_value(frame.captured_at),
+                                 max(0.0, min(1.0, frame.level)))
+        self._rescue_at = frame.captured_at
+        self._rescue_release = 0.17 if frame.kind == "kick" else 0.11
+        # don't wait for the next player-clock bracket or the map's three
+        # conflicts: the listener heard this attack already.
+        self._render_pulse(now)
 
     def _reconcile(self) -> None:
         if self._wants_pulse() and self._is_playing():
@@ -153,6 +223,31 @@ class AmbientController(QObject):
         self._last_save = time.monotonic()
         if key is not None:
             self._store.load(self._generation, key)
+            self._request_beats(key, urgent=True)
+
+    def _stream_ref(self):
+        if self._stream_provider is None:
+            return None
+        try:
+            return self._stream_provider()
+        except Exception:
+            return None
+
+    def _request_beats(self, key: str, *, urgent: bool, ref=None) -> None:
+        if ref is None:
+            ref = self._stream_ref()
+        payload = headers = None
+        if ref is not None and getattr(ref, "backend", "mpv") == "mpv":
+            payload = getattr(ref, "payload", None)
+            headers = getattr(ref, "headers", None)
+        self._beats.request(key, payload, headers, urgent=urgent)
+
+    def prefetch_beats(self, track, ref) -> None:
+        """analyze an upcoming track now, so its map is ready when it
+        starts. called by the window when a prefetch resolves."""
+        key = track_key(track)
+        if key is not None and key != self._key:
+            self._request_beats(key, urgent=False, ref=ref)
 
     def _acquire(self) -> None:
         if self._holding:
@@ -179,6 +274,13 @@ class AmbientController(QObject):
 
     def _clock_gap(self, now: float) -> None:
         self._anchors.clear()
+        self._learn_gap(now)
+
+    def _learn_gap(self, now: float) -> None:
+        """reset everything that learns from or validates against capture,
+        leaving the player-clock anchors alone."""
+        self._rescue_level = 0.0
+        self._rescue_at = -math.inf
         self._frames.clear()
         self._last_recorded_at = None
         self._recorder.gap()
@@ -214,6 +316,8 @@ class AmbientController(QObject):
         self._dirty = False
         self._recorder = PulseRecorder()
         self._scheduler = PulseScheduler()
+        self._beat_map = None
+        self._beat_active = False
         self._clock_gap(time.monotonic())
 
     @Slot()
@@ -221,11 +325,19 @@ class AmbientController(QObject):
         self._finish()
         self._release()
         self._store.close()
+        self._beats.close()
 
     @Slot(int, str, object)
     def _on_map_loaded(self, generation: int, key: str, pulse_map) -> None:
         if generation == self._generation and key == self._key:
             self._scheduler = PulseScheduler(pulse_map)
+
+    @Slot(str, object)
+    def _on_beat_map(self, key: str, beat_map) -> None:
+        # partial maps arrive while the decode runs; each one supersedes
+        # the last. the next render tick picks it up.
+        if key == self._key and beat_map is not None:
+            self._beat_map = beat_map
 
     @Slot(float)
     def _on_speed_changed(self, _speed: float) -> None:
@@ -263,18 +375,32 @@ class AmbientController(QObject):
 
     def _render_pulse(self, now: float) -> None:
         value = None
-        if (len(self._anchors) >= 2 and self._scoped
-                and now - self._frame_seen <= MAX_CLOCK_GAP
-                and now >= self._accept_after):
+        source = None
+        if self._anchors:
             wall, position = self._anchors[-1]
             elapsed = now - wall
             if 0 <= elapsed <= MAX_CLOCK_GAP:
                 # spotify reports every 250 ms. sample between reports, always
                 # from their latest anchor; recording keeps exact brackets.
                 speed = self._speed()
-                value = self._scheduler.value_at(position + elapsed * speed, speed)
-        self._output(value if value is not None else self._live_value(now),
-                     value is not None, now)
+                media = position + elapsed * speed
+                if self._beat_map is not None:
+                    # the map was made from the stream itself, so one
+                    # anchor is enough and capture state is irrelevant
+                    value = self._beat_map.value_at(media + _BEAT_LEAD_S * speed, speed)
+                    if value is not None:
+                        source = ("beat", id(self._beat_map))
+                if (value is None and len(self._anchors) >= 2 and self._scoped
+                        and now - self._frame_seen <= MAX_CLOCK_GAP
+                        and now >= self._accept_after):
+                    value = self._scheduler.value_at(media, speed)
+                    if value is not None:
+                        source = "map"
+        self._beat_active = source is not None and source != "map"
+        if value is None:
+            self._output(self._live_value(now), False, now)
+        else:
+            self._output(value, True, now, source)
 
     @Slot(float)
     def _on_pulse(self, level: float) -> None:
@@ -295,17 +421,24 @@ class AmbientController(QObject):
         if frame.captured_at < self._accept_after:
             return
         if frame.reset or not frame.scoped or now - frame.captured_at > MAX_CLOCK_GAP:
-            self._clock_gap(now)
+            if self._beat_map is None:
+                # the learned replay may not resume from an old anchor
+                self._clock_gap(now)
+            else:
+                # the beat map owes capture nothing; keep the clock
+                self._learn_gap(now)
             self._scoped = False
             if frame.reset or now - frame.captured_at > MAX_CLOCK_GAP:
                 self._live = 0.0
-            self._output(self._live_value(now), False, now)
+            if not self._beat_active:
+                self._output(self._live_value(now), False, now)
             return
         self._scoped = True
         self._frame_seen = frame.captured_at
+        self._rescue_hit(frame, now)
         self._frames.append(frame)
         self._drain_frames()
-        if self._scheduler.disagreed and self._scheduled:
+        if self._scheduler.disagreed and self._scheduled and not self._beat_active:
             self._output(self._live_value(now), False, now)
 
     def _drain_frames(self) -> None:

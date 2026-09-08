@@ -51,6 +51,21 @@ class Feed(QObject):
         self.removes += 1
 
 
+class Beats(QObject):
+    updated = Signal(str, object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.requests = []
+        self.closed = False
+
+    def request(self, key, payload=None, headers=None, *, urgent=False):
+        self.requests.append((key, payload, headers, urgent))
+
+    def close(self):
+        self.closed = True
+
+
 class Store(QObject):
     loaded = Signal(int, str, object)
 
@@ -84,12 +99,16 @@ class Harness:
         self.target = SimpleNamespace(set_pulse=lambda value: self.samples.append((self.now - 100.0, value)))
         monkeypatch.setattr(ambient.audio_capture, "feed", lambda: self.feed)
         monkeypatch.setattr(ambient, "PulseMapStore", Store)
+        monkeypatch.setattr(ambient, "BeatMapService", Beats)
         monkeypatch.setattr(ambient, "time", SimpleNamespace(monotonic=lambda: self.now))
         monkeypatch.setattr(ambient.settings_module, "load", lambda: SimpleNamespace(audio_device=""))
+        self.stream = None
         self.controller = ambient.AmbientController(
             self.player, self.target,
-            track_provider=lambda: SimpleNamespace(source="spotify", video_id="clock-song"))
+            track_provider=lambda: SimpleNamespace(source="spotify", video_id="clock-song"),
+            stream_provider=lambda: self.stream)
         self.store = self.controller._store
+        self.beats = self.controller._beats
         self.store.pulse_map = flat_map()
 
     def start(self, enabled=True):
@@ -158,7 +177,7 @@ def test_render_timer_is_gui_owned_precise_and_stops_without_consumers(h):
     assert timer.parent() is h.controller
     assert timer.thread() is h.controller.thread()
     assert timer.timerType() == Qt.TimerType.PreciseTimer
-    assert timer.interval() == 20
+    assert timer.interval() == 16
     assert not timer.isActive()
     h.drive()
     assert (h.feed.adds, h.store.loads, h.store.saves) == (0, 0, 0)

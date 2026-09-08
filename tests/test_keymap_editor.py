@@ -35,6 +35,7 @@ def _app() -> QApplication:
 EXPECTED_DEFAULTS = {
     "search": "Ctrl+L",
     "search_alt": "Ctrl+F",
+    "toggle_rail": "Ctrl+B",
     "view_home": "Ctrl+1",
     "view_library": "Ctrl+2",
     "view_queue": "Ctrl+3",
@@ -94,9 +95,9 @@ class ActionsTableTests(unittest.TestCase):
     def test_effective_keymap_overrides_ride_the_defaults(self) -> None:
         from tide.ui.window import effective_keymap
         s = Settings()
-        s.keymap = {"shuffle": "Ctrl+B", "view_queue": ""}
+        s.keymap = {"shuffle": "Ctrl+Shift+Y", "view_queue": ""}
         km = effective_keymap(s)
-        self.assertEqual(km["shuffle"], "Ctrl+B")
+        self.assertEqual(km["shuffle"], "Ctrl+Shift+Y")
         self.assertEqual(km["view_queue"], "")           # unbound
         self.assertEqual(km["repeat"], "Ctrl+R")         # untouched default
 
@@ -215,10 +216,10 @@ class WindowShortcutTests(_WindowCase):
     def test_tooltips_follow_a_rebind(self) -> None:
         w = self._make_window()
         s = Settings()
-        s.keymap = {"shuffle": "Ctrl+B", "sleep_timer": ""}
+        s.keymap = {"shuffle": "Ctrl+Shift+Y", "sleep_timer": ""}
         w._settings = s
         w.rebind_shortcuts()
-        self.assertEqual(w.shuffle_btn.toolTip(), "shuffle (ctrl+b)")
+        self.assertEqual(w.shuffle_btn.toolTip(), "shuffle (ctrl+shift+y)")
         # Unbound: no parenthetical — never advertise a dead key.
         self.assertEqual(w.sleep_btn.toolTip(), "sleep timer")
 
@@ -297,13 +298,13 @@ class EditorTests(unittest.TestCase):
 
     def test_rows_show_the_active_bindings(self) -> None:
         s = Settings()
-        s.keymap = {"shuffle": "Ctrl+B"}
+        s.keymap = {"shuffle": "Ctrl+Shift+Y"}
         dlg = self._editor(s)
-        self.assertEqual(dlg._current_labels["shuffle"].text(), "ctrl+b")
+        self.assertEqual(dlg._current_labels["shuffle"].text(), "ctrl+shift+y")
         self.assertEqual(
             dlg._edits["shuffle"].keySequence().toString(
                 QKeySequence.PortableText),
-            "Ctrl+B")
+            "Ctrl+Shift+Y")
         self.assertEqual(dlg._current_labels["repeat"].text(), "ctrl+r")
 
     def test_cancel_leaves_zero_trace(self) -> None:
@@ -311,7 +312,7 @@ class EditorTests(unittest.TestCase):
         self.addCleanup(stub.deleteLater)
         s = Settings()
         dlg = self._editor(s, parent=stub)
-        dlg._edits["shuffle"].setKeySequence(QKeySequence("Ctrl+B"))
+        dlg._edits["shuffle"].setKeySequence(QKeySequence("Ctrl+Shift+Y"))
         dlg._edits["view_queue"].setKeySequence(QKeySequence())
         dlg.cancel_btn.click()
         self.assertEqual(dlg.result(), QDialog.Rejected)
@@ -332,12 +333,12 @@ class EditorTests(unittest.TestCase):
         stub = _StubWindow()
         self.addCleanup(stub.deleteLater)
         dlg = self._editor(s, parent=stub)
-        dlg._edits["shuffle"].setKeySequence(QKeySequence("Ctrl+B"))
+        dlg._edits["shuffle"].setKeySequence(QKeySequence("Ctrl+Shift+Y"))
         dlg.save_btn.click()
         self.assertEqual(dlg.result(), QDialog.Accepted)
-        self.assertEqual(s.keymap, {"shuffle": "Ctrl+B"})
+        self.assertEqual(s.keymap, {"shuffle": "Ctrl+Shift+Y"})
         back = settings_module.load()
-        self.assertEqual(back.keymap, {"shuffle": "Ctrl+B"})
+        self.assertEqual(back.keymap, {"shuffle": "Ctrl+Shift+Y"})
         self.assertEqual(back.volume, 33,
                          "accept leaked a non-keymap field to disk")
         self.assertEqual(stub.rebind_calls, 1,
@@ -347,7 +348,7 @@ class EditorTests(unittest.TestCase):
         s = Settings()
         dlg = self._editor(s)
         # Touch a binding, then type the default back in: no override.
-        dlg._edits["shuffle"].setKeySequence(QKeySequence("Ctrl+B"))
+        dlg._edits["shuffle"].setKeySequence(QKeySequence("Ctrl+Shift+Y"))
         dlg._edits["shuffle"].setKeySequence(QKeySequence("Ctrl+S"))
         dlg.save_btn.click()
         self.assertEqual(s.keymap, {})
@@ -355,7 +356,7 @@ class EditorTests(unittest.TestCase):
 
     def test_reset_row_returns_to_default(self) -> None:
         s = Settings()
-        s.keymap = {"shuffle": "Ctrl+B"}
+        s.keymap = {"shuffle": "Ctrl+Shift+Y"}
         dlg = self._editor(s)
         dlg._reset_btns["shuffle"].click()
         dlg.save_btn.click()
@@ -371,7 +372,7 @@ class EditorTests(unittest.TestCase):
 
     def test_reset_all(self) -> None:
         s = Settings()
-        s.keymap = {"shuffle": "Ctrl+B", "view_queue": "", "like": "Ctrl+J"}
+        s.keymap = {"shuffle": "Ctrl+Shift+Y", "view_queue": "", "like": "Ctrl+J"}
         dlg = self._editor(s)
         dlg.reset_all_btn.click()
         dlg.save_btn.click()

@@ -100,6 +100,11 @@ class Settings:
     # brightens on heavy bass, app-wide while playing. Needs the monitor
     # capture running, so it costs a little constant CPU during playback.
     adaptive_pulse: bool = False
+    # When True, fg/dim are held above a WCAG contrast floor against the
+    # surfaces behind them (see tide/contrast.py). Default ON: the light
+    # themes ship greys that wash out on their own background, and text
+    # you can't read is never the aesthetic anyone chose.
+    adaptive_text_contrast: bool = True
     # Corner softness: "sharp" (0px), "soft" (6px), "rounded" (12px). Applied
     # via a persistent radius override on the theming manager so it doesn't
     # get cleared when the adaptive driver clears its dynamic overrides.
@@ -107,6 +112,13 @@ class Settings:
     # Nav-rail icon set: "off" | "brutalist" | "geometric" | "retro" |
     # "minimal". Picks a small unicode glyph rendered before each nav label.
     nav_icon_set: str = "off"
+    # The rail folded to icons (Ctrl+B / the chevron at its foot). Only
+    # possible with an icon set on; otherwise the toggle hides itself.
+    nav_rail_collapsed: bool = False
+    # How the title changes when the track does: "scramble" | "sweep" |
+    # "rise" | "off" (see ui/text_fx.py). Motion "off" makes any of them
+    # instant.
+    text_transition: str = "scramble"
     # Font-family override. Empty = use the active theme's typography.family.
     # When set, the theming manager pushes this family on every theme apply.
     font_family_override: str = ""

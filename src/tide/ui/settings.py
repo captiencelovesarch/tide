@@ -32,7 +32,8 @@ from PySide6.QtWidgets import (
 
 from .. import auth, settings as settings_module, theming
 from . import settings_schema
-from .headings import line_heading
+from .headings import Heading, line_heading
+from . import scale
 
 
 DISCORD_HELP_URL = "https://discord.com/developers/applications"
@@ -63,7 +64,9 @@ _WIDGET_ATTRS: dict[str, str] = {
     "adaptive_background": "adaptive_bg_toggle",
     "adaptive_background_style": "adaptive_style_picker",
     "adaptive_pulse": "adaptive_pulse_toggle",
+    "adaptive_text_contrast": "adaptive_text_contrast_toggle",
     "motion": "motion_picker",
+    "text_transition": "text_transition_picker",
     "ui_sounds_enabled": "ui_sounds_toggle",
     "audio_device": "audio_device_picker",
     "prefetch_hover": "prefetch_hover_toggle",
@@ -190,8 +193,11 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("tide — settings")
         self.setModal(True)
-        self.setMinimumWidth(620)
-        self.resize(680, 720)
+        scale.fit_dialog(self, 680, 720, min_width=620)
+        # The scale can change from inside this very dialog; the theme
+        # manager re-emits theme_changed after a scale change, so refit
+        # then (grow only — a box the user dragged bigger stays bigger).
+        theming.manager().theme_changed.connect(self._refit_for_scale)
 
         # The LIVE settings object; accept writes changed fields onto it.
         self._settings = current_settings
@@ -265,7 +271,7 @@ class SettingsDialog(QDialog):
         for tab in settings_schema.TABS:
             items: list = list(self._tab_prelude(tab))
             for section in section_order[tab]:
-                items.append(_dim(QLabel(line_heading(section, 34))))
+                items.append(Heading(section, 34))
                 items.extend(self._section_prelude(tab, section))
                 items.append(forms[(tab, section)])
                 items.extend(self._section_chrome(tab, section))
@@ -548,7 +554,7 @@ class SettingsDialog(QDialog):
         if tab == "appearance":
             return self._power_tool_chrome()
         if tab == "playback":
-            fx_heading = _dim(QLabel(line_heading("audio fx", 34)))
+            fx_heading = Heading("audio fx", 34)
             fx_key = self._binding_text("view_audio_fx", "ctrl+8")
             fx_open = (f"open the full panel with {fx_key} (or the [fx] nav "
                        "tab)" if fx_key
@@ -565,7 +571,7 @@ class SettingsDialog(QDialog):
             col.addWidget(self.audio_fx_open_btn, alignment=Qt.AlignLeft)
             return [fx_heading, col]
         if tab == "sources":
-            session_heading = _dim(QLabel(line_heading("youtube music session", 34)))
+            session_heading = Heading("youtube music session", 34)
             self.refresh_session_btn = QPushButton("refresh session")
             self.refresh_session_btn.clicked.connect(self._on_refresh_session)
             # Inline state row: at rest → "checking browsers…" → outcome.
@@ -601,7 +607,7 @@ class SettingsDialog(QDialog):
         own singleShot; open_strip_builder / open_glyph_editor /
         open_keymap_editor defer internally, so wiring those straight
         to clicked is sanctioned."""
-        tools_heading = _dim(QLabel(line_heading("power tools", 34)))
+        tools_heading = Heading("power tools", 34)
         tools_blurb = _dim(QLabel(
             "the deep-cut editors. everything they change is previewable, "
             "revertable and saved per-field — no config files, ever."
@@ -632,7 +638,7 @@ class SettingsDialog(QDialog):
         tools_col.addWidget(tools_blurb)
         tools_col.addLayout(tools_row)
 
-        shortcuts_heading = _dim(QLabel(line_heading("shortcuts", 34)))
+        shortcuts_heading = Heading("shortcuts", 34)
         shortcuts_blurb = _dim(QLabel(
             "every keyboard shortcut is rebindable. the keymap is global "
             "— muscle memory doesn't flip with the personality."
@@ -656,7 +662,7 @@ class SettingsDialog(QDialog):
         a personality nothing ever applied, holding the other one's
         stash. So: dialog chrome, committing through the same
         app.commit_personality_choice as the wizard and chooser."""
-        heading = _dim(QLabel(line_heading("personality", 34)))
+        heading = Heading("personality", 34)
         blurb = _dim(QLabel(
             "tide is two players sharing one library. each side remembers "
             "its own theme, layout, glyphs and tweaks — flipping back "
@@ -860,7 +866,7 @@ class SettingsDialog(QDialog):
         col.addSpacing(6)
         col.addWidget(credits)
         col.addLayout(about_links)
-        heading = _dim(QLabel(line_heading("about", 34)))
+        heading = Heading("about", 34)
         return [heading, col]
 
     # ---------- populate / read / diff ----------
@@ -1222,6 +1228,9 @@ class SettingsDialog(QDialog):
         dlg.deleteLater()
         self._tool_sound("modal_close")
 
+    def _refit_for_scale(self, _theme) -> None:
+        scale.fit_dialog(self, 680, 720, min_width=620, grow_only=True)
+
     def _on_theme_saved(self, slug: str) -> None:
         """A theme was just written AND applied by the editor (registry
         already refreshed). Persisting ``settings.theme`` is OUR job:
@@ -1338,7 +1347,7 @@ class _TasteProfileDialog(QDialog):
         from .. import qthreads
         self.setWindowTitle("tune recommendations")
         self.setModal(True)
-        self.resize(420, 520)
+        scale.fit_dialog(self, 420, 520)
         self._source = source
 
         blurb = QLabel(

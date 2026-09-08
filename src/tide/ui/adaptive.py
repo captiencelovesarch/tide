@@ -377,6 +377,16 @@ def pick_accent_alt(
     return QColor(accent)
 
 
+def neutral_tint(palette: list[tuple[QColor, int]]) -> QColor:
+    """A pure grey at the cover's mean lightness, for covers that carry no
+    confident colour. The backdrop reads the lightness to sit a darker
+    sleeve behind a dimmer field and a white one behind a brighter one."""
+    total = sum(max(0, int(n)) for _, n in palette) or 1
+    lum = sum(c.lightnessF() * max(0, int(n)) for c, n in palette) / total
+    v = int(round(max(0.0, min(1.0, lum)) * 255))
+    return QColor(v, v, v)
+
+
 def pick_bg_tint(palette: list[tuple[QColor, int]]) -> QColor | None:
     """Pick a deeply-muted version of the album's dominant body color for the
     custom backdrop tint. Unlike the accent picker this weights raw frequency
@@ -610,7 +620,8 @@ class AdaptiveDriver(QObject):
         if palette:
             bg = QColor(theme.token("bg", "#0b0b0b"))
             new_accent = pick_accent(palette, bg)
-            new_ambient_bg = pick_bg_tint(palette) if self._wants_ambient_bg() else None
+            wants_bg = self._wants_ambient_bg()
+            new_ambient_bg = pick_bg_tint(palette) if wants_bg else None
             if new_accent is not None:
                 overrides["accent"] = new_accent.name()
                 # Pick a second color for accent_alt (used by neon-grid
@@ -621,4 +632,14 @@ class AdaptiveDriver(QObject):
                     overrides["accent_alt"] = new_accent_alt.name()
             if new_ambient_bg is not None:
                 overrides["ambient_bg"] = new_ambient_bg.name()
+            elif wants_bg and new_accent is None:
+                # A cover with no confident colour. The UI accent stays the
+                # theme's (that fallback is deliberate), but the backdrop
+                # should not: a black-and-white sleeve behind a blue glow
+                # reads as the wrong song. Push a neutral at the cover's
+                # brightness and flag it, so the backdrop paints greys
+                # instead of falling back to the theme accent.
+                grey = neutral_tint(palette)
+                overrides["ambient_bg"] = grey.name()
+                overrides["ambient_neutral"] = "1"
         theming.manager().replace_dynamic_tokens(overrides)

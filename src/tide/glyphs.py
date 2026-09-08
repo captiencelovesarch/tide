@@ -68,6 +68,34 @@ def glyph(key: str) -> str:
     return DEFAULT_PACK[key]
 
 
+def key_for(text: str) -> str | None:
+    """Reverse lookup: the vocabulary key whose face is ``text`` in the
+    active pack (default pack as fallback), or None.
+
+    None also when ``text`` is a user override's value: an override is
+    the face the user typed on purpose, and the modern personality must
+    not swap it for an icon. That is how "the glyph editor still wins in
+    modern" is implemented — no flag, just this refusal.
+    """
+    if not text:
+        return None
+    if text in _overrides.values():
+        return None
+    pack = _packs[_active]
+    for key in KEYS:
+        if pack.get(key, DEFAULT_PACK[key]) == text:
+            return key
+    for key, face in DEFAULT_PACK.items():
+        if face == text:
+            return key
+    return None
+
+
+def is_overridden(key: str) -> bool:
+    """True when the glyph editor has replaced ``key``'s face."""
+    return key in _overrides
+
+
 def set_pack(name: str) -> None:
     """Switch the active pack. KeyError on an unregistered name so a
     typo'd preset field surfaces instead of silently drawing defaults."""

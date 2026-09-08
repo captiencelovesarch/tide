@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 from bisect import bisect_left, bisect_right
+from collections import deque
 from dataclasses import dataclass, field, replace
 import json
 import math
@@ -503,9 +504,11 @@ class PulseScheduler:
     def value_at(self, position: float, speed: float = 1.0) -> float | None:
         if self.disagreed or self.pulse_map is None:
             return None
-        return self.pulse_map.value_at(position, speed)
+        return self.pulse_map.value_at(position - self._phase_offset, speed)
 
     def gap(self) -> None:
+        self._phase_offset = 0.0
+        self._phase_samples = deque(maxlen=7)
         self._bad_time = 0.0
         self._last_observation: float | None = None
         self._next_hit: int | None = None
@@ -578,6 +581,8 @@ class PulseScheduler:
         if self._live_start is not None and (onset <= ONSET_LEAVE or renewed):
             if self._live_match is None:
                 self._conflicts += 1
+            elif not self._live_reused:
+                self._align_phase(self._live_peak_at - times[self._live_match], speed)
             self._live_start = None
         if onset >= ONSET_ENTER and self._live_start is None:
             self._live_start = position
@@ -620,6 +625,22 @@ class PulseScheduler:
         self._last_onset = onset
         if self._conflicts >= 3:
             self.disagreed = True
+
+    def _align_phase(self, offset: float, speed: float) -> None:
+        # matching used to accept up to 60 ms of skew without correcting it.
+        # several agreeing attack peaks can calibrate this listen; a single
+        # early onset or flam cannot. persisted beat times stay untouched.
+        if abs(offset) > MATCH_WINDOW * speed:
+            return
+        self._phase_samples.append(offset)
+        if len(self._phase_samples) < 3:
+            return
+        ordered = sorted(self._phase_samples)
+        if ordered[-1] - ordered[0] > 0.025 * speed:
+            return
+        target = statistics.median(ordered)
+        step = 0.008 * speed
+        self._phase_offset += max(-step, min(step, target - self._phase_offset))
 
 
 class PulseBlend:

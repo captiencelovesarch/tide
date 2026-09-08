@@ -1,9 +1,13 @@
 """First-run sign-in wizard.
 
-Google blocks credential entry inside embedded webviews, so the primary
-path imports cookies from the user's real (trusted) browser. They sign
-in to YouTube Music in chromium/chrome/brave like normal, then click
-"import" in tide. No config files, no pastes.
+Google blocks credential entry inside embedded webviews and rejects
+third-party OAuth against the YouTube Music endpoints, so sign-in imports
+cookies from the user's real (trusted) browser. They sign in to YouTube
+Music in chromium, chrome, brave, vivaldi, edge, opera or firefox like
+normal, then click "import" in tide. No config files. When tide can't read
+a browser on its own, a headers paste (devtools → copy request headers)
+covers it. The automatic reading is yt-dlp's cookie loader; see
+tide.browser_import.
 """
 from __future__ import annotations
 
@@ -12,8 +16,10 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
 )
@@ -82,6 +88,45 @@ def refresh_token_async(on_done, on_failed=None) -> QThread:
     return thread
 
 
+class _PasteHeadersDialog(QDialog):
+    """Manual fallback: the user pastes request headers copied from devtools.
+
+    Parsing lives in ``auth.parse_pasted_headers``; this is only the text box.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("tide — paste headers")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+
+        info = QLabel(
+            "sign in at music.youtube.com, open devtools (f12) → network, click "
+            "any request to music.youtube.com, then copy → copy request headers. "
+            "paste them below."
+        )
+        info.setWordWrap(True)
+
+        self._edit = QPlainTextEdit()
+        self._edit.setPlaceholderText("paste request headers here")
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 22, 22, 16)
+        layout.setSpacing(12)
+        layout.addWidget(info)
+        layout.addWidget(self._edit, stretch=1)
+        layout.addWidget(buttons)
+
+    def text(self) -> str:
+        return self._edit.toPlainText()
+
+
 class SignInDialog(QDialog):
     """Modal sign-in. Imports cookies from a user-chosen browser."""
 
@@ -123,6 +168,11 @@ class SignInDialog(QDialog):
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: palette(mid);")
 
+        # Always available, even when no browser profile was found — that's
+        # exactly the case the paste path exists for.
+        self._paste_btn = QPushButton("paste headers instead")
+        self._paste_btn.clicked.connect(self._on_paste)
+
         self._cancel = QPushButton("cancel")
         self._cancel.clicked.connect(self.reject)
 
@@ -139,6 +189,7 @@ class SignInDialog(QDialog):
         row3.addWidget(self._import_btn)
 
         bottom = QHBoxLayout()
+        bottom.addWidget(self._paste_btn)
         bottom.addStretch(1)
         bottom.addWidget(self._cancel)
 
@@ -157,8 +208,8 @@ class SignInDialog(QDialog):
 
         if not self._profiles:
             self._status.setText(
-                "no chromium-family browser profile found. install chromium, chrome, "
-                "brave, vivaldi, or edge, sign in to music.youtube.com there, "
+                "no supported browser profile found. sign in to music.youtube.com "
+                "in chromium, chrome, brave, vivaldi, edge, opera or firefox, "
                 "then run tide again."
             )
 
@@ -191,10 +242,17 @@ class SignInDialog(QDialog):
 
     def _on_done(self, result: bi.ImportResult) -> None:
         if not result.looks_signed_in:
-            self._status.setText(
-                f"no youtube music session in {result.profile.label}. open "
-                f"music.youtube.com there, sign in, then click import again."
-            )
+            if result.note:
+                # Not a sign-in problem: the cookies were there and tide
+                # could not read them. Telling them to sign in again would
+                # send them in circles.
+                msg = f"couldn't read {result.profile.label}'s cookies. {result.note}"
+            else:
+                msg = (
+                    f"no youtube music session in {result.profile.label}. open "
+                    f"music.youtube.com there, sign in, then click import again."
+                )
+            self._status.setText(msg)
             self._import_btn.setEnabled(True)
             return
         try:
@@ -209,3 +267,28 @@ class SignInDialog(QDialog):
     def _on_failed(self, msg: str) -> None:
         self._status.setText(f"import failed: {msg}")
         self._import_btn.setEnabled(True)
+
+    # ---------- manual paste fallback ----------
+
+    def _on_paste(self) -> None:
+        dlg = _PasteHeadersDialog(self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        self._import_pasted(dlg.text())
+
+    def _import_pasted(self, raw: str) -> None:
+        """Parse pasted headers and save the session. A paste carries no
+        cookie expiry (headers don't), so the recorded expiry is unknown —
+        which the countdown treats as 'no data', never as 'expired'."""
+        try:
+            cookies, user_agent = auth.parse_pasted_headers(raw)
+        except ValueError as exc:
+            self._status.setText(str(exc))
+            return
+        try:
+            auth.save_browser_auth(cookies, user_agent=user_agent, expires_at=None)
+        except Exception as exc:
+            self._status.setText(f"couldn't save session: {exc}")
+            return
+        self._status.setText("signed in from pasted headers. opening tide…")
+        self.accept()

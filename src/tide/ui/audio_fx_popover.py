@@ -38,7 +38,8 @@ from ..audio_fx import (
 )
 from .audio_fx_view import _commit_fx_debounce
 from .spring_slider import SpringSlider
-from .widgets import BracketButton
+from .widgets import BracketButton, paint_popover_panel
+from . import scale
 
 
 def _format_db(value: float) -> str:
@@ -72,6 +73,9 @@ class AudioFxButton(BracketButton):
 
     def __init__(self, state: AudioFxState | None = None, parent: QWidget | None = None) -> None:
         super().__init__("fx", parent=parent)
+        # modern: the sliders icon; lit when the rack is on, dim when
+        # bypassed. brutalist keeps [fx] / [fx·off].
+        self.setIconKey("audio_fx")
         self._state = state if state is not None else AudioFxState()
         self._popover: AudioFxPopover | None = None
         self._popover_face_built: str = ""
@@ -100,7 +104,14 @@ class AudioFxButton(BracketButton):
         super().mousePressEvent(ev)
 
     def _refresh_label(self) -> None:
-        self.setLabel("fx" if self._state.master_enabled else "fx·off")
+        on = bool(self._state.master_enabled)
+        self.setLabel("fx" if on else "fx·off")
+        if self._modern():
+            self.setActiveState(on)
+            self.setMuted(not on)
+        else:
+            self.setActiveState(False)
+            self.setMuted(False)
 
     def _popover_face(self) -> str:
         """The speed button's exact face rule — see speed.py ``_popover_face``."""
@@ -215,7 +226,7 @@ class AudioFxPopover(QFrame):
         root.addWidget(self._hint)
 
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(scale.px(280))
 
     # ---------- bind + sync ----------
 
@@ -425,17 +436,18 @@ class SpringAudioFxPopover(AudioFxPopover):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
     def _apply_theme(self, theme) -> None:
-        # Modern frame: quiet border + active radius (bracket keeps its
-        # hard fg outline).
-        bg = theme.token("bg", "#0b0b0b") if theme else "#0b0b0b"
-        border = theme.token("border_col", "#2a2a2a") if theme else "#2a2a2a"
-        radius = theme.token("radius", "0px") if theme else "0px"
+        # Modern frame: painted in paintEvent (a QSS background on a
+        # translucent top-level never lands). bracket keeps its hard fg
+        # outline through the base class.
         dim = theme.token("dim", "#666666") if theme else "#666666"
-        self.setStyleSheet(
-            f"QFrame#AudioFxPopover {{ background: {bg}; "
-            f"border: 1px solid {border}; border-radius: {radius}; }}"
-        )
+        self._theme = theme
+        self.setStyleSheet("QFrame#AudioFxPopover { background: transparent; border: 0; }")
         self._hint.setStyleSheet(f"color: {dim};")
+        self.update()
+
+    def paintEvent(self, ev) -> None:
+        paint_popover_panel(self, getattr(self, "_theme", None))
+        super().paintEvent(ev)
 
     def _make_wet_row(self) -> QHBoxLayout:
         self._wet_slider = SpringSlider()

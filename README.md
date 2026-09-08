@@ -43,7 +43,11 @@ settings → appearance grew a row of deep-cut editors in 2.0:
 - **keymap editor** — every shortcut in the app, rebindable. the keymap is global on purpose; muscle memory doesn't flip with the personality.
 - **glyph editor** — swap any transport glyph (▶ ▮▮ ♥ …) for one to three characters of your own, per personality.
 
-nothing here touches a config file; everything previews live and reverts on cancel. the test suite (1324 tests) fails if a setting exists without a place in the GUI, which is how it stays that way.
+nothing here touches a config file; everything previews live and reverts on cancel. the test suite (1611 tests) fails if a setting exists without a place in the GUI, which is how it stays that way.
+
+## the modern face (2.1)
+
+2.1 is the update where modern stopped borrowing brutalist's bones. no brackets anywhere on that side: icons where an action has one, text pills where the label is the content, and the glyph editor still wins if you typed your own. three translucent surface tiers and a hairline are derived from every theme's background, so cards, pills, the search field and the player bar have something to sit on in blackwater as much as in nord, third-party themes included. the grids read the window and fill it, thumbnails follow your corner style, the player bar floats with rounded corners, headings are headings, and the home greeting is the big moment on the page. the rail marks where you are and folds to icons on `Ctrl+B`. a black-and-white cover gets a grey backdrop instead of the theme's accent. and the title has four ways to change when the track does: scramble, sweep, rise, or just change. brutalist got none of this, on purpose.
 
 ## sources
 
@@ -97,7 +101,7 @@ makepkg -si
 
 other distros: untested and unsupported, but it is plain python + PySide6 + mpv, so `PYTHONPATH=src python -m tide` after installing the deps from the tech list below will probably run. the visualizer wants `parec` from pipewire-pulse. no promises.
 
-signing in: google blocks OAuth for the youtube music endpoints, so cookies are the only path that works. tide reads them out of a chromium-family browser (chromium, chrome, brave, vivaldi, edge) with your wallet key, or you can use the embedded sign-in window instead. when the session dies, and it will die whenever google feels like it, tide notices, says so, and offers a one-click refresh that re-imports from your still-signed-in browser. sessions imported before v1.2.7 just re-import once.
+signing in: google blocks OAuth for the youtube music endpoints, so cookies are the only path that works. tide reads them out of your own browser (chromium, chrome, brave, vivaldi, edge, opera, whale or firefox, flatpak and snap installs included) through yt-dlp's cookie loader, with your wallet key. when the session dies, and it will die whenever google feels like it, tide notices, says so, and offers a one-click refresh that re-imports from your still-signed-in browser. sessions imported before v1.2.7 just re-import once.
 
 ## keys
 
@@ -114,6 +118,7 @@ the defaults — every one of them is rebindable in the keymap editor.
 | `Ctrl+H` | like |
 | `Ctrl+I` | sleep timer |
 | `Ctrl+M` | mini player |
+| `Ctrl+B` | fold / unfold the rail |
 | `Ctrl+L` / `Ctrl+F` | search |
 | `Ctrl+Shift+R` | refresh yt session |
 | `F11` | fullscreen mode (on the visualizer view: fullscreen visualizer) |

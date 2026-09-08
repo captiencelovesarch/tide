@@ -51,6 +51,20 @@ class FakeFeed(QObject):
         self.removed.append(name)
 
 
+class FakeBeats(QObject):
+    updated = Signal(str, object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.requests = []
+
+    def request(self, key, payload=None, headers=None, *, urgent=False):
+        self.requests.append((key, payload, headers, urgent))
+
+    def close(self):
+        pass
+
+
 class FakeStore(QObject):
     loaded = Signal(int, str, object)
 
@@ -106,6 +120,7 @@ class Harness:
         self.current = track("a")
         monkeypatch.setattr(ambient.audio_capture, "feed", lambda: self.feed)
         monkeypatch.setattr(ambient, "PulseMapStore", FakeStore)
+        monkeypatch.setattr(ambient, "BeatMapService", FakeBeats)
         monkeypatch.setattr(ambient, "time", SimpleNamespace(monotonic=lambda: self.now))
         monkeypatch.setattr(ambient.settings_module, "load", lambda: SimpleNamespace(audio_device=""))
         self.controller = ambient.AmbientController(

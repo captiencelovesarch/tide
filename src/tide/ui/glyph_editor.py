@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import glyphs, settings as settings_module
-from .headings import line_heading
+from .headings import Heading, line_heading
+from . import scale
 
 
 # row labels where an underscore-to-space read isn't already the words
@@ -53,8 +54,7 @@ class GlyphEditorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("tide — glyphs")
         self.setModal(True)
-        self.setMinimumWidth(400)
-        self.resize(460, 660)
+        scale.fit_dialog(self, 460, 660, min_width=400)
 
         # The LIVE settings object — written ONLY in _on_save.
         self._settings = current_settings
@@ -85,7 +85,7 @@ class GlyphEditorDialog(QDialog):
     # ---------- build ----------
 
     def _build_ui(self) -> None:
-        heading = _dim(QLabel(line_heading("transport glyphs", 34)))
+        heading = Heading("transport glyphs", 34)
         blurb = _dim(QLabel(
             "1-3 characters per glyph; empty falls back to the pack. "
             "edits preview live — in this list and on the player — and "
@@ -111,7 +111,7 @@ class GlyphEditorDialog(QDialog):
             base.setToolTip("the active pack's glyph — what reset returns to")
             edit = QLineEdit()
             edit.setMaxLength(self.MAX_CHARS)
-            edit.setFixedWidth(64)
+            edit.setFixedWidth(scale.px(64))
             edit.setAlignment(Qt.AlignHCenter)
             edit.setPlaceholderText(self._base[key])
             if key in self._initial:
@@ -121,7 +121,7 @@ class GlyphEditorDialog(QDialog):
             edit.textChanged.connect(
                 lambda _t="", k=key: self._on_edited(k))
             preview = QLabel(self._initial.get(key) or self._base[key])
-            preview.setMinimumWidth(40)
+            preview.setMinimumWidth(scale.px(40))
             preview.setAlignment(Qt.AlignHCenter)
             reset = QPushButton("reset")
             reset.setFlat(True)

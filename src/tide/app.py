@@ -416,6 +416,13 @@ def run(argv: list[str] | None = None) -> int:
     # ride the preset bootstrap below, before its one theme apply.
     theming.register_bundled_fonts()
 
+    # Readability layer on before the first apply(): the manager defaults
+    # it off, and set_text_contrast no-ops its restyle while no theme is
+    # current, so flipping it here costs nothing and means the very first
+    # frame is already composed with corrected inks.
+    theming.manager().set_text_contrast(
+        bool(getattr(user_settings, "adaptive_text_contrast", True)))
+
     # v2.0: theme+layout+motion+corners travel as a preset — applied
     # early so the wizard renders themed with the right variants
     _bootstrap_preset(user_settings, cli_theme=args.theme)
@@ -660,7 +667,10 @@ def run(argv: list[str] | None = None) -> int:
     # Ambient bass-pulse — drives the central gradient's swell from the audio
     # monitor while playing. App-wide, gated by the adaptive_pulse setting.
     from .ui.ambient import AmbientController
-    ambient = AmbientController(player, window.central_bg, track_provider=lambda: window._current)
+    ambient = AmbientController(
+        player, window.central_bg,
+        track_provider=lambda: window._current,
+        stream_provider=window.current_stream_ref)
     ambient.set_pulse_enabled(
         user_settings.adaptive_pulse and user_settings.adaptive_background
     )

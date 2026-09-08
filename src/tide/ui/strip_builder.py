@@ -28,7 +28,8 @@ from PySide6.QtWidgets import (
 
 from .. import layout as layout_module
 from .. import theming
-from .headings import line_heading
+from .headings import Heading, line_heading
+from . import scale
 from .variants import (
     all_variant_slugs,
     make_album_art,
@@ -91,7 +92,7 @@ class StripBuilder(QDialog):
         super().__init__(parent)
         self.setWindowTitle("tide — strip builder")
         self.setModal(True)
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(scale.px(520))
 
         # Diff base: the active preset WITHOUT overrides. A pick matching
         # it needs no override row — and returning to it clears one.
@@ -123,7 +124,7 @@ class StripBuilder(QDialog):
     # ---------- build ----------
 
     def _build_ui(self) -> None:
-        heading = QLabel(line_heading("build your player bar", 34))
+        heading = Heading("build your player bar", 34)
         heading.setProperty("class", "dim")
         blurb = QLabel(
             "one variant per slot. the miniature below is built from the "
@@ -143,7 +144,7 @@ class StripBuilder(QDialog):
             self.pickers[slot] = combo
             form.addRow(f"{SLOT_LABELS[slot]}:", combo)
 
-        preview_heading = QLabel(line_heading("preview", 34))
+        preview_heading = Heading("preview", 34)
         preview_heading.setProperty("class", "dim")
         self._preview_area = QVBoxLayout()
 

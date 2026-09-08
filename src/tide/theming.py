@@ -36,7 +36,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
-from . import config
+from . import config, contrast, material
 
 
 BUNDLED_THEMES_DIR = Path(__file__).parent / "themes"
@@ -108,7 +108,17 @@ class Theme:
     dark: bool = True
 
     def token(self, name: str, default: str = "") -> str:
-        return self.tokens.get(name, default)
+        value = self.tokens.get(name)
+        if value is not None:
+            return value
+        # Material tokens (surface tiers, outline) derive from bg unless
+        # the theme declares them — see tide.material. Kept out of
+        # ``tokens`` so the theme editor and "save as my theme" only ever
+        # see what the author wrote.
+        if name in material.SURFACE_KEYS:
+            return material.surface_tokens(
+                str(self.tokens.get("bg", "")), self.dark).get(name, default)
+        return default
 
     def t(self, kind: str, key: str, default=None):
         bag = {"layout": self.layout, "typography": self.typography,
@@ -265,6 +275,9 @@ def _substitute(qss: str, theme: Theme) -> str:
     lookups.setdefault("border", f"{int(theme.t('layout', 'border_px', 1))}px")
     lookups.setdefault("radius", f"{int(theme.t('layout', 'radius_px', 0))}px")
     lookups.setdefault("spacing", f"{int(theme.t('layout', 'spacing_px', 8))}px")
+    # Material: surface tiers + outline derived from bg (declared wins).
+    for name, value in material.derived(theme.tokens, theme.dark).items():
+        lookups.setdefault(name, value)
     # status tokens always resolve; missing ones get the polarity fallback
     for kind, color in (
         _STATUS_FALLBACKS_DARK if theme.dark else _STATUS_FALLBACKS_LIGHT
@@ -274,10 +287,25 @@ def _substitute(qss: str, theme: Theme) -> str:
     # Pull the scaled font size through scale.round_pt so QSS rules that use
     # @font_size track the active UI scale preset.
     from .ui import scale as _scale
-    lookups.setdefault(
-        "font_size",
-        f"{_scale.round_pt(float(theme.t('typography', 'size_pt', 10)))}pt",
-    )
+    base_pt = float(theme.t('typography', 'size_pt', 10))
+    lookups.setdefault("font_size", f"{_scale.round_pt(base_pt)}pt")
+    # Type scale (title / display) rides the same UI scale as body.
+    for name, value in material.type_tokens(base_pt).items():
+        lookups.setdefault(name, value)
+    # A fully round corner for the modern play button: exactly half the
+    # square BracketButton pins itself to when primary (same numbers, see
+    # BracketButton.primary_diameter). Qt does not clamp an oversized
+    # radius, it stops drawing it round — so this must match, not exceed.
+    from .ui.widgets import BracketButton as _BB
+    lookups.setdefault("radius_round", f"{_BB.primary_diameter() // 2}px")
+    # The floating strip's corners: twice the control radius, capped, so
+    # the bar reads as a card next to its buttons. Follows the user's
+    # corner style through the same @radius (sharp stays square).
+    try:
+        _r = int(str(lookups.get("radius", "0")).rstrip("px") or 0)
+    except ValueError:
+        _r = 0
+    lookups.setdefault("radius_strip", f"{min(2 * _r, 20)}px")
 
     def repl(match: re.Match) -> str:
         name = match.group(1)
@@ -285,7 +313,30 @@ def _substitute(qss: str, theme: Theme) -> str:
 
     # Titlebar defaults go FIRST (theme rules can override); the backdrop
     # block carries no @tokens, so it appends after substitution.
-    return _TOKEN_RE.sub(repl, _TITLEBAR_QSS + qss) + _CONTENT_BACKDROP_QSS
+    out = _TOKEN_RE.sub(repl, _TITLEBAR_QSS + qss) + _CONTENT_BACKDROP_QSS
+    if theme.aesthetic == "modern":
+        # After the backdrop block on purpose: that block transparentizes
+        # the rail and strip for both aesthetics, and modern wants them
+        # back as translucent panels.
+        out += _TOKEN_RE.sub(repl, _MODERN_SHELL_QSS)
+    return out
+
+
+# modern only. The strip is a floating bar: the first surface tier over the
+# backdrop (translucent, so the gradient reads through it), a hairline all
+# round, corners rounded at twice the theme's radius (MainWindow insets it
+# from the window edges so the corners show). The rail stays bare on
+# purpose: a panel or a divider there puts an edge between rail and
+# content, and that edge was cut after a sober test (cc3025d,
+# 2026-07-30). One backdrop, no seam. Brutalist keeps its bordered flat
+# panes from _base.qss.
+_MODERN_SHELL_QSS = """
+QFrame#now_playing {
+    background: @surface_1;
+    border: 1px solid @outline;
+    border-radius: @radius_strip;
+}
+"""
 
 
 def effective_radius_px(theme: "Theme | None") -> int:
@@ -382,6 +433,17 @@ class ThemeManager(QObject):
         # radius live here so the adaptive clear doesn't wipe them.
         self._dynamic_overrides: dict[str, str] = {}
         self._user_overrides: dict[str, str] = {}
+        # Readability layer: derived, never stored. When on, fg/dim are
+        # held above a contrast floor against the surfaces they land on
+        # (see tide.contrast). It sits UNDER dynamic and user overrides —
+        # correcting a theme's own greys is the point, but silently
+        # rewriting a colour someone just picked in the theme editor
+        # (which edits exactly these four tokens) would read as a bug.
+        # Cached against the four tokens it depends on because
+        # current_effective() is a paint-time call.
+        self._text_contrast: bool = False
+        self._readable_key: tuple | None = None
+        self._readable_cache: dict[str, str] = {}
         # Sticky font family override — beats theme.typography.family when
         # set. Empty string means "use the theme's family". Same idea for
         # the size override: 0 means "use the theme's size_pt".
@@ -536,13 +598,43 @@ class ThemeManager(QObject):
             app.setStyleSheet(qss)
             self._applied_qss = qss
 
+    def _readable_layer(self, theme: Theme) -> dict[str, str]:
+        """Cached fg/dim contrast corrections for the composed palette.
+
+        Keyed on the four tokens the pass actually reads, resolved
+        through the override stack WITHOUT building a merged dict — this
+        runs on every ``current_effective()``, which the custom-painted
+        widgets call once per paint.
+        """
+        if not self._text_contrast:
+            return {}
+        dyn, usr = self._dynamic_overrides, self._user_overrides
+
+        def tok(name: str):
+            v = usr.get(name)
+            if v is None:
+                v = dyn.get(name)
+            if v is None:
+                v = theme.tokens.get(name)
+            return v
+
+        key = (tok("bg"), tok("bg_alt"), tok("fg"), tok("dim"))
+        if key != self._readable_key:
+            self._readable_key = key
+            self._readable_cache = contrast.readable_text_tokens(
+                {"bg": key[0], "bg_alt": key[1], "fg": key[2], "dim": key[3]})
+        return self._readable_cache
+
     def _with_overrides(self, theme: Theme) -> Theme:
         """Return a Theme whose tokens have the runtime overrides applied.
         User overrides win over dynamic ones so a user-set radius isn't
-        wobbled by adaptive."""
-        if not self._dynamic_overrides and not self._user_overrides:
+        wobbled by adaptive, and both win over the readability layer so an
+        explicitly chosen colour is never second-guessed."""
+        readable = self._readable_layer(theme)
+        if not self._dynamic_overrides and not self._user_overrides and not readable:
             return theme
         merged = dict(theme.tokens)
+        merged.update(readable)
         merged.update(self._dynamic_overrides)
         merged.update(self._user_overrides)
         return Theme(
@@ -552,6 +644,30 @@ class ThemeManager(QObject):
             aesthetic_declared=theme.aesthetic_declared,
             qss=theme.qss, dark=theme.dark,
         )
+
+    def set_text_contrast(self, on: bool) -> None:
+        """Turn the readability layer on/off and restyle if it moved.
+
+        Cheap to call with an unchanged value — the settings dialog's
+        live-apply chain runs every applier whose keys changed, and this
+        one is reached on any appearance edit.
+        """
+        on = bool(on)
+        if on == self._text_contrast:
+            return
+        self._text_contrast = on
+        # The cache key is only valid for one setting state.
+        self._readable_key = None
+        self._readable_cache = {}
+        if self._current is None:
+            return
+        effective = self._with_overrides(self._current)
+        qss = _substitute(self._current.qss, effective)
+        self._queue_restyle(qss)
+        self.theme_changed.emit(effective)
+
+    def text_contrast(self) -> bool:
+        return self._text_contrast
 
     def set_user_font(self, family: str) -> None:
         """Set or clear the font-family override. Empty string clears.

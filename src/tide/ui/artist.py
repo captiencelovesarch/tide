@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 from .. import api, qthreads, theming
 from . import art_cache
 from .card import Card, ShelfRow
-from .headings import line_heading as _line_heading
+from .headings import Heading, line_heading as _line_heading
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
 
@@ -87,8 +87,10 @@ class ArtistView(QWidget):
 
     def _build_ui(self) -> None:
         self.back_btn = BracketButton("back")
+        self.back_btn.setIconKey("back")
+        self.back_btn.setRole("pill")
         self.back_btn.clicked.connect(self.back_requested.emit)
-        self.heading = QLabel(_line_heading("artist"))
+        self.heading = Heading("artist")
         self.heading.setProperty("class", "dim")
         self.heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -151,7 +153,7 @@ class ArtistView(QWidget):
         header_row.addLayout(meta, stretch=1)
 
         # ---- top songs ----
-        self.songs_heading = QLabel(_line_heading("top songs"))
+        self.songs_heading = Heading("top songs")
         self.songs_heading.setProperty("class", "dim")
         self.songs = QListWidget()
         self.songs.setUniformItemSizes(True)
@@ -164,15 +166,15 @@ class ArtistView(QWidget):
         self.songs.setMaximumHeight(280)
 
         # ---- albums / singles / related (shelves) ----
-        self.albums_heading = QLabel(_line_heading("albums"))
+        self.albums_heading = Heading("albums")
         self.albums_heading.setProperty("class", "dim")
         self.albums_row = ShelfRow()
 
-        self.singles_heading = QLabel(_line_heading("singles"))
+        self.singles_heading = Heading("singles")
         self.singles_heading.setProperty("class", "dim")
         self.singles_row = ShelfRow()
 
-        self.related_heading = QLabel(_line_heading("related artists"))
+        self.related_heading = Heading("related artists")
         self.related_heading.setProperty("class", "dim")
         self.related_row = ShelfRow()
 
@@ -256,7 +258,7 @@ class ArtistView(QWidget):
         self._current = None
         self._current_cid = channel_id
         self._art_for_cid = channel_id
-        self.heading.setText(_line_heading("artist · loading…"))
+        self.heading.set_label("artist · loading…")
         self.name_label.setText(theming.styled_case(name_hint or "loading…"))
         self.subscribe_btn.hide()
         self.subs_label.setText("")
@@ -293,7 +295,7 @@ class ArtistView(QWidget):
             return
         self._current = detail
 
-        self.heading.setText(_line_heading(f"artist · {detail.name}"))
+        self.heading.set_label(f"artist · {detail.name}")
         self.name_label.setText(theming.styled_case(detail.name))
         meta_parts = [p for p in (
             f"{detail.subscribers} subscribers" if detail.subscribers else "",
@@ -341,7 +343,7 @@ class ArtistView(QWidget):
         self.status_message.emit(theming.styled_case(f"{detail.name}"))
 
     def _on_failed(self, msg: str) -> None:
-        self.heading.setText(_line_heading("artist load failed"))
+        self.heading.set_label("artist load failed")
         self.status_message.emit(f"artist: {msg}")
 
     def _add_card(self, row: ShelfRow, title: str, subtitle: str, thumb: str, payload, *, on_click, circular: bool = False) -> None:

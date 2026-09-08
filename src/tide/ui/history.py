@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import api, history, qthreads, theming
-from .headings import line_heading as _line_heading
+from .headings import Heading, line_heading as _line_heading
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
 
@@ -81,7 +81,7 @@ class HistoryView(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        self.heading = QLabel(_line_heading("history"))
+        self.heading = Heading("history")
         self.heading.setProperty("class", "dim")
         self.heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -90,6 +90,7 @@ class HistoryView(QWidget):
         self.tab_tide.clicked.connect(lambda: self._set_side("tide"))
         self.tab_remote.clicked.connect(lambda: self._set_side("remote"))
         self.refresh_btn = BracketButton("refresh")
+        self.refresh_btn.setIconKey("refresh")
         self.refresh_btn.clicked.connect(self.reload)
         self.clear_btn = BracketButton("clear")
         self.clear_btn.clicked.connect(self._on_clear)
@@ -153,7 +154,7 @@ class HistoryView(QWidget):
             self._reload_remote()
             return
         entries = history.read_recent()
-        self.heading.setText(_line_heading(f"history · {len(entries)}"))
+        self.heading.set_label(f"history · {len(entries)}")
         self.list.clear()
         marker = self._list_marker()
         for e in entries:
@@ -171,7 +172,7 @@ class HistoryView(QWidget):
     def _reload_remote(self) -> None:
         self._remote_gen += 1
         self.list.clear()
-        self.heading.setText(_line_heading("history · youtube · loading…"))
+        self.heading.set_label("history · youtube · loading…")
         thread = QThread()
         worker = _RemoteHistoryWorker(self.api, self._remote_gen)
         worker.moveToThread(thread)
@@ -187,7 +188,7 @@ class HistoryView(QWidget):
     def _on_remote(self, gen: int, tracks: list) -> None:
         if gen != self._remote_gen or self._side != "remote":
             return
-        self.heading.setText(_line_heading(f"history · youtube · {len(tracks)}"))
+        self.heading.set_label(f"history · youtube · {len(tracks)}")
         self.list.clear()
         marker = self._list_marker()
         for tr in tracks:
@@ -206,7 +207,7 @@ class HistoryView(QWidget):
     def _on_remote_failed(self, gen: int, msg: str) -> None:
         if gen != self._remote_gen or self._side != "remote":
             return
-        self.heading.setText(_line_heading("history · youtube · failed"))
+        self.heading.set_label("history · youtube · failed")
         self.status_message.emit(f"youtube history: {msg}")
 
     # ---------- interactions ----------

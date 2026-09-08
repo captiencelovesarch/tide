@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from . import scale
+
 
 class SleepMode(str, Enum):
     MINUTES = "minutes"
@@ -36,7 +38,7 @@ class SleepTimerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("tide — sleep timer")
         self.setModal(True)
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(scale.px(380))
 
         heading = QLabel("pause playback after…")
         heading.setProperty("class", "dim")

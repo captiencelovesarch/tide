@@ -284,8 +284,8 @@ class WizardPickLandsBeforeWindowTest(unittest.TestCase):
         self.assertEqual(theming.manager().current().slug, "nord")
         slots = layout_module.manager().current().slots
         self.assertEqual(slots["progress"], "bar")
-        self.assertEqual(slots["controls"], "large")
-        self.assertEqual(slots["now_label"], "inline")
+        self.assertEqual(slots["controls"], "icons")
+        self.assertEqual(slots["now_label"], "headline")
         self.assertEqual(s.layout_overrides.get("progress"), "bar")
 
 

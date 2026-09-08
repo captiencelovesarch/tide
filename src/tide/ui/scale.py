@@ -103,3 +103,21 @@ def margins(left: int, top: int, right: int, bottom: int) -> tuple[int, int, int
     — every value scales through ``px``. Keep the arg order matching Qt's
     setter so the call site reads naturally."""
     return px(left), px(top), px(right), px(bottom)
+
+
+def fit_dialog(widget, width: int, height: int, *, min_width: int | None = None,
+               grow_only: bool = False) -> None:
+    """Size a dialog / popover from base pixels through the UI scale.
+
+    ``min_width`` sets the scaled minimum; ``width``/``height`` become
+    the size. With ``grow_only`` the box is only ever enlarged — for a
+    refit while it is open, so a user who dragged it bigger keeps that.
+    Every dialog that used to hard-code ``resize(680, 720)`` went blind
+    to the scale setting: at 1.3× its rows outgrew a 1.0× box.
+    """
+    if min_width is not None:
+        widget.setMinimumWidth(px(min_width))
+    w, h = px(width), px(height)
+    if grow_only:
+        w, h = max(w, widget.width()), max(h, widget.height())
+    widget.resize(w, h)

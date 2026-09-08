@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 
 from ... import api, history as history_module, qthreads, session as session_module, theming
 from ..card import Card, CardGrid
-from ..headings import line_heading as _line_heading
+from ..headings import Heading, line_heading as _line_heading
 from ..widgets import BracketButton
 from . import patterns
 
@@ -232,12 +232,15 @@ class HomeView(QWidget):
     # ---------- layout ----------
 
     def _build_ui(self) -> None:
-        self.heading = QLabel(_line_heading("home"))
+        self.heading = Heading("home")
         self.heading.setProperty("class", "dim")
         self.back_btn = BracketButton("back to home")
+        self.back_btn.setIconKey("back")
+        self.back_btn.setRole("pill")
         self.back_btn.clicked.connect(self._leave_mood)
         self.back_btn.hide()
         self.refresh_btn = BracketButton("refresh")
+        self.refresh_btn.setIconKey("refresh")
         self.refresh_btn.clicked.connect(self.reload)
 
         top = QHBoxLayout()
@@ -302,8 +305,7 @@ class HomeView(QWidget):
 
         if hasattr(self.api, "supports") and not self.api.supports("home"):
             src_name = theming.styled_case(getattr(self.api, "name", "this source"))
-            self.heading.setText(
-                _line_heading(f"home · no shelves from {src_name}"))
+            self.heading.set_label(f"home · no shelves from {src_name}")
             placeholder = QLabel(theming.styled_case(
                 "  this source has no home feed. search still works, and "
                 "you can switch sources in [source] (ctrl+7)."
@@ -313,7 +315,7 @@ class HomeView(QWidget):
             self._loaded = True
             return
 
-        self.heading.setText(_line_heading("home · loading…"))
+        self.heading.set_label("home · loading…")
         self.status_message.emit(theming.styled_case("loading home…"))
         gen = self._gen
         self._spawn(_ShelvesWorker(self.api, gen),
@@ -379,7 +381,7 @@ class HomeView(QWidget):
         if gen != self._gen or self._mode != "home":
             return
         self._loaded = True
-        self.heading.setText(_line_heading("home"))
+        self.heading.set_label("home")
         if not shelves:
             self._dim_note("nothing on the home feed yet. play some music "
                            "and check back.")
@@ -398,7 +400,7 @@ class HomeView(QWidget):
         if gen != self._gen:
             return
         self._loaded = True
-        self.heading.setText(_line_heading("home · shelves failed"))
+        self.heading.set_label("home · shelves failed")
         self.status_message.emit(f"home: {msg}")
 
     def _dim_note(self, text: str) -> None:
@@ -430,7 +432,7 @@ class HomeView(QWidget):
             return
 
     def _build_shelf_block(self, shelf, pattern: str, seed: int) -> None:
-        label = QLabel(_line_heading(shelf.title or "shelf"))
+        label = Heading(shelf.title or "shelf")
         label.setProperty("class", "dim")
         self._append(label)
         w: QWidget
@@ -465,7 +467,7 @@ class HomeView(QWidget):
         if self._mode != "home":
             return
         idx = self._extra_anchor(weight)
-        label = QLabel(_line_heading(title))
+        label = Heading(title)
         label.setProperty("class", "dim")
         self._insert_at(idx, label)
         self._insert_at(idx + 1, body)
@@ -559,20 +561,18 @@ class HomeView(QWidget):
         self._mode = "mood"
         self._clear_content()
         self.back_btn.show()
-        self.heading.setText(_line_heading(f"moods · {cat.title} · loading…"))
+        self.heading.set_label(f"moods · {cat.title} · loading…")
         self._spawn(_MoodWorker(self.api, cat.title, cat.params, self._gen),
                     self._on_mood, self._on_mood_failed)
 
     def _on_mood(self, gen: int, title: str, playlists: list) -> None:
         if gen != self._gen or self._mode != "mood":
             return
-        self.heading.setText(_line_heading(f"moods · {title}"))
+        self.heading.set_label(f"moods · {title}")
         if not playlists:
             self._dim_note("nothing in this category right now.")
             return
         grid = CardGrid()
-        cols = 5
-        grid.set_columns(cols)
         for p in playlists:
             c = Card(p.title, p.description, p.thumbnail, p)
             c.clicked.connect(self.playlist_requested.emit)
@@ -582,7 +582,7 @@ class HomeView(QWidget):
     def _on_mood_failed(self, gen: int, msg: str) -> None:
         if gen != self._gen:
             return
-        self.heading.setText(_line_heading("moods · load failed"))
+        self.heading.set_label("moods · load failed")
         self.status_message.emit(f"moods: {msg}")
 
     def _leave_mood(self) -> None:

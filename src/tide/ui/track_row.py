@@ -16,7 +16,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPixmap
-from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from PySide6.QtWidgets import (
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QToolTip,
+)
 
 from .. import api, theming
 from . import art_cache
@@ -116,6 +121,24 @@ class TrackRowDelegate(QStyledItemDelegate):
                          max(self.ROW_HEIGHT, natural))
         return QSize(option.rect.width() if option.rect.width() > 0 else 200,
                      max(self.ROW_HEIGHT_TEXT_ONLY, natural))
+
+    def helpEvent(self, event, view, option, index) -> bool:
+        """Full 'artist — title' on hover.
+
+        The row paints elided text with a QPainter, so there is nothing
+        for Qt's built-in tooltip to recover — and the models feeding
+        these views carry the Track on UserRole rather than filling
+        ToolTipRole. Build it here instead of asking every model to.
+        """
+        tr = index.data(Qt.UserRole) if index.isValid() else None
+        if isinstance(tr, api.Track):
+            title = tr.title or ""
+            artist = tr.artists or ""
+            text = f"{artist} — {title}" if (artist and title) else (title or artist)
+            if text:
+                QToolTip.showText(event.globalPos(), text, view)
+                return True
+        return super().helpEvent(event, view, option, index)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
         tr: api.Track | None = index.data(Qt.UserRole)

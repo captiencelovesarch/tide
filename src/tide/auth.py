@@ -221,6 +221,66 @@ def yt_dlp_cookiefile() -> str | None:
     return str(out)
 
 
+def parse_pasted_headers(raw: str) -> tuple[dict[str, str], str | None]:
+    """Turn a browser "copy request headers" paste into (cookies, user_agent).
+
+    The manual sign-in path, for when tide can't read the browser on its own:
+    a browser it doesn't know, a keyring it can't unlock, or cookies that
+    rotate too fast to catch. The user signs in at music.youtube.com, opens
+    devtools, and copies the request headers of any music.youtube.com call.
+    Those headers carry the httpOnly auth cookies that page JavaScript can't
+    read, which is exactly the session we need.
+
+    Accepts Chrome / Firefox "name: value" per-line dumps (pseudo-headers like
+    ":authority:" are skipped), or a bare "k=v; k2=v2" cookie string. Raises
+    ValueError with a plain, user-facing message when there's no usable
+    session in the paste.
+    """
+    cookie_line = ""
+    user_agent: str | None = None
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(":"):
+            continue
+        key, sep, value = stripped.partition(":")
+        if not sep:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "cookie" and value:
+            cookie_line = value
+        elif key == "user-agent" and value:
+            user_agent = value
+
+    if not cookie_line:
+        # They may have pasted just the cookie string itself, no header name.
+        if "=" in raw and REQUIRED_COOKIE in raw:
+            cookie_line = " ".join(raw.split())
+        else:
+            raise ValueError(
+                "no cookie header in the pasted text. copy the request headers "
+                "of a music.youtube.com call (not the response)."
+            )
+
+    cookies: dict[str, str] = {}
+    for part in cookie_line.split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        name, _, val = part.partition("=")
+        name = name.strip()
+        if name:
+            cookies[name] = val.strip()
+
+    if REQUIRED_COOKIE not in cookies:
+        raise ValueError(
+            "the paste isn't a signed-in session (no "
+            f"{REQUIRED_COOKIE}). sign in at music.youtube.com first, then copy "
+            "the request headers again."
+        )
+    return cookies, user_agent
+
+
 def clear_saved_auth() -> None:
     config.BROWSER_AUTH_FILE.unlink(missing_ok=True)
     _meta_file().unlink(missing_ok=True)

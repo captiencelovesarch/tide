@@ -181,7 +181,7 @@ class ContractShapeTests(unittest.TestCase):
         self.assertEqual(d.layout, "classic")
         self.assertEqual(d.motion, "full")
         self.assertEqual(d.corner_style, "soft")
-        self.assertEqual(d.nav_icon_set, "classic")
+        self.assertEqual(d.nav_icon_set, "svg")
         self.assertTrue(d.adaptive_accent)
         self.assertTrue(d.adaptive_background)
         self.assertEqual(d.adaptive_background_style, "liquid")

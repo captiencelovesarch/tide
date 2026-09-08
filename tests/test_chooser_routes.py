@@ -434,7 +434,7 @@ class CommitHelperTest(_RouteCase):
         self.assertEqual(live.motion, "full")
         self.assertEqual(live.corner_style, "soft")
         self.assertTrue(live.adaptive_background)
-        self.assertEqual(live.nav_icon_set, "classic")
+        self.assertEqual(live.nav_icon_set, "svg")
         self.assertEqual(live.theme, "adaptive")
 
     def test_a_second_answer_is_a_re_pick_not_a_reset(self) -> None:

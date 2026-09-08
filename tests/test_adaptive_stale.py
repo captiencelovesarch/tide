@@ -177,6 +177,7 @@ class ToneCrossfadeTest(unittest.TestCase):
         self.assertEqual(self.bg._tone_b.rgb(), before.rgb(),
                          "displayed tone must not snap on the change")
         for _ in range(80):
+            self.bg._last_tick -= 0.042
             self.bg._tick()
         self.assertEqual(self.bg._tone_blend, 1.0)
         self.assertEqual(self.bg._tone_b.rgb(), self.bg._tone_tb.rgb(),

@@ -489,9 +489,10 @@ class SpringyHelpersTest(_MotionState):
         return stack
 
     def _overlay_of(self, stack: QStackedWidget):
-        # The overlay is the only QLabel child of the target page.
+        # The overlay is the only QLabel under the stack (it sits on the
+        # stack itself so the incoming page can slide beneath it).
         from PySide6.QtWidgets import QLabel
-        labels = stack.widget(1).findChildren(QLabel)
+        labels = stack.findChildren(QLabel)
         return labels[0] if labels else None
 
     def test_crossfade_stack_overshoot_only_under_springy(self) -> None:
@@ -514,6 +515,16 @@ class SpringyHelpersTest(_MotionState):
         self.assertIsNotNone(lift, "springy overshoot flourish missing")
         self._anims.append(lift)
         self.assertEqual(lift.easingCurve().type(), QEasingCurve.OutBack)
+        # the page itself rises into place; the snapshot sits on the stack
+        # so it doesn't ride along
+        slide = getattr(overlay2, "_motion_slide_anim", None)
+        self.assertIsNotNone(slide, "springy page rise missing")
+        self._anims.append(slide)
+        self.assertIs(overlay2.parentWidget(), stack2)
+        target = stack2.widget(1)
+        self.assertGreater(target.pos().y(), slide.endValue().y())
+        self.assertEqual(slide.easingCurve().type(), QEasingCurve.OutBack)
+        self.assertIsNone(getattr(overlay, "_motion_slide_anim", None))
 
 
 class HelpersFollowTheProfileTest(_MotionState):

@@ -43,7 +43,7 @@ from .. import api, qthreads, theming
 from ..sources.base import Comment, CreditSection, human_count
 from . import art_cache
 from .card import Card, ShelfRow
-from .headings import line_heading as _line_heading
+from .headings import Heading, line_heading as _line_heading
 from .widgets import BracketButton
 
 
@@ -301,8 +301,10 @@ class SongPage(QWidget):
         from . import scale as _scale
 
         self.back_btn = BracketButton("back")
+        self.back_btn.setIconKey("back")
+        self.back_btn.setRole("pill")
         self.back_btn.clicked.connect(self.back_requested.emit)
-        self.heading = QLabel(_line_heading("song"))
+        self.heading = Heading("song")
         self.heading.setProperty("class", "dim")
         self.heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         top_bar = QHBoxLayout()
@@ -430,7 +432,7 @@ class SongPage(QWidget):
         self._gen += 1
         self._track = track
         self._loaded_tabs: set[str] = set()
-        self.heading.setText(_line_heading("song"))
+        self.heading.set_label("song")
         self.title_label.setText(track.title or "?")
         bits = [b for b in (track.artists, track.album) if b]
         self.byline_label.setText("  ·  ".join(bits))
@@ -484,7 +486,8 @@ class SongPage(QWidget):
         self._art_url = url or ""
         img = art_cache.cache().request(self._art_url, None) if url else None
         if img is None:
-            self.art.setText("[no art]")
+            modern = getattr(theming.manager().current(), "aesthetic", "") == "modern"
+            self.art.setText("no art" if modern else "[no art]")
             self.art.setPixmap(QPixmap())
             return
         self._set_art_pixmap(img)
@@ -598,7 +601,7 @@ class SongPage(QWidget):
             self._dim_line(self._related_col, "nothing related found.")
             return
         for shelf in shelves:
-            label = QLabel(_line_heading(shelf.title or "related"))
+            label = Heading(shelf.title or "related")
             label.setProperty("class", "dim")
             self._add_to_col(self._related_col, label)
             row = ShelfRow()
@@ -728,7 +731,7 @@ class SongPage(QWidget):
                            "no credits available for this recording.")
             return
         for sec in sections:
-            title = QLabel(_line_heading(sec.title or "credits"))
+            title = Heading(sec.title or "credits")
             title.setProperty("class", "dim")
             self._add_to_col(self._credits_col, title)
             names = QLabel("\n".join(sec.names))

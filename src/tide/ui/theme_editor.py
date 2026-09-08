@@ -35,7 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import config, theming
-from .headings import line_heading
+from .headings import Heading, line_heading
+from . import scale
 
 
 # row order; declared-but-unlisted tokens append after, still editable
@@ -141,8 +142,7 @@ class ThemeEditorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("tide — theme editor")
         self.setModal(True)
-        self.setMinimumWidth(440)
-        self.resize(500, 680)
+        scale.fit_dialog(self, 500, 680, min_width=440)
 
         self._mgr = theming.manager()
         self._base = self._mgr.current()
@@ -222,7 +222,7 @@ class ThemeEditorDialog(QDialog):
         )))
 
         # ---- colors ----
-        col.addWidget(_dim(QLabel(line_heading("colors", 34))))
+        col.addWidget(Heading("colors", 34))
         self.swatches: dict[str, QPushButton] = {}
         form = QFormLayout()
         for key in self._token_rows:
@@ -238,7 +238,7 @@ class ThemeEditorDialog(QDialog):
         col.addLayout(form)
 
         # ---- typography ----
-        col.addWidget(_dim(QLabel(line_heading("typography", 34))))
+        col.addWidget(Heading("typography", 34))
         tform = QFormLayout()
 
         self.family_combo = QComboBox()
@@ -307,7 +307,7 @@ class ThemeEditorDialog(QDialog):
         )))
 
         # ---- shape ----
-        col.addWidget(_dim(QLabel(line_heading("shape", 34))))
+        col.addWidget(Heading("shape", 34))
         sform = QFormLayout()
         self.radius_spin = QSpinBox()
         self.radius_spin.setRange(0, 24)
@@ -322,7 +322,7 @@ class ThemeEditorDialog(QDialog):
         col.addLayout(sform)
 
         # ---- save ----
-        col.addWidget(_dim(QLabel(line_heading("save as my theme", 34))))
+        col.addWidget(Heading("save as my theme", 34))
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText(f"my {self._base.name}")
         nform = QFormLayout()

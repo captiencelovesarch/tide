@@ -140,6 +140,73 @@ PULSE_BASS_ACT_LO = 0.03  # recent bass-onset activity below this: fallback
 PULSE_BASS_ACT_HI = 0.10  # fully open; above this: fully closed
 PULSE_BASS_ACT_FALL_S = 7.0   # how long the bass channel stays "recently active"
 
+# Sustain integration — the answer to "constant bass turns tide into a
+# flashbang". The envelope below is instant-attack / 0.22 s-release,
+# which is exactly right for a sparse kick: it punches and clears. On a
+# song with a bassline running underneath everything, though, onsets fire
+# so densely that the envelope never finishes falling before it is
+# re-triggered, and a hard re-trigger every ~300 ms is a strobe, not a
+# pulse.
+#
+# So: measure how CONTINUOUSLY the pulse has been firing, and migrate the
+# response along that axis. Sparse hits keep today's transient exactly
+# (every term below is gated to a no-op at density 0, so a punchy song is
+# bit-identical to before). As density rises the attack eases in, the
+# release stretches, and a floor holds the light up between hits — the
+# sustained bass reads as one long swell instead of a run of flashes.
+#
+# Density is measured as an ONSET RATE, not as a mean level: the level
+# signal is a transient by construction (near zero between hits), so its
+# average says more about tempo than about strobing. What actually makes
+# the screen unpleasant is how many hard re-triggers per second the UI is
+# asked to render. Measured on synthetic material:
+#   kicks every 0.5 s ............ 1.9 hits/s   punchy, leave it alone
+#   kicks every 0.5 s over a bed . 1.9 hits/s   still punchy
+#   sustained bass, no kicks ..... 2.9 hits/s   the bed alone fires these
+#   kicks every 0.25 s over a bed  3.8 hits/s   the flashbang
+#   kicks every 0.17 s ........... 5.9 hits/s   solid wall
+# so the band below keeps everything at or under ~2/s exactly as it is
+# today and integrates hardest above ~3.5/s.
+PULSE_DENSITY_HIT = 0.25     # hit_strength above this counts as an onset
+PULSE_DENSITY_TAU_S = 2.0    # exponential-kernel window for the rate
+# The raw accumulator sawtooths: it steps up on each edge and decays
+# between, so at a rate sitting near the LO edge it crosses back and
+# forth every beat and the integration weight chatters in time with the
+# music. One more smoothing pass settles it to the mean. Asymmetric on
+# purpose: committing to the swell should be deliberate, but when a song
+# opens up — a breakdown after a drop — the punch has to come back
+# promptly rather than staying smothered for another five seconds.
+PULSE_DENSITY_SMOOTH_S = 1.0        # engaging
+PULSE_DENSITY_SMOOTH_FALL_S = 0.45  # disengaging
+# Calibrated too low on the first attempt: these were tuned against
+# synthetic kicks, but real music with any bass under it sits above 3.6
+# hits/sec essentially all the time, so the weight pegged at 1.0 within a
+# second of playback and every song got the maximum treatment. The band
+# is now wide and starts high, so ordinary material gets a partial shape
+# and only relentless material reaches the full amount.
+PULSE_DENSITY_LO = 3.5       # hits/sec — below this: untouched
+PULSE_DENSITY_HI = 8.0       # hits/sec — above this: the full amount
+# Deadband. smoothstep leaves a few thousandths of integration just under
+# the LO edge; snapping that to zero is what makes "a sparse song behaves
+# exactly as it did before" an exact claim rather than an approximate one.
+PULSE_DENSITY_DEADBAND = 0.02
+# The shaping itself, and the ONE knob that controls it: how much of the
+# envelope's swing survives at full density. The pulse is compressed
+# toward its own recent mean, which lifts the troughs and trims the peaks
+# by the same proportion — the strobe is the CONTRAST between flash and
+# background, so shrinking that contrast is the whole job, and the shape
+# of every hit is preserved exactly.
+#
+# It is a floor, not a target: at 0.6 even a completely mis-calibrated
+# density reading leaves 60% of the movement intact. That bound is
+# deliberate. The first version stacked a softened attack, a stretched
+# release and a rising floor, and when the density read high they
+# combined into a near-flat line — the floor held the envelope above the
+# incoming level, so hits stopped counting as attacks at all and the
+# pulse starved itself. One bounded knob cannot do that.
+PULSE_DEPTH_MIN = 0.6
+PULSE_SUSTAIN_BED_S = 1.2    # window the compression centre is averaged over
+
 
 def _build_band_edges(n_bands: int = BANDS, sample_rate: int = SAMPLE_RATE,
                        chunk: int = CHUNK, low_hz: float = 30.0,
@@ -257,7 +324,7 @@ _TRACE_COLUMNS = (
     "t", "reset", "raw", "floor", "peak", "span", "fraction", "frac_avg",
     "kflux", "fflux", "bflux", "knorm", "fnorm", "bnorm", "spik",
     "contrast", "gate_quiet", "onset", "gate_fraction", "act", "fallback_w",
-    "level", "env",
+    "level", "hrate", "hsm", "integ", "depth", "renv", "bed", "env",
 )
 
 
@@ -332,6 +399,21 @@ class _PulseState:
     # Recent bass-onset activity (fast rise, ~7 s fall). While the bass
     # channel has been producing onsets, the broadband fallback stays shut.
     act: float = 0.0
+    # Onset rate in hits/sec (exponential-kernel estimator) and the
+    # rising-edge latch that feeds it. Drives the transient→swell
+    # migration that keeps a constant bassline from strobing.
+    hrate: float = 0.0
+    hsm: float = 0.0        # hrate, smoothed — what the threshold reads
+    hot: bool = False
+    # The detector's own envelope, kept separate from the reported one.
+    # ``env`` is the SHAPED output consumers read; ``renv`` is what the
+    # attack/release iterates on. Splitting them is what guarantees the
+    # shaping is a pure post-process: nothing it does can ever come back
+    # round and change what the detector sees next chunk.
+    renv: float = 0.0
+    # Slow mean of the raw envelope — the centre the pulse is compressed
+    # toward. Fed from ``renv``, never from the shaped output.
+    bed: float = 0.0
     # The chunk's second half, carried so the next call can analyze the
     # 50%-overlap frame that straddles the boundary. Without it a kick
     # landing at a chunk edge is Hann-windowed to a whisper in BOTH
@@ -462,6 +544,11 @@ def _pulse_frame(
         nbuf = 0
         ibuf = 0
         act = 0.0
+        hrate = 0.0
+        hsm = 0.0
+        hot = False
+        renv = 0.0
+        bed = 0.0
         frac_avg = fraction
     else:
         floor_tau = PULSE_FLOOR_RISE_S if raw > prev.floor else PULSE_FLOOR_FALL_S
@@ -474,7 +561,8 @@ def _pulse_frame(
             peak_a = _ema_alpha(dt, PULSE_PEAK_FALL_S)
             peak = prev.peak + (floor - prev.peak) * peak_a
             peak = max(peak, raw)
-        env = prev.env
+        # env is derived fresh from renv every chunk (see the shaping
+        # stage), so there is nothing to carry here — only renv.
         # A kick's attack can split across two frames, so neither frame's
         # rise clears the onset scoring on its own. Sum this frame's rise
         # with the previous frame's; a split onset then reads as the single
@@ -509,6 +597,11 @@ def _pulse_frame(
         ibuf = prev.ibuf
         nbuf = prev.nbuf
         act = prev.act
+        hrate = prev.hrate
+        hsm = prev.hsm
+        hot = prev.hot
+        renv = prev.renv
+        bed = prev.bed
         frac_avg = prev.frac_avg + (
             fraction - prev.frac_avg) * _ema_alpha(dt, PULSE_FRAC_AVG_S)
         # Push before scoring: a lone hit then sits at its buffer's p95 and
@@ -603,15 +696,53 @@ def _pulse_frame(
         gate_quiet_bb = _smoothstep(PULSE_QUIET_FLOOR, PULSE_QUIET_FULL, raw_bb)
         level = max(level, PULSE_BB_STRENGTH * bnorm * fallback_w * gate_quiet_bb)
 
-    if level >= env:
-        env = level
+    # Onset rate, as an exponential-kernel estimator: each rising edge
+    # deposits 1/tau and the accumulator decays at tau, so a steady stream
+    # of f hits/sec settles at exactly f. Edge-triggered rather than
+    # level-counted because one hit spans two or three chunks and would
+    # otherwise be counted several times.
+    now_hot = hit_strength > PULSE_DENSITY_HIT
+    hrate *= math.exp(-dt / PULSE_DENSITY_TAU_S)
+    if now_hot and not hot:
+        hrate += 1.0 / PULSE_DENSITY_TAU_S
+    hot = now_hot
+    hsm_tau = (PULSE_DENSITY_SMOOTH_S if hrate > hsm
+               else PULSE_DENSITY_SMOOTH_FALL_S)
+    hsm = hsm + (hrate - hsm) * _ema_alpha(dt, hsm_tau)
+    integ = _smoothstep(PULSE_DENSITY_LO, PULSE_DENSITY_HI, hsm)
+    if integ < PULSE_DENSITY_DEADBAND:
+        integ = 0.0
+
+    # The detector envelope: instant attack, PULSE_RELEASE_S decay, exactly
+    # as it has always been. Nothing below writes back into it.
+    if level >= renv:
+        renv = level
     else:
         decay = math.exp(-dt / PULSE_RELEASE_S)
-        env = env * decay + level * (1.0 - decay)
+        renv = renv * decay + level * (1.0 - decay)
+
+    # ---- presentation shaping ----
+    # Compress the pulse toward its own recent mean. Troughs lift and
+    # peaks trim by the same proportion, so what shrinks is the CONTRAST
+    # between flash and background — which is what reads as a strobe —
+    # while the attack stays instant and the shape of every hit is
+    # untouched. A pure function of (renv, bed, integ): the output is
+    # never an input, so it cannot starve the attack or ratchet a floor.
+    bed = bed + (renv - bed) * _ema_alpha(dt, PULSE_SUSTAIN_BED_S)
+    if integ <= 0.0:
+        # Short-circuit rather than multiply by a depth of 1.0:
+        # ``bed + (renv - bed)`` is not bit-exactly ``renv`` in floating
+        # point, and "a sparse song is untouched" should mean untouched.
+        depth = 1.0
+        env = renv
+    else:
+        depth = 1.0 - (1.0 - PULSE_DEPTH_MIN) * integ
+        env = bed + (renv - bed) * depth
     return _PulseState(
         env=env, floor=floor, peak=peak, raw=raw, fraction=fraction,
         frac_avg=frac_avg, krise=krise, frise=frise, brise=brise, lb=lb,
         kbuf=kbuf, fbuf=fbuf, bbuf=bbuf, nbuf=nbuf, ibuf=ibuf, act=act,
+        hrate=hrate, hsm=hsm, hot=hot, renv=renv, bed=bed,
         diag={
             "raw": raw, "floor": floor, "peak": peak, "span": span,
             "fraction": fraction, "frac_avg": frac_avg,
@@ -620,6 +751,8 @@ def _pulse_frame(
             "spik": spik, "contrast": contrast, "gate_quiet": gate_quiet,
             "onset": onset, "gate_fraction": gate_fraction,
             "act": act, "fallback_w": fallback_w, "level": level, "env": env,
+            "hrate": hrate, "hsm": hsm, "integ": integ,
+            "depth": depth, "renv": renv, "bed": bed,
         },
     )
 

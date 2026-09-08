@@ -151,7 +151,7 @@ class SwitchPresetTests(_FlipCase):
         self.assertEqual(s.layout_overrides.get("progress"), "bar")
         self.assertEqual(s.layout_overrides.get("volume"), "spring")
         self.assertEqual(w._slot_progress, "bar")
-        self.assertEqual(w._slot_controls, "large")
+        self.assertEqual(w._slot_controls, "icons")
 
     def test_flip_roundtrip_keeps_layout_overrides(self) -> None:
         # the guard: apply_bundle's theme_changed lands back in

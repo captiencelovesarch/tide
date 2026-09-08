@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 from .. import backdrops, glyphs, theming
 from ..player import PlayState
 from ..queue import Role as QueueRole
-from . import art_cache, motion as motion_module, scale as _scale
+from . import art_cache, motion as motion_module, scale as _scale, text_fx
 from .central_bg import CentralBg
 from .lyrics import LyricsView
 from .mini import _BACKDROP_CHOICES
@@ -202,10 +202,13 @@ class FullscreenPlayer(QWidget):
         # Top chrome (fades in zen): the side-pane tabs + exit, kept to
         # the right where the sketchy little icons live.
         self.lyrics_btn = BracketButton("lyrics", "♫")
+        self.lyrics_btn.setIconKey("lyrics")
         self.lyrics_btn.setToolTip("lyrics pane (l)")
         self.queue_btn = BracketButton("queue", "≡")
+        self.queue_btn.setIconKey("queue")
         self.queue_btn.setToolTip("queue pane (q)")
         self.exit_btn = BracketButton("exit", "✕")
+        self.exit_btn.setIconKey("close")
         self.exit_btn.setToolTip("back to the full window (esc)")
         for btn in (self.lyrics_btn, self.queue_btn, self.exit_btn):
             btn.setFocusPolicy(Qt.NoFocus)
@@ -232,10 +235,10 @@ class FullscreenPlayer(QWidget):
         self.art.setToolTip("back to the full window")
         self.art.clicked.connect(self._request_exit)
 
-        self.title_lbl = QLabel("nothing playing")
+        self.title_lbl = text_fx.RevealLabel("nothing playing")
         self.title_lbl.setTextFormat(Qt.PlainText)
         self.title_lbl.setAlignment(Qt.AlignHCenter)
-        self.artist_lbl = QLabel("")
+        self.artist_lbl = text_fx.RevealLabel("")
         self.artist_lbl.setTextFormat(Qt.PlainText)
         self.artist_lbl.setAlignment(Qt.AlignHCenter)
 
@@ -653,9 +656,10 @@ class FullscreenPlayer(QWidget):
     def _set_label(self, label: QLabel, text: str, kind: str,
                    animate: bool) -> None:
         shown = self._elide(label, theming.styled_case(text))
+        # Pinned to the art width like the mini's — same rescue.
+        label.setToolTip(text)
         if animate:
-            motion_module.scramble_text(label.setText, shown, owner=self,
-                                        kind=kind)
+            text_fx.animate_label(label, shown, owner=self, kind=kind)
         else:
             label.setText(shown)
 

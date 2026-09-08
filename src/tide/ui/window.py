@@ -48,7 +48,7 @@ from ..sources import StreamRef, registry as source_registry
 from ..queue import Queue, RepeatMode, Role
 from .album import AlbumView
 from .artist import ArtistView
-from .headings import line_heading
+from .headings import Heading, line_heading
 from .history import HistoryView
 from .library import LibraryView
 from .loading_indicator import LoadingIndicator
@@ -384,6 +384,8 @@ ACTIONS: tuple[ShortcutAction, ...] = (
                    lambda w: w.search.setFocus()),
     ShortcutAction("search_alt", "focus search ·alt·", "Ctrl+F", "navigation",
                    lambda w: w.search.setFocus()),
+    ShortcutAction("toggle_rail", "collapse / expand the rail", "Ctrl+B",
+                   "navigation", lambda w: w.toggle_nav_rail()),
     ShortcutAction("view_home", "go to home", "Ctrl+1", "navigation",
                    lambda w: w._switch_view("home")),
     ShortcutAction("view_library", "go to library", "Ctrl+2", "navigation",
@@ -561,6 +563,7 @@ class MainWindow(QMainWindow):
         self._await_fallback_timer.timeout.connect(self._on_prefetch_join_timeout)
         self._prefetch.resolved.connect(self._on_prefetch_join_resolved)
         self._prefetch.failed.connect(self._on_prefetch_join_failed)
+        self._prefetch.resolved_track.connect(self._on_prefetch_resolved_track)
         # Click-to-audio timing for the always-on per-play summary line.
         self._perf_t0: float | None = None
         self._perf_vid: str = ""
@@ -582,6 +585,9 @@ class MainWindow(QMainWindow):
         self._sleep_timer.timeout.connect(self._on_sleep_tick)
 
         self._current: api.Track | None = None
+        # (video_id, StreamRef) of the track that resolved most recently;
+        # current_stream_ref() hands it out only while it matches _current.
+        self._current_ref: tuple[str, StreamRef] | None = None
         self._auto_radio_on_play = True   # play-now seeds a radio by default
         self._last_position: float = 0.0
         self._restoring_session: bool = False
@@ -605,6 +611,7 @@ class MainWindow(QMainWindow):
         theming.manager().theme_changed.connect(self._on_theme_changed)
 
         self._build_ui()
+        self._mark_nav_current(self.stack.currentIndex())
         self._wire_player()
         self._wire_queue()
         self._wire_shortcuts()
@@ -654,8 +661,7 @@ class MainWindow(QMainWindow):
         self.nav_settings_btn.clicked.connect(self.open_settings)
 
         nav_col = QVBoxLayout()
-        nav_col.setContentsMargins(10, 14, 10, 14)
-        nav_col.setSpacing(2)
+        self._nav_col = nav_col
         nav_col.addWidget(self.nav_home_btn)
         nav_col.addWidget(self.nav_library_btn)
         nav_col.addWidget(self.nav_queue_btn)
@@ -666,10 +672,22 @@ class MainWindow(QMainWindow):
         nav_col.addWidget(self.nav_fx_btn)
         nav_col.addStretch(1)
         nav_col.addWidget(self.nav_settings_btn)
+        # modern: icon + bare label rows (brutalist ignores the role).
+        for _btn in self._nav_buttons.values():
+            _btn.setRole("row")
+        # Fold the rail to icons. Hidden until an icon set is on — a
+        # rail of nothing is not a collapsed rail.
+        self.nav_collapse_btn = BracketButton("fold")
+        self.nav_collapse_btn.setIconKey("rail")
+        self.nav_collapse_btn.setRole("icon")
+        self.nav_collapse_btn.setVisible(False)
+        self.nav_collapse_btn.clicked.connect(self.toggle_nav_rail)
+        nav_col.addWidget(self.nav_collapse_btn)
         nav = QFrame()
         nav.setObjectName("nav")
         nav.setLayout(nav_col)
-        nav.setFixedWidth(140)
+        self._nav_frame = nav
+        self._fit_nav_rail(self._theme)
 
         # ----- search view -----
         self.search = QLineEdit()
@@ -698,7 +716,7 @@ class MainWindow(QMainWindow):
         self._suggest_timer.setInterval(200)
         self._suggest_timer.timeout.connect(self._fetch_suggestions)
 
-        self.heading = QLabel(self._line_heading("results"))
+        self.heading = Heading("results")
         self.heading.setProperty("class", "dim")
         self.heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -783,7 +801,7 @@ class MainWindow(QMainWindow):
         self.search.textChanged.connect(self._on_search_text_changed)
 
         # ----- queue view -----
-        self.queue_heading = QLabel(self._line_heading("queue"))
+        self.queue_heading = Heading("queue")
         self.queue_heading.setProperty("class", "dim")
 
         self.queue_view = QListView()
@@ -984,6 +1002,10 @@ class MainWindow(QMainWindow):
         # a hidden placeholder so the existing _switch_view branches that
         # reference idx 5 keep working — they're rerouted to "home" below.
         self.stack = QStackedWidget()
+        # The rail marks whichever root view is showing, however it got
+        # there (click, digit shortcut, back). Detail pages keep the root
+        # they were reached from.
+        self.stack.currentChanged.connect(self._mark_nav_current)
         # Named so the adaptive-background QSS can transparentize content
         # containers and QScrollArea viewports. See theming._CONTENT_BACKDROP_QSS.
         self.stack.setObjectName("contentStack")
@@ -1091,6 +1113,8 @@ class MainWindow(QMainWindow):
         # features don't exist. Label doubles as the armed indicator
         # ("zzz 12m" / "zzz song" / "zzz queue"), updated by the tick.
         self.sleep_btn = BracketButton(glyphs.glyph("sleep"))
+        # modern: a moon; an armed timer keeps its "12m" beside it.
+        self.sleep_btn.setIconKey("sleep")
         self.sleep_btn.setToolTip(self._shortcut_tip("sleep timer", "sleep_timer"))
         self.sleep_btn.clicked.connect(self.open_sleep_timer)
 
@@ -1118,7 +1142,15 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         root.addWidget(upper_wrap, stretch=1)
-        root.addWidget(strip)
+        # The strip rides in its own row so modern can inset it from the
+        # window edges (a floating, rounded bar) without touching the
+        # content above. A layout, not a widget: nothing extra to paint.
+        strip_row = QHBoxLayout()
+        strip_row.setContentsMargins(0, 0, 0, 0)
+        strip_row.addWidget(strip)
+        self._strip_row = strip_row
+        root.addLayout(strip_row)
+        self._fit_strip_inset(self._theme)
         central = QWidget()
         central.setObjectName("appSurface")
         central.setLayout(root)
@@ -1731,6 +1763,82 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    # stack index → rail slot, for the current-view marker. 5 (unused),
+    # 6 album, 7 artist and 11 song page are detail pages: no entry, so
+    # the marker stays on the root they were opened from.
+    _NAV_ROOT_VIEWS: dict[int, str] = {
+        0: "home", 1: "library", 2: "queue", 3: "lyrics", 4: "history",
+        8: "visualizer", 9: "source", 10: "audio_fx",
+    }
+
+    def _mark_nav_current(self, index: int) -> None:
+        slot = self._NAV_ROOT_VIEWS.get(int(index))
+        if slot is None:
+            return
+        for name, btn in self._nav_buttons.items():
+            btn.setCurrent(name == slot)
+
+    def _fit_nav_rail(self, theme, *, animate: bool = False, on_done=None) -> None:
+        """Rail geometry per aesthetic. brutalist: the 140px column it has
+        always been. modern: wider, rows that fill it and breathe. With
+        ``animate`` the width eases to its target through the motion
+        profile (a fold / unfold); theme and scale changes snap."""
+        from . import scale as _scale
+        modern = getattr(theme, "aesthetic", "") == "modern"
+        collapsed = self._rail_collapsed()
+        if modern:
+            target = _scale.px(56 if collapsed else 176)
+            self._nav_col.setSpacing(_scale.px(3))
+            h, v = _scale.px(8), _scale.px(12)
+            self._nav_col.setContentsMargins(h, v, h, v)
+        else:
+            target = _scale.px(56) if collapsed else 140
+            self._nav_col.setSpacing(2)
+            self._nav_col.setContentsMargins(10, 14, 10, 14)
+        nav = self._nav_frame
+        if not animate or not nav.isVisible() or nav.width() == target:
+            from . import motion as motion_module
+            motion_module._cancel_prior(nav, "rail-width")
+            nav.setFixedWidth(target)
+            if on_done:
+                on_done()
+            return
+        from . import motion as motion_module
+        motion_module.value_lerp(
+            float(nav.width()), float(target),
+            on_update=lambda v: nav.setFixedWidth(int(round(v))),
+            dur=motion_module.dur("short"), easing=motion_module.ease("out"),
+            on_done=on_done, owner=nav, kind="rail-width")
+
+    def _fit_strip_inset(self, theme) -> None:
+        """modern floats the strip: inset from the sides and the bottom so
+        its rounded corners and hairline read against the backdrop
+        (theming._MODERN_SHELL_QSS draws them). brutalist keeps the bar
+        flush, edge to edge, as it always was."""
+        from . import scale as _scale
+        row = getattr(self, "_strip_row", None)
+        if row is None:
+            return
+        modern = getattr(theme, "aesthetic", "") == "modern"
+        if modern:
+            side, top, bottom = _scale.px(12), _scale.px(4), _scale.px(10)
+            row.setContentsMargins(side, top, side, bottom)
+        else:
+            row.setContentsMargins(0, 0, 0, 0)
+        self._place_up_next(modern)
+
+    def _place_up_next(self, modern: bool) -> None:
+        """Classic strip only: "next" above the title in brutalist, under
+        it in modern. The compact strip centres its own stack."""
+        col = getattr(self, "_strip_right_col", None)
+        if col is None or col.indexOf(self.up_next) < 0:
+            return
+        want = 1 if modern else 0
+        if col.indexOf(self.up_next) == want:
+            return
+        col.removeWidget(self.up_next)
+        col.insertWidget(want, self.up_next)
+
     def _set_stack_index(self, target: int) -> None:
         """Switch the central stack with a motion-aware crossfade. The
         motion module short-circuits to a synchronous index swap when
@@ -1808,7 +1916,7 @@ class MainWindow(QMainWindow):
             self._enter_home_mode()
             return
         self._enter_results_mode()
-        self.heading.setText(self._line_heading(f"searching “{q}”"))
+        self.heading.set_label(f"searching “{q}”")
         self.results.clear()
         self.results_cards.clear()
 
@@ -1861,10 +1969,10 @@ class MainWindow(QMainWindow):
         if filter_ != self._search_filter:
             return
         if not items:
-            self.heading.setText(self._line_heading("no results"))
+            self.heading.set_label("no results")
             self.statusBar().showMessage("no results")
             return
-        self.heading.setText(self._line_heading(f"results · {len(items)}"))
+        self.heading.set_label(f"results · {len(items)}")
         self.statusBar().showMessage(f"{len(items)} results")
 
         is_cards = filter_ in ("albums", "artists", "playlists")
@@ -1921,7 +2029,7 @@ class MainWindow(QMainWindow):
     def _on_search_failed(self, gen: int, msg: str) -> None:
         if gen != self._search_gen:
             return   # a newer search is running/done — don't clobber it
-        self.heading.setText(self._line_heading("search failed"))
+        self.heading.set_label("search failed")
         self.statusBar().showMessage(f"search failed: {msg}")
 
     # ---------- result interactions ----------
@@ -2191,6 +2299,7 @@ class MainWindow(QMainWindow):
         # Any new play supersedes a pending in-flight join.
         self._awaiting_prefetch_vid = None
         self._await_fallback_timer.stop()
+        self._current_ref = None
         self._perf_t0 = time.monotonic()
         self._perf_vid = track.video_id
         self._perf_path = "cold"
@@ -2305,6 +2414,22 @@ class MainWindow(QMainWindow):
             # _on_resolve_failed as before.
             self._spawn_resolve_worker(self._current)
 
+    def current_stream_ref(self) -> StreamRef | None:
+        """The StreamRef playing now, or None until the current track has
+        resolved. What the ambient controller hands the beat analyzer."""
+        cur, held = self._current, self._current_ref
+        if cur is None or held is None or held[0] != cur.video_id:
+            return None
+        return held[1]
+
+    def _on_prefetch_resolved_track(self, track, ref) -> None:
+        ambient = getattr(self, "_ambient", None)
+        if ambient is not None and isinstance(ref, StreamRef):
+            try:
+                ambient.prefetch_beats(track, ref)
+            except Exception:
+                pass
+
     def _on_prefetch_join_timeout(self) -> None:
         vid = self._awaiting_prefetch_vid
         self._awaiting_prefetch_vid = None
@@ -2317,6 +2442,7 @@ class MainWindow(QMainWindow):
         if self._perf_t0 is not None and self._perf_vid == video_id:
             self._perf_resolve_ms = (time.monotonic() - self._perf_t0) * 1000.0
         if isinstance(ref, StreamRef):
+            self._current_ref = (video_id, ref)
             self.player.load_ref(ref)
         else:
             # Defensive: handle a bare URL if some path still emits one.
@@ -2810,9 +2936,7 @@ class MainWindow(QMainWindow):
         self.queue.radio_state_changed.connect(lambda _e: self._schedule_session_save())
 
     def _on_queue_size_changed(self, *_args) -> None:
-        self.queue_heading.setText(
-            self._line_heading(f"queue · {self.queue.rowCount()}")
-        )
+        self.queue_heading.set_label(f"queue · {self.queue.rowCount()}")
         self._refresh_nav_buttons()
         self._refresh_up_next()
 
@@ -3373,8 +3497,10 @@ class MainWindow(QMainWindow):
         prior = self._theme
         self._theme = theme
         self._apply_window_translucency(theme)
-        self.heading.setText(self._line_heading("results"))
-        self.queue_heading.setText(self._line_heading(f"queue · {self.queue.rowCount()}"))
+        self._fit_nav_rail(theme)
+        self._fit_strip_inset(theme)
+        self.heading.set_label("results")
+        self.queue_heading.set_label(f"queue · {self.queue.rowCount()}")
         # If the theme's aesthetic flipped (brutalist ↔ modern), stale slot
         # overrides from the previous aesthetic should reset to the new
         # theme's [slots] prefs so e.g. a "blocks" progress bar from
@@ -3531,6 +3657,8 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self.apply_nav_icons(s.nav_icon_set or "off")
+        from . import text_fx
+        text_fx.set_style(getattr(s, "text_transition", "") or "scramble")
         # Thumbnails are preset-owned (brutalist keeps them ON).
         from .track_row import set_thumbnail_override
         set_thumbnail_override(s.show_thumbnails or "theme")
@@ -3752,6 +3880,61 @@ class MainWindow(QMainWindow):
             else:
                 btn.setSvgIcon(None)
                 btn.setIconGlyph(nav_icons.icon_for(set_name, slot))
+        self._nav_icon_set = set_name
+        self._apply_nav_rail()
+
+    # ---------- collapsible rail ----------
+
+    def _rail_can_collapse(self) -> bool:
+        return bool(getattr(self, "_nav_icon_set", "off") not in ("", "off"))
+
+    def _rail_collapsed(self) -> bool:
+        s = getattr(self, "_settings", None)
+        return bool(getattr(s, "nav_rail_collapsed", False)) and self._rail_can_collapse()
+
+    def toggle_nav_rail(self) -> None:
+        """Ctrl+B / the chevron: fold the rail to icons, or open it."""
+        if not self._rail_can_collapse():
+            self.statusBar().showMessage(theming.styled_case(
+                "the rail folds to icons. pick nav icons in settings → appearance first."))
+            return
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        s.nav_rail_collapsed = not bool(s.nav_rail_collapsed)
+        try:
+            from .. import settings as settings_module
+            settings_module.save_fields(s, "nav_rail_collapsed")
+        except Exception:
+            pass
+        self._apply_nav_rail(animate=True)
+
+    def _apply_nav_rail(self, *, animate: bool = False) -> None:
+        collapsed = self._rail_collapsed()
+        chevron = getattr(self, "nav_collapse_btn", None)
+        if chevron is not None:
+            chevron.setVisible(self._rail_can_collapse())
+            # modern shows the icon; brutalist reads the word.
+            chevron.setLabel("unfold" if collapsed else "fold")
+            chevron.setToolTip(theming.styled_case(
+                "expand the rail" if collapsed else "collapse the rail"))
+
+        def _labels() -> None:
+            for btn in self._nav_buttons.values():
+                btn.setLabelHidden(collapsed)
+
+        if not animate:
+            _labels()
+            self._fit_nav_rail(self._theme)
+            return
+        # Folding: the labels go first, then the width eases down.
+        # Unfolding: the width eases open, then the labels come back —
+        # they would elide against a half-open rail otherwise.
+        from . import motion as motion_module
+        if collapsed:
+            _labels()
+        self._fit_nav_rail(self._theme, animate=True,
+                           on_done=None if collapsed else _labels)
 
     def _on_volume_changed(self, value: int) -> None:
         self.player.set_volume(value)
@@ -4042,10 +4225,19 @@ class MainWindow(QMainWindow):
         right_col = QVBoxLayout()
         right_col.setContentsMargins(0, 0, 0, 0)
         right_col.setSpacing(6)
-        right_col.addWidget(self.up_next)
-        right_col.addWidget(self.now_label, stretch=1)
+        # brutalist reads top-down: what's next, then what's on. modern
+        # leads with the song and files "next" under it (_place_up_next
+        # moves it live on a personality flip).
+        modern = getattr(self._theme, "aesthetic", "") == "modern"
+        if modern:
+            right_col.addWidget(self.now_label, stretch=1)
+            right_col.addWidget(self.up_next)
+        else:
+            right_col.addWidget(self.up_next)
+            right_col.addWidget(self.now_label, stretch=1)
         right_col.addLayout(progress_row)
         right_col.addLayout(controls_row)
+        self._strip_right_col = right_col
 
         strip_layout = QHBoxLayout()
         strip_layout.setContentsMargins(16, 12, 16, 12)
@@ -4637,10 +4829,12 @@ class MainWindow(QMainWindow):
         "apply_layout_setting",
         "apply_thumbnails_setting",
         "apply_adaptive_setting",
+        "apply_text_contrast_setting",
         "apply_corner_setting",
         "apply_csd_setting",
         "apply_nav_icons_setting",
         "apply_motion_setting",
+        "apply_text_transition_setting",
         "apply_loading_setting",
         "apply_ui_sounds_setting",
         "apply_mini_setting",
@@ -4739,6 +4933,13 @@ class MainWindow(QMainWindow):
         if ambient is not None:
             ambient.set_pulse_enabled(s.adaptive_pulse and s.adaptive_background)
 
+    def apply_text_contrast_setting(self) -> None:
+        """The readability layer on the theming manager. Restyles itself
+        when the flag actually moves, so this is safe to run on any
+        appearance edit."""
+        theming.manager().set_text_contrast(
+            bool(self._settings.adaptive_text_contrast))
+
     def apply_corner_setting(self) -> None:
         """Corner softness: the CentralBg paint radius plus the sticky
         @radius token override on the theming manager so every QSS widget
@@ -4773,6 +4974,10 @@ class MainWindow(QMainWindow):
         motion_module.bind_preset(getattr(self._settings, "preset", "") or "")
         if hasattr(self, "central_bg"):
             self.central_bg.set_motion(self._settings.motion or "lite")
+
+    def apply_text_transition_setting(self) -> None:
+        from . import text_fx
+        text_fx.set_style(getattr(self._settings, "text_transition", "") or "scramble")
 
     def apply_loading_setting(self) -> None:
         if hasattr(self, "_loading"):

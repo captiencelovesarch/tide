@@ -433,10 +433,50 @@ class PaintTests(_SliderCase):
                                return_value=fake):
             img = self.s.grab().toImage()
         g = self.s._groove_rect()
-        c = img.pixelColor(int(g.center().x()), int(g.center().y()))
+        # Sample BETWEEN detents: 1.25 sits dead centre of this range and
+        # its dot would tint the reading.
+        x = int(self.s._x_for_value(1.875))
+        c = img.pixelColor(x, int(g.center().y()))
         self.assertGreater(c.red(), 150, "groove fill ignored the accent token")
         self.assertLess(c.green(), 80)
         self.assertLess(c.blue(), 80)
+
+    def test_detents_paint_as_dots_inside_the_groove(self) -> None:
+        fake = theming.Theme(
+            slug="fake", name="fake", path=Path("."),
+            tokens={
+                "accent": "#ff0000", "fg": "#ffffff", "dim": "#666666",
+                "border_dim": "#2a2a2a", "bg_alt": "#101010",
+            },
+        )
+        self.s.set_value(2.0)   # accent under every detent
+        with mock.patch.object(theming.manager(), "current_effective",
+                               return_value=fake):
+            img = self.s.grab().toImage()
+        g = self.s._groove_rect()
+        cy = int(g.center().y())
+        # 1.25 is a detent and is far enough from the 2.0 handle to be
+        # painted rather than covered by the disc.
+        on_dot = img.pixelColor(int(self.s._x_for_value(1.25)), cy)
+        off_dot = img.pixelColor(int(self.s._x_for_value(1.875)), cy)
+        self.assertGreater(
+            on_dot.green(), off_dot.green() + 40,
+            "no fg-tinted detent dot painted on the accent fill")
+        self.assertGreaterEqual(
+            cy - g.top(), 0.0,
+            "the dot band must live inside the groove, not above it")
+
+    def test_end_detents_stay_whole_circles_inside_the_pill(self) -> None:
+        # A detent at the rail sits on the pill's rounded cap; drawn at its
+        # raw x it would be sliced in half by the groove edge.
+        g = self.s._groove_rect()
+        radius = g.height() / 2.0
+        for value in (0.5, 2.0):
+            with self.subTest(value=value):
+                dx = min(max(self.s._x_for_value(value),
+                             g.left() + radius), g.right() - radius)
+                self.assertGreaterEqual(dx - self.s._dot_r(), g.left() - 0.01)
+                self.assertLessEqual(dx + self.s._dot_r(), g.right() + 0.01)
 
     def test_paint_without_theme_uses_fallback_hexes(self) -> None:
         with mock.patch.object(theming.manager(), "current_effective",
@@ -458,11 +498,6 @@ class PaintTests(_SliderCase):
 class BubbleLayoutTests(_SliderCase):
     """The signature readout must not cover what it annotates."""
 
-    def _tick_band(self) -> tuple[float, float]:
-        g = self.s._groove_rect()
-        tick_h = float(scale.px(4, minimum=3))
-        return (g.top() - tick_h - 1.0, g.top() - 1.0)
-
     def test_size_hint_leaves_room_for_the_bubble(self) -> None:
         hint = self.s.sizeHint()
         self.s.resize(400, hint.height())
@@ -473,18 +508,18 @@ class BubbleLayoutTests(_SliderCase):
         handle_top = self.s._groove_rect().center().y() - hr
         self.assertLessEqual(rect.bottom(), handle_top,
                              "bubble overlaps the handle disc")
-        self.assertLessEqual(rect.bottom(), self._tick_band()[0],
-                             "bubble overlaps the detent ticks")
         self.assertGreaterEqual(rect.top(), 0.0)
 
-    def test_handle_and_ticks_stay_inside_the_widget(self) -> None:
+    def test_handle_stays_inside_the_widget(self) -> None:
+        # The disc is the tallest thing on the control now that detents
+        # dropped into the groove — clear it and everything else clears.
         for h in (24, 26, 34, self.s.sizeHint().height(), 80):
             with self.subTest(height=h):
                 self.s.resize(400, h)
                 g = self.s._groove_rect()
                 hr = float(self.s._handle_r())
                 self.assertLessEqual(g.center().y() + hr, float(h) + 0.01)
-                self.assertGreaterEqual(self._tick_band()[0], -0.01)
+                self.assertGreaterEqual(g.center().y() - hr, -0.01)
 
     def test_short_host_drops_the_bubble_instead_of_overlapping(self) -> None:
         # the transport's SpringVolume seat is 26px — no room for a bubble

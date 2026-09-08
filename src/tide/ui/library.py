@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 
 from .. import api, qthreads, theming
 from .card import Card, CardGrid
-from .headings import line_heading as _line_heading
+from .headings import Heading, line_heading as _line_heading
 from .track_row import TrackRowDelegate
 from .widgets import BracketButton
 
@@ -165,10 +165,11 @@ class LibraryView(QWidget):
         self.stack = QStackedWidget()
 
         # ----- index page -----
-        self.index_heading = QLabel(_line_heading("your library"))
+        self.index_heading = Heading("your library")
         self.index_heading.setProperty("class", "dim")
 
         self.refresh_btn = BracketButton("refresh")
+        self.refresh_btn.setIconKey("refresh")
         self.refresh_btn.clicked.connect(self.reload_playlists)
 
         # v1.5 tabs. Beyond-playlists tabs show only for sources with the
@@ -222,8 +223,10 @@ class LibraryView(QWidget):
 
         # ----- detail page -----
         self.back_btn = BracketButton("back")
+        self.back_btn.setIconKey("back")
+        self.back_btn.setRole("pill")
         self.back_btn.clicked.connect(self._show_index)
-        self.detail_heading = QLabel(_line_heading("playlist"))
+        self.detail_heading = Heading("playlist")
         self.detail_heading.setProperty("class", "dim")
         self.detail_heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
@@ -306,7 +309,7 @@ class LibraryView(QWidget):
             self._load_tab(name)
 
     def _load_tab(self, name: str) -> None:
-        self.index_heading.setText(_line_heading(f"your library · loading {name}…"))
+        self.index_heading.set_label(f"your library · loading {name}…")
         thread = QThread()
         worker = _LibraryTabWorker(self.api, name, self._tabs_gen)
         worker.moveToThread(thread)
@@ -322,8 +325,7 @@ class LibraryView(QWidget):
     def _on_tab_done(self, gen: int, tab: str, entries: list) -> None:
         if gen != self._tabs_gen:
             return
-        self.index_heading.setText(
-            _line_heading(f"your library · {tab} · {len(entries)}"))
+        self.index_heading.set_label(f"your library · {tab} · {len(entries)}")
         if tab == "songs":
             marker = self._list_marker()
             self.songs_list.clear()
@@ -353,7 +355,7 @@ class LibraryView(QWidget):
         if gen != self._tabs_gen:
             return
         self._tab_loaded.discard(tab)
-        self.index_heading.setText(_line_heading(f"your library · {tab} failed"))
+        self.index_heading.set_label(f"your library · {tab} failed")
         self.status_message.emit(f"library {tab}: {msg}")
 
     # ---------- index ----------
@@ -368,7 +370,7 @@ class LibraryView(QWidget):
         # empty state instead of spinning a worker that'll just raise.
         if hasattr(self.api, "supports") and not self.api.supports("library"):
             src_name = theming.styled_case(getattr(self.api, "name", "this source"))
-            self.index_heading.setText(_line_heading(f"{src_name} has no library"))
+            self.index_heading.set_label(f"{src_name} has no library")
             # Key mention from the live keymap — a hardcoded "(ctrl+7)"
             # goes stale on rebind. No main window (tests) → no mention.
             win = self.window()
@@ -384,7 +386,7 @@ class LibraryView(QWidget):
             placeholder.setFlags(Qt.NoItemFlags)
             self.playlists_list.addItem(placeholder)
             return
-        self.index_heading.setText(_line_heading("loading…"))
+        self.index_heading.set_label("loading…")
         thread = QThread()
         worker = _PlaylistsWorker(self.api)
         worker.moveToThread(thread)
@@ -405,7 +407,7 @@ class LibraryView(QWidget):
 
     def _on_playlists(self, items: list[api.PlaylistEntry]) -> None:
         marker = self._list_marker()
-        self.index_heading.setText(_line_heading(f"your library · {len(items)}"))
+        self.index_heading.set_label(f"your library · {len(items)}")
         self.playlists_list.clear()
         for p in items:
             label = f"{marker}{theming.styled_case(p.title or '')}"
@@ -416,7 +418,7 @@ class LibraryView(QWidget):
             self.playlists_list.addItem(item)
 
     def _on_playlists_failed(self, msg: str) -> None:
-        self.index_heading.setText(_line_heading("library load failed"))
+        self.index_heading.set_label("library load failed")
         self.status_message.emit(f"library: {msg}")
 
     def _on_playlist_activated(self, item: QListWidgetItem) -> None:
@@ -458,7 +460,7 @@ class LibraryView(QWidget):
         self._detail_gen += 1
         self._current_entry = entry
         self.tracks_list.clear()
-        self.detail_heading.setText(_line_heading(f"{entry.title} · loading…"))
+        self.detail_heading.set_label(f"{entry.title} · loading…")
         self._refresh_edit_buttons()
         self.stack.setCurrentIndex(1)
         self.status_message.emit(theming.styled_case(f"loading {entry.title}…"))
@@ -496,7 +498,7 @@ class LibraryView(QWidget):
             return   # straggler for a playlist the user already left
         self._current_detail = detail
         marker = self._list_marker()
-        self.detail_heading.setText(_line_heading(f"{detail.title} · {len(detail.tracks)}"))
+        self.detail_heading.set_label(f"{detail.title} · {len(detail.tracks)}")
         self.tracks_list.clear()
         for tr in detail.tracks:
             artist = theming.styled_case(tr.artists or "")
@@ -514,7 +516,7 @@ class LibraryView(QWidget):
     def _on_detail_failed(self, gen: int, msg: str) -> None:
         if gen != self._detail_gen:
             return
-        self.detail_heading.setText(_line_heading("playlist load failed"))
+        self.detail_heading.set_label("playlist load failed")
         self.status_message.emit(f"playlist: {msg}")
 
     def _show_index(self) -> None:
@@ -554,7 +556,7 @@ class LibraryView(QWidget):
             return
         pid = entry.playlist_id
         entry.title = new_title
-        self.detail_heading.setText(_line_heading(f"{new_title} · …"))
+        self.detail_heading.set_label(f"{new_title} · …")
         self._spawn_mutation(
             lambda: self.api.edit_playlist_remote(pid, title=new_title),
             f"renamed to {new_title}",

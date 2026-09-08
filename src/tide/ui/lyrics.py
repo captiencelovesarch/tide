@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 
 from .. import api, qthreads, theming
 from . import motion as motion_module
-from .headings import line_heading as _line_heading
+from .headings import Heading, line_heading as _line_heading
 
 
 class _LyricsWorker(QObject):
@@ -256,7 +256,7 @@ class LyricsView(QWidget):
         # smoothly when the user toggles in mid-line.
         self._last_position: float = 0.0
 
-        self.heading = QLabel(_line_heading("lyrics"))
+        self.heading = Heading("lyrics")
         self.heading.setProperty("class", "dim")
         # Heading embeds the remote track title (see show_for); plain-text it.
         self.heading.setTextFormat(Qt.PlainText)
@@ -327,7 +327,7 @@ class LyricsView(QWidget):
         if track is None:
             self._current_video_id = None
             self._current_track = None
-            self.heading.setText(_line_heading("lyrics"))
+            self.heading.set_label("lyrics")
             self._show_plain("── no track ──")
             self._clear_timed()
             self.mute_btn.setEnabled(False)
@@ -336,7 +336,7 @@ class LyricsView(QWidget):
             return
         self._current_video_id = track.video_id
         self._current_track = track
-        self.heading.setText(_line_heading(f"lyrics · {(track.title or '').lower()}"))
+        self.heading.set_label(f"lyrics · {(track.title or '').lower()}")
         self._show_plain("── loading ──")
         self._clear_timed()
         # Enable the swap toggle now that there's a real track. The

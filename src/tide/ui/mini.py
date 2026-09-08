@@ -40,7 +40,7 @@ QWIDGETSIZE_MAX = (1 << 24) - 1
 from .. import audio_capture, backdrops, glyphs, settings as settings_module, theming
 from ..lyric_tracker import LyricTracker
 from ..player import PlayState
-from . import art_cache, motion as motion_module, scale as _scale
+from . import art_cache, motion as motion_module, scale as _scale, text_fx
 from .central_bg import CentralBg
 from .variants import ThinProgress
 from .visualizer import _Canvas
@@ -255,14 +255,14 @@ class MiniPlayer(QWidget):
         fg.setContentsMargins(0, 0, 0, 0)
         fg.setSpacing(_scale.px(6))
 
-        self.title_lbl = QLabel("nothing playing")
+        self.title_lbl = text_fx.RevealLabel("nothing playing")
         self.title_lbl.setTextFormat(Qt.PlainText)
         self.title_lbl.setAlignment(Qt.AlignHCenter)
-        self.artist_lbl = QLabel("")
+        self.artist_lbl = text_fx.RevealLabel("")
         self.artist_lbl.setTextFormat(Qt.PlainText)
         self.artist_lbl.setAlignment(Qt.AlignHCenter)
         self.artist_lbl.setProperty("class", "dim")
-        self.ticker_lbl = QLabel("")
+        self.ticker_lbl = text_fx.RevealLabel("")
         self.ticker_lbl.setTextFormat(Qt.PlainText)
         # Long lyric lines wrap instead of eliding; the window grows DOWN to
         # make room (width can't budge: Wayland anchors a widening window at
@@ -321,7 +321,8 @@ class MiniPlayer(QWidget):
         self.time_lbl.setProperty("class", "dim")
         # Glyph-only ([📌] like the ♡ button): a text label here out-measures
         # the art and widens the whole window in bracket-style themes.
-        self.pin_btn = BracketButton("📌", "📌")
+        self.pin_btn = BracketButton("pin", "📌")
+        self.pin_btn.setIconKey("pin")
         self.pin_btn.setFocusPolicy(Qt.NoFocus)
         self.pin_btn.setToolTip("keep on top of other windows")
         self.exit_btn = BracketButton("expand", glyphs.glyph("fullscreen"))
@@ -634,9 +635,12 @@ class MiniPlayer(QWidget):
     def _set_label(self, label: QLabel, text: str, kind: str,
                    animate: bool) -> None:
         shown = self._elide(label, theming.styled_case(text))
+        # The labels are pinned to the art's width, so a long title always
+        # loses its tail here — the tooltip is where the whole thing
+        # stays reachable. Set from the raw text, before styled_case.
+        label.setToolTip(text)
         if animate:
-            motion_module.scramble_text(label.setText, shown, owner=self,
-                                        kind=kind)
+            text_fx.animate_label(label, shown, owner=self, kind=kind)
         else:
             label.setText(shown)
 
@@ -703,8 +707,8 @@ class MiniPlayer(QWidget):
             shown, h = "", self._ticker_line_height()
         self._set_ticker_height(h, animate)
         if animate:
-            motion_module.scramble_text(self.ticker_lbl.setText, shown,
-                                        owner=self, kind="scramble/ticker")
+            text_fx.animate_label(self.ticker_lbl, shown, owner=self,
+                                  kind="scramble/ticker")
         else:
             self.ticker_lbl.setText(shown)
 

@@ -24,7 +24,15 @@ import unittest
 
 import numpy as np
 
-from tide.audio_capture import CHUNK, SAMPLE_RATE, _compute_pulse
+from unittest import mock
+
+from tide import audio_capture
+from tide.audio_capture import (
+    CHUNK,
+    PULSE_DEPTH_MIN,
+    SAMPLE_RATE,
+    _compute_pulse,
+)
 
 
 def _run_envelope(signal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -339,6 +347,164 @@ class BassPulseTest(unittest.TestCase):
         bed = 0.5 * np.sin(2 * np.pi * 80 * t)
         _, envs = _run_envelope(bed)   # state starts at None, like post-gap
         self.assertLess(float(envs.max()), 0.5)
+
+
+class SustainIntegrationTest(unittest.TestCase):
+    """The second reported bug: "on songs with a constant bass in the
+    background it just turns tide into a flashbang".
+
+    And then the bug in the first fix for it: "it performs as intended
+    for a second, and then it gets flattened so much it is basically not
+    pulsing". That one had two causes worth keeping pinned:
+
+      * the density band was calibrated on synthetic kicks and sat far
+        below where real music lives, so the weight pegged at maximum
+        within a second of playback on everything;
+      * the shaping wrote its result back into the state the detector
+        iterated on, so the lifted floor held the envelope above the
+        incoming level, hits stopped counting as attacks, and the pulse
+        starved itself flat.
+
+    The shape of the fix is therefore load-bearing: the detector envelope
+    (``renv``) is self-contained, and the shaping is a pure function of
+    it that is bounded below by ``PULSE_DEPTH_MIN``. These tests pin the
+    bound and the no-feedback property, because those are what make a
+    mis-calibrated density survivable rather than fatal.
+    """
+
+    def setUp(self) -> None:
+        self.rng = np.random.default_rng(42)
+        self.duration = 16.0
+        n = int(self.duration * SAMPLE_RATE)
+        self.t = np.arange(n) / SAMPLE_RATE
+        self.noise = self.rng.standard_normal(n) * 0.01
+        self.bed = 0.45 * np.sin(2 * np.pi * 50 * self.t)
+
+    def _run(self, signal):
+        """(shaped envelope, integration weight, raw envelope) per chunk."""
+        state = None
+        envs, integs, renvs = [], [], []
+        for i in range(len(signal) // CHUNK):
+            frame = np.ascontiguousarray(
+                signal[i * CHUNK:(i + 1) * CHUNK], dtype=np.float32)
+            state = _compute_pulse(frame, state)
+            envs.append(state.env)
+            integs.append(state.diag["integ"])
+            renvs.append(state.renv)
+        return np.asarray(envs), np.asarray(integs), np.asarray(renvs)
+
+    def _sparse(self):
+        return self.bed + _kick_pattern(self.duration, period_s=0.5) + self.noise
+
+    def _dense(self, duration=None):
+        # Seeded per call, NOT off self.rng: two calls with the same
+        # duration must produce the same samples, or the comparisons
+        # below are measuring different songs.
+        d = self.duration if duration is None else duration
+        n = int(d * SAMPLE_RATE)
+        t = np.arange(n) / SAMPLE_RATE
+        noise = np.random.default_rng(7).standard_normal(n) * 0.01
+        return (0.45 * np.sin(2 * np.pi * 50 * t)
+                + _kick_pattern(d, amp=0.6, period_s=0.125, burst_s=0.06)
+                + noise)
+
+    @staticmethod
+    def _flicker(envs):
+        """Mean absolute frame-to-frame move — how violently the light
+        travels, which is what "strobe" actually means to an eye."""
+        return float(np.abs(np.diff(envs)).mean())
+
+    # ---------- the untouched end ----------
+
+    def test_sparse_kicks_are_left_bit_identical(self) -> None:
+        # ~2 hits/sec is far under the band, so this must not merely be
+        # "close to" the old behaviour — it must be the same float.
+        sig = _kick_pattern(self.duration, period_s=0.5) + self.noise
+        envs, integs, renvs = self._run(sig)
+        self.assertEqual(float(integs.max()), 0.0)
+        self.assertTrue(np.array_equal(envs, renvs))
+
+    def test_a_constant_bed_alone_is_not_a_reason_to_shape(self) -> None:
+        # Constant bass under sparse kicks is still a punchy song.
+        envs, integs, renvs = self._run(self._sparse())
+        self.assertEqual(float(integs.max()), 0.0)
+        self.assertTrue(np.array_equal(envs, renvs))
+
+    # ---------- the shaped end ----------
+
+    def test_dense_bass_engages_and_stops_strobing(self) -> None:
+        envs, integs, _ = self._run(self._dense())
+        tail = slice(len(envs) // 3, None)
+        self.assertGreater(float(integs[tail].mean()), 0.9)
+        sparse_envs, _, _ = self._run(self._sparse())
+        self.assertLess(self._flicker(envs[tail]),
+                        self._flicker(sparse_envs[tail]))
+
+    def test_the_shaped_pulse_keeps_most_of_its_swing(self) -> None:
+        # The whole point of bounding the depth: it must still read as a
+        # pulse, not as a glow that happens to wobble.
+        envs, _, renvs = self._run(self._dense())
+        tail = slice(len(envs) // 3, None)
+        shaped = float(envs[tail].max() - envs[tail].min())
+        raw = float(renvs[tail].max() - renvs[tail].min())
+        self.assertGreater(shaped, raw * (PULSE_DEPTH_MIN - 0.05))
+        self.assertGreater(shaped, 0.2)
+
+    def test_it_does_not_collapse_over_a_long_run(self) -> None:
+        # The reported regression: fine for about a second, then flat.
+        # Every window across half a minute must still be moving.
+        envs, _, _ = self._run(self._dense(duration=30.0))
+        dt = CHUNK / SAMPLE_RATE
+        for sec in range(3, 30, 3):
+            with self.subTest(second=sec):
+                w = envs[int(sec / dt):int((sec + 3) / dt)]
+                self.assertGreater(float(w.max() - w.min()), 0.15,
+                                   f"the pulse went flat by second {sec}")
+
+    # ---------- the properties that make a misfire survivable ----------
+
+    def test_the_depth_bound_holds_even_if_density_pegs(self) -> None:
+        # Force the weight to maximum on every chunk — the state a
+        # mis-calibrated band puts us in — and the pulse must survive.
+        with mock.patch.object(audio_capture, "PULSE_DENSITY_LO", -1.0), \
+                mock.patch.object(audio_capture, "PULSE_DENSITY_HI", 0.0):
+            envs, integs, renvs = self._run(self._dense(duration=20.0))
+        tail = slice(len(envs) // 3, None)
+        self.assertGreater(float(integs[tail].mean()), 0.99)
+        shaped = float(envs[tail].max() - envs[tail].min())
+        raw = float(renvs[tail].max() - renvs[tail].min())
+        self.assertGreater(shaped, raw * (PULSE_DEPTH_MIN - 0.05))
+
+    def test_shaping_never_feeds_back_into_the_detector(self) -> None:
+        # renv must be identical with the shaping at full strength and
+        # with it off. If the output can reach the detector at all, this
+        # is where it shows up — and that feedback is what starved the
+        # attack path flat the first time.
+        _, _, renv_shaped = self._run(self._dense())
+        with mock.patch.object(audio_capture, "PULSE_DENSITY_LO", 1e9), \
+                mock.patch.object(audio_capture, "PULSE_DENSITY_HI", 1e9 + 1):
+            _, integs_off, renv_plain = self._run(self._dense())
+        self.assertEqual(float(integs_off.max()), 0.0)
+        self.assertTrue(np.array_equal(renv_shaped, renv_plain),
+                        "the shaped output leaked back into the detector")
+
+    def test_hits_still_register_as_attacks_while_shaped(self) -> None:
+        # The starvation signature: the raw envelope stops snapping up to
+        # the incoming level. Count the chunks where it does.
+        _, _, renvs = self._run(self._dense(duration=20.0))
+        rises = int(np.sum(np.diff(renvs) > 0.05))
+        self.assertGreater(rises, 20, "the attack path went quiet")
+
+    def test_density_falls_back_to_transient_when_the_song_opens_up(self) -> None:
+        # Dense passage, then sparse: the punch has to come back, or a
+        # breakdown after a drop would stay smothered.
+        dense = self._dense(duration=8.0)
+        sparse = _kick_pattern(8.0, period_s=0.5)
+        sig = np.concatenate([dense, sparse + self.noise[:len(sparse)]])
+        _, integs, _ = self._run(sig)
+        half = len(integs) // 2
+        self.assertGreater(float(integs[:half].max()), 0.9)
+        self.assertLess(float(integs[-len(integs) // 4:].max()), 0.1)
 
 
 if __name__ == "__main__":

@@ -79,6 +79,10 @@ class StreamPrefetch(QObject):
     # Fired whenever a prefetch successfully resolves — purely informational,
     # for tests / status indicators that want to react to a warm cache.
     resolved = Signal(str)   # video_id
+    # Same event with the track and its StreamRef attached, for consumers
+    # that want to do something with the stream itself (the beat analyzer
+    # decodes it ahead of playback).
+    resolved_track = Signal(object, object)   # Track, StreamRef
     # Fired when an in-flight prefetch raises. Lets _play_track join an
     # in-flight resolve and still learn about failure (it falls back to its
     # own worker). Prefetch itself stays best-effort/silent otherwise.
@@ -90,6 +94,7 @@ class StreamPrefetch(QObject):
         # In-flight video_ids — guards request() against spawning duplicate
         # workers for the same track. Cleared in _on_resolved/_on_failed.
         self._inflight: set[str] = set()
+        self._tracks: dict[str, "Track"] = {}
         # Fire-time master switch for pointer-driven prefetch (hover +
         # press). A settings toggle lands here — checked when a hover/press
         # fires, NOT at wire time, because settings are injected after the
@@ -144,6 +149,7 @@ class StreamPrefetch(QObject):
             return
 
         self._inflight.add(vid)
+        self._tracks[vid] = track
         # Unparented thread + unparented worker moved onto it; qthreads.retain
         # holds both Python wrappers until the thread is destroyed, and its
         # ref-drop on the GUI thread is what frees the worker — never a
@@ -295,13 +301,17 @@ class StreamPrefetch(QObject):
     def _on_resolved(self, video_id: str, ref) -> None:
         self._cache[video_id] = (ref, time.monotonic() + DEFAULT_TTL_SEC)
         self._inflight.discard(video_id)
+        track = self._tracks.pop(video_id, None)
         self.resolved.emit(video_id)
+        if track is not None:
+            self.resolved_track.emit(track, ref)
 
     def _on_failed(self, video_id: str, msg: str) -> None:
         # No retry — _play_track will spawn its own worker on cache miss.
         # Silent failure is intentional: prefetch is best-effort. The signal
         # exists for the window's in-flight join, which does retry.
         self._inflight.discard(video_id)
+        self._tracks.pop(video_id, None)
         self.failed.emit(video_id, msg)
 
     def _on_warm_fire(self) -> None:

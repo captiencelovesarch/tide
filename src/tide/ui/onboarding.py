@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 from .. import theming
 from .chooser import PANE_ORDER, PersonalityPane
 from .widgets import BracketButton
+from . import scale
 
 
 # ---------- result + state ----------
@@ -1191,7 +1192,7 @@ class OnboardingDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("tide — welcome")
         self.setModal(True)
-        self.resize(720, 600)
+        scale.fit_dialog(self, 720, 600)
 
         self._result = OnboardingResult()
         self._steps: list[_Step] = [
@@ -1215,6 +1216,8 @@ class OnboardingDialog(QDialog):
         self._progress = _ProgressDots(total=len(self._steps))
 
         self._back_btn = BracketButton("back")
+        self._back_btn.setIconKey("back")
+        self._back_btn.setRole("pill")
         self._back_btn.clicked.connect(self._back)
         self._next_btn = BracketButton("next")
         self._next_btn.clicked.connect(self._next)

@@ -1,223 +1,139 @@
-"""Read cookies from the user's real Chromium-family browser.
+"""Read YouTube Music cookies out of the user's real browser.
 
-Google blocks credential sign-in in embedded webviews. Instead we let the
-user sign in via their real (trusted) browser and import the cookies.
+Google rejects every other way in. Credential entry inside an embedded
+webview is blocked outright, and third-party OAuth stopped working against
+the YouTube Music endpoints in late 2024: yt-dlp removed its OAuth login,
+and ytmusicapi's OAuth path has answered HTTP 400 since September 2025 with
+its maintainer calling it a dead end. So the only session tide can use is
+the one the user already has in a browser they trust.
 
-The user never sees a config file. From their POV, it's "sign in to YT Music
-in chromium, then click 'import'."
+The reading itself is delegated to yt-dlp's cookie loader
+(``yt_dlp.cookies.extract_cookies_from_browser``). It knows the Chromium
+and Firefox database layouts, Chromium's per-desktop key storage (kwallet
+5/6 through kwallet-query, gnome-keyring through secretstorage, plain text
+when there is no keyring), and it is fixed upstream within days of a
+browser changing any of that. tide used to carry its own copy of all of
+it, so a Chromium schema bump or a new keyring would have killed sign-in
+until someone noticed. This module now only decides which browsers are
+present, hands yt-dlp the profile to read, scopes the jar to what a browser
+would actually send music.youtube.com, and records when the session lapses.
 
-Supports Chromium, Chrome, Brave, Vivaldi, Edge on Linux. On KDE the safe-
-storage key lives in kwallet under (folder "Chromium Keys", entry
-"Chromium Safe Storage"). On GNOME it's in libsecret under application
-"chromium". Both stash the same kind of key.
+The user never sees a config file. From their side it is "sign in to YT
+Music in your browser, then click import".
 """
 from __future__ import annotations
 
-import hashlib
+import glob
 import os
-import shutil
-import sqlite3
-import subprocess
-import tempfile
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
-
-@dataclass
-class BrowserProfile:
-    slug: str                     # "chromium", "google-chrome", "brave", ...
-    label: str                    # human label
-    cookies_path: Path
-    keyring_app: str              # "chromium" or "chrome", used for libsecret lookup
-    kwallet_folder: str           # "Chromium Keys" / "Chrome Keys" / ...
-    kwallet_entry: str            # "Chromium Safe Storage" / "Chrome Safe Storage" / ...
-
-
-# Order matters — first match wins as the default suggestion.
-_CANDIDATES: list[BrowserProfile] = [
-    BrowserProfile(
-        slug="chromium",
-        label="chromium",
-        cookies_path=Path.home() / ".config/chromium/Default/Cookies",
-        keyring_app="chromium",
-        kwallet_folder="Chromium Keys",
-        kwallet_entry="Chromium Safe Storage",
-    ),
-    BrowserProfile(
-        slug="google-chrome",
-        label="google chrome",
-        cookies_path=Path.home() / ".config/google-chrome/Default/Cookies",
-        keyring_app="chrome",
-        kwallet_folder="Chrome Keys",
-        kwallet_entry="Chrome Safe Storage",
-    ),
-    BrowserProfile(
-        slug="brave",
-        label="brave",
-        cookies_path=Path.home() / ".config/BraveSoftware/Brave-Browser/Default/Cookies",
-        keyring_app="brave",
-        kwallet_folder="Brave Keys",
-        kwallet_entry="Brave Safe Storage",
-    ),
-    BrowserProfile(
-        slug="vivaldi",
-        label="vivaldi",
-        cookies_path=Path.home() / ".config/vivaldi/Default/Cookies",
-        keyring_app="vivaldi",
-        kwallet_folder="Vivaldi Keys",
-        kwallet_entry="Vivaldi Safe Storage",
-    ),
-    BrowserProfile(
-        slug="microsoft-edge",
-        label="microsoft edge",
-        cookies_path=Path.home() / ".config/microsoft-edge/Default/Cookies",
-        keyring_app="chromium",
-        kwallet_folder="Microsoft Edge Keys",
-        kwallet_entry="Microsoft Edge Safe Storage",
-    ),
-]
+from yt_dlp.cookies import extract_cookies_from_browser
 
 
 class ImportError_(RuntimeError):
     pass
 
 
+# ---------- which browsers are on this machine ----------
+
+
+def _config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    slug: str                    # yt-dlp browser name
+    label: str                   # picker text
+    family: str                  # "chromium" or "firefox"
+    config: tuple[str, ...]      # roots under $XDG_CONFIG_HOME
+    home: tuple[str, ...] = ()   # roots under $HOME (flatpak, snap, legacy)
+
+
+# Order matters: first match is the picker's default suggestion. Native and
+# sandboxed installs of the same browser share one entry; every cookie db
+# found under any of the roots is a candidate, newest first.
+_CANDIDATES: tuple[_Candidate, ...] = (
+    _Candidate("chromium", "chromium", "chromium", ("chromium",),
+               (".var/app/org.chromium.Chromium/config/chromium",)),
+    _Candidate("chrome", "google chrome", "chromium", ("google-chrome",),
+               (".var/app/com.google.Chrome/config/google-chrome",)),
+    _Candidate("brave", "brave", "chromium", ("BraveSoftware/Brave-Browser",),
+               (".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",)),
+    _Candidate("vivaldi", "vivaldi", "chromium", ("vivaldi",),
+               (".var/app/com.vivaldi.Vivaldi/config/vivaldi",)),
+    _Candidate("edge", "microsoft edge", "chromium", ("microsoft-edge",),
+               (".var/app/com.microsoft.Edge/config/microsoft-edge",)),
+    _Candidate("opera", "opera", "chromium", ("opera",)),
+    _Candidate("whale", "whale", "chromium", ("naver-whale",)),
+    _Candidate("firefox", "firefox", "firefox",
+               ("mozilla/firefox",),          # FF147+ follows XDG
+               (".mozilla/firefox",           # everything before that
+                ".var/app/org.mozilla.firefox/config/mozilla/firefox",
+                ".var/app/org.mozilla.firefox/.mozilla/firefox",
+                "snap/firefox/common/.mozilla/firefox")),
+)
+
+# Where each family keeps the cookie db, relative to a root. Chromium moved
+# it from <profile>/Cookies to <profile>/Network/Cookies in v96; Opera has
+# no profile dirs at all; Firefox profiles are named "<hash>.default-release".
+_DB_PATTERNS: dict[str, tuple[str, ...]] = {
+    "chromium": ("Cookies", "*/Cookies", "*/Network/Cookies"),
+    "firefox": ("cookies.sqlite", "*/cookies.sqlite", "Profiles/*/cookies.sqlite"),
+}
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _cookie_dbs(cand: _Candidate) -> list[Path]:
+    roots = [_config_home() / rel for rel in cand.config]
+    roots += [Path.home() / rel for rel in cand.home]
+    found: set[Path] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for pattern in _DB_PATTERNS[cand.family]:
+            for hit in glob.glob(str(root / pattern)):
+                path = Path(hit)
+                if path.is_file():
+                    found.add(path)
+    return sorted(found, key=_mtime, reverse=True)
+
+
+@dataclass
+class BrowserProfile:
+    slug: str                            # yt-dlp browser name
+    label: str                           # human label
+    cookies_path: Path                   # newest cookie db for this browser
+    family: str = "chromium"
+    candidates: tuple[Path, ...] = ()    # every cookie db found, newest first
+
+
 def available_profiles() -> list[BrowserProfile]:
-    return [p for p in _CANDIDATES if p.cookies_path.is_file()]
+    out: list[BrowserProfile] = []
+    for cand in _CANDIDATES:
+        dbs = _cookie_dbs(cand)
+        if dbs:
+            out.append(BrowserProfile(
+                slug=cand.slug, label=cand.label, cookies_path=dbs[0],
+                family=cand.family, candidates=tuple(dbs),
+            ))
+    return out
 
 
-# ---------- key retrieval ----------
-
-
-def _try_kwallet(folder: str, entry: str) -> bytes | None:
-    for wallet in ("kdewallet",):
-        try:
-            out = subprocess.run(
-                ["kwallet-query", "-r", entry, "-f", folder, wallet],
-                capture_output=True, text=True, timeout=10,
-            )
-        except FileNotFoundError:
-            return None
-        except subprocess.TimeoutExpired:
-            return None
-        if out.returncode == 0:
-            value = out.stdout.strip()
-            if value:
-                return value.encode("utf-8")
-    return None
-
-
-def _try_secret_service(app: str) -> bytes | None:
-    try:
-        import secretstorage  # type: ignore
-    except ImportError:
-        return None
-    try:
-        bus = secretstorage.dbus_init()
-        try:
-            for coll in secretstorage.get_all_collections(bus):
-                try:
-                    for item in coll.search_items({"application": app}):
-                        try:
-                            secret = item.get_secret()
-                            if secret:
-                                return bytes(secret)
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-        finally:
-            try:
-                bus.close()
-            except Exception:
-                pass
-    except Exception:
-        return None
-    return None
-
-
-def get_safe_storage_key(profile: BrowserProfile) -> bytes:
-    """Return the per-browser safe-storage password used to derive the cookie key.
-
-    Tries Secret Service first (GNOME, libsecret, portal), then kwallet.
-    Returns the hardcoded "peanuts" fallback if both fail (works for v10
-    cookies that were written when no keyring was reachable).
-    """
-    for getter in (
-        lambda: _try_secret_service(profile.keyring_app),
-        lambda: _try_kwallet(profile.kwallet_folder, profile.kwallet_entry),
-    ):
-        key = getter()
-        if key:
-            return key
-    return b"peanuts"
-
-
-# ---------- AES-CBC decryption ----------
-
-
-def _derive_key(password: bytes) -> bytes:
-    return hashlib.pbkdf2_hmac("sha1", password, b"saltysalt", iterations=1, dklen=16)
-
-
-def _strip_pkcs7(data: bytes) -> bytes:
-    if not data:
-        return data
-    pad = data[-1]
-    if pad < 1 or pad > 16:
-        return data
-    if data[-pad:] != bytes([pad]) * pad:
-        return data
-    return data[:-pad]
-
-
-def decrypt_chromium_value(blob: bytes, key: bytes, *, host_key: str = "", name: str = "") -> str:
-    """Decrypt a Chromium cookie value.
-
-    Recognizes v10 / v11 prefixes. Modern Chromium (>= ~v116) prepends a
-    32-byte SHA256 integrity hash to the plaintext — we strip those bytes
-    when present.
-
-    Returns "" for empty/unknown blobs.
-    """
-    if not blob:
-        return ""
-    if blob[:3] not in (b"v10", b"v11"):
-        try:
-            return blob.decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-    ct = blob[3:]
-    iv = b" " * 16
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
-    decryptor = cipher.decryptor()
-    pt = decryptor.update(ct) + decryptor.finalize()
-    pt = _strip_pkcs7(pt)
-    # Heuristic: if the first 32 bytes look like binary (non-printable) but
-    # bytes after that decode cleanly as UTF-8, treat the prefix as the
-    # SHA256 integrity hash and skip it.
-    if len(pt) > 32 and not _looks_printable(pt[:32]):
-        try:
-            return pt[32:].decode("utf-8")
-        except UnicodeDecodeError:
-            pass
-    return pt.decode("utf-8", errors="replace")
-
-
-def _looks_printable(b: bytes) -> bool:
-    if not b:
-        return False
-    printable = sum(1 for c in b if 0x20 <= c < 0x7f)
-    return printable / len(b) > 0.9
-
-
-# ---------- the public entry point ----------
+# ---------- expiry ----------
 
 
 # Cookies whose lifetime actually gates an authenticated session. If any one
-# of these lapses, ytmusicapi starts 401ing — so the session's effective
+# of these lapses, ytmusicapi starts 401ing, so the session's effective
 # expiry is the EARLIEST of them, not the latest.
 AUTH_COOKIES = (
     "__Secure-3PAPISID",
@@ -231,12 +147,31 @@ AUTH_COOKIES = (
 _CHROME_EPOCH_OFFSET = 11644473600
 
 
-def _chrome_time_to_unix(expires_utc: int) -> float | None:
+def _chrome_time_to_unix(expires_utc: float) -> float | None:
     """Convert a Chromium expires_utc to a unix timestamp. 0 means 'session
     cookie' (dies with the browser) and has no meaningful expiry."""
     if not expires_utc:
         return None
     return expires_utc / 1_000_000 - _CHROME_EPOCH_OFFSET
+
+
+def _cookie_expiry_unix(expires: object) -> float | None:
+    """yt-dlp hands Chromium's expires_utc through untouched (microseconds
+    since 1601) and Firefox's expiry as unix seconds. Tell them apart by
+    size: unix seconds stay under 1e11 until the year 5138, while Chromium's
+    count is past 1e16 for any date after 1970."""
+    if not expires:
+        return None
+    try:
+        value = float(expires)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if value > 1e11:
+        return _chrome_time_to_unix(value)
+    return value
+
+
+# ---------- jar -> result ----------
 
 
 @dataclass
@@ -247,79 +182,162 @@ class ImportResult:
     # None when every auth cookie is session-scoped / unreadable. Surfaced so
     # tide can warn BEFORE playback starts silently degrading.
     expires_at: float | None = None
+    # Set when a signed-out result is tide's problem rather than the user's
+    # (encrypted store, no key). The wizard shows it instead of "sign in".
+    note: str = ""
 
     @property
     def looks_signed_in(self) -> bool:
         return "__Secure-3PAPISID" in self.cookies
 
 
-def import_cookies(profile: BrowserProfile) -> ImportResult:
-    """Pull YouTube cookies from the given browser profile.
+def _sent_to_music(domain: str) -> bool:
+    """Mirror the real browser: domain cookies on .youtube.com plus host-only
+    cookies for music.youtube.com itself. Nothing from .google.com (the auth
+    cookies exist there too with different values, and mixing them in made
+    YouTube answer as signed out), nothing host-only from other youtube.com
+    subdomains (a browser would not send those either)."""
+    return domain.lower().lstrip(".") in ("youtube.com", "music.youtube.com")
 
-    Copies the Cookies SQLite file first so an open browser doesn't lock us out.
-    """
-    if not profile.cookies_path.is_file():
-        raise ImportError_(f"no cookies database at {profile.cookies_path}")
 
-    key = _derive_key(get_safe_storage_key(profile))
-
-    with tempfile.TemporaryDirectory(prefix="tide-import-") as tmp:
-        copy = Path(tmp) / "Cookies"
-        try:
-            shutil.copy2(profile.cookies_path, copy)
-            wal = profile.cookies_path.parent / (profile.cookies_path.name + "-wal")
-            if wal.is_file():
-                shutil.copy2(wal, copy.parent / (copy.name + "-wal"))
-        except OSError as exc:
-            raise ImportError_(f"couldn't read cookies file: {exc}") from exc
-
-        try:
-            conn = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
-        except sqlite3.Error as exc:
-            raise ImportError_(f"couldn't open cookies db: {exc}") from exc
-
-        try:
-            # ONLY youtube.com-scoped cookies. A browser sends just these to
-            # music.youtube.com — it never sends .google.com cookies there.
-            # Auth cookies (SID, __Secure-3PSID, SAPISID, __Secure-3PAPISID)
-            # exist on BOTH .google.com and .youtube.com with DIFFERENT values;
-            # mixing them into one flat header and deduping by name kept the
-            # wrong-domain value for shared names, so YouTube saw the request
-            # as logged-out (generic home, empty library) even with a fresh,
-            # valid session. Scoping to youtube.com mirrors the real browser
-            # request and authenticates correctly.
-            rows = conn.execute(
-                "SELECT host_key, name, value, encrypted_value, expires_utc "
-                "FROM cookies "
-                "WHERE host_key LIKE '%youtube.com' "
-                "ORDER BY expires_utc DESC"
-            ).fetchall()
-        finally:
-            conn.close()
-
-    out: dict[str, str] = {}
-    expiries: dict[str, float] = {}
-    for host_key, name, value, encrypted_value, expires in rows:
-        if name in out:
-            continue  # already have a fresher one (ORDER BY expires DESC)
-        try:
-            if encrypted_value:
-                decoded = decrypt_chromium_value(
-                    bytes(encrypted_value), key, host_key=host_key or "", name=name or ""
-                )
-            else:
-                decoded = value or ""
-        except Exception:
+def _result_from_jar(profile: BrowserProfile, jar: Iterable) -> ImportResult:
+    # name -> (rank, value, expiry). Duplicate names keep the one that
+    # expires last; a session cookie (no expiry) loses to any dated one.
+    best: dict[str, tuple[float, str, float | None]] = {}
+    for cookie in jar:
+        if not _sent_to_music(getattr(cookie, "domain", "") or ""):
             continue
-        if decoded:
-            out[name] = decoded
-            if name in AUTH_COOKIES:
-                unix = _chrome_time_to_unix(expires or 0)
-                if unix is not None:
-                    expiries[name] = unix
-
+        value = getattr(cookie, "value", "") or ""
+        if not value:
+            continue
+        expiry = _cookie_expiry_unix(getattr(cookie, "expires", None))
+        rank = expiry if expiry is not None else float("-inf")
+        prev = best.get(cookie.name)
+        if prev is None or rank > prev[0]:
+            best[cookie.name] = (rank, value, expiry)
+    cookies = {name: value for name, (_, value, _) in best.items()}
+    expiries = [
+        expiry for name, (_, _, expiry) in best.items()
+        if name in AUTH_COOKIES and expiry is not None
+    ]
     return ImportResult(
         profile=profile,
-        cookies=out,
-        expires_at=min(expiries.values()) if expiries else None,
+        cookies=cookies,
+        expires_at=min(expiries) if expiries else None,
     )
+
+
+# ---------- reading through yt-dlp ----------
+
+
+class _Log:
+    """Duck-typed stand-in for yt-dlp's YDLLogger. Keeps every line so the
+    caller can tell "signed out" apart from "could not decrypt"."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def debug(self, message: object) -> None:
+        self.lines.append(str(message))
+
+    info = debug
+
+    def warning(self, message: object, only_once: bool = False, once: bool = False) -> None:
+        self.lines.append(str(message))
+
+    def error(self, message: object, is_error: bool = True) -> None:
+        self.lines.append(str(message))
+
+    # Phrases yt-dlp logs when the keyring password was missing or wrong.
+    _TROUBLE = (
+        "could not be decrypted",
+        "no key found",
+        "failed to read",
+        "kwallet-query",
+        "secretstorage not available",
+        "exception running kwallet",
+    )
+    _CHOSEN = re.compile(r"chosen keyring: (\w+)", re.IGNORECASE)
+
+    def key_trouble(self) -> bool:
+        return any(t in line.lower() for line in self.lines for t in self._TROUBLE)
+
+    def chosen_keyring(self) -> str | None:
+        for line in self.lines:
+            m = self._CHOSEN.search(line)
+            if m:
+                return m.group(1).upper()
+        return None
+
+
+# yt-dlp's keyring names, in the order worth retrying. BASICTEXT is left out
+# on purpose: it only unlocks v10 cookies, which every attempt already tries.
+_KEYRINGS = ("KWALLET6", "KWALLET5", "GNOMEKEYRING", "KWALLET")
+
+_NO_KEY_NOTE = (
+    "its cookie store is encrypted and no keyring key was found. "
+    "kde: install kwallet. gnome: install python-secretstorage."
+)
+
+
+def _read_jar(slug: str, profile_dir: Path, keyring: str | None) -> tuple[Iterable, _Log]:
+    log = _Log()
+    jar = extract_cookies_from_browser(slug, profile=str(profile_dir), logger=log, keyring=keyring)
+    return jar, log
+
+
+def _import_one(profile: BrowserProfile, db: Path) -> ImportResult:
+    jar, log = _read_jar(profile.slug, db.parent, None)
+    result = _result_from_jar(profile, jar)
+    if result.looks_signed_in or profile.family != "chromium" or not log.key_trouble():
+        return result
+    # Chromium encrypts cookie values with a key parked in the desktop
+    # keyring, and yt-dlp picks the keyring from $XDG_CURRENT_DESKTOP the
+    # way Chromium itself does. When that guess comes back empty (a bare
+    # window manager, a browser started with --password-store=, a wallet
+    # that answers only one of the two APIs) try the others before giving
+    # up. Each pass re-copies the db; that is cheap next to a wrong answer.
+    tried = {log.chosen_keyring()}
+    for keyring in _KEYRINGS:
+        if keyring in tried:
+            continue
+        tried.add(keyring)
+        try:
+            jar, _ = _read_jar(profile.slug, db.parent, keyring)
+        except Exception:
+            continue
+        retry = _result_from_jar(profile, jar)
+        if retry.looks_signed_in:
+            return retry
+    result.note = _NO_KEY_NOTE
+    return result
+
+
+def import_cookies(profile: BrowserProfile) -> ImportResult:
+    """Pull YouTube cookies from the given browser.
+
+    Every cookie db found for that browser is tried, newest first, until one
+    holds a signed-in session. The user's YT Music profile is not always the
+    one they browsed with most recently, and the old importer only ever
+    looked at ``Default``. A signed-out result from the newest db is kept as
+    the answer when none of them is signed in.
+
+    Blocking (db copies + a keyring round-trip per attempt). Call it off the
+    GUI thread.
+    """
+    dbs = tuple(profile.candidates) or (profile.cookies_path,)
+    first_miss: ImportResult | None = None
+    last_error: Exception | None = None
+    for db in dbs:
+        try:
+            result = _import_one(profile, db)
+        except Exception as exc:
+            last_error = exc
+            continue
+        if result.looks_signed_in:
+            return result
+        if first_miss is None:
+            first_miss = result
+    if first_miss is not None:
+        return first_miss
+    raise ImportError_(f"couldn't read cookies from {profile.label}: {last_error}")
