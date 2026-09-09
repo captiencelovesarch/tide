@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
 # The rate window we advertise over D-Bus mirrors what the in-app speed UI
 # allows, so external clients can't push tide outside its own range.
+from . import config
 from .speed_law import SPEED_MAX, SPEED_MIN
 
 
@@ -234,7 +235,9 @@ class MprisService(QObject):
         self._bus = QDBusConnection.sessionBus()
 
         self._connected = False
-        self._service_name = "org.mpris.MediaPlayer2.tide"
+        # A flatpak may own the mpris name under its app id and nothing
+        # else, so there tide is org.mpris.MediaPlayer2.<app id>.
+        self._service_name = "org.mpris.MediaPlayer2." + (config.FLATPAK_ID or "tide")
 
     # ---------- lifecycle ----------
 

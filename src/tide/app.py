@@ -373,7 +373,9 @@ def run(argv: list[str] | None = None) -> int:
         app.setStyle(fusion)
     app.setApplicationName("tide")
     app.setOrganizationName("tide")
-    app.setDesktopFileName("tide")
+    # Wayland matches a window to its icon by this name, and the flatpak
+    # installs the desktop file under the app id.
+    app.setDesktopFileName(config.FLATPAK_ID or "tide")
 
     # One tide per config dir — a second launch pokes the live instance
     # and bows out (else two mpris services, two trays, two captures).
@@ -736,10 +738,13 @@ def run(argv: list[str] | None = None) -> int:
     update_bridge = _UpdateBridge()
     update_bridge.newer.connect(_show_update_toast)
     window._update_bridge = update_bridge   # keep alive for the app's lifetime
-    try:
-        updates.check_in_background(__version__, update_bridge.newer.emit)
-    except Exception:
-        pass
+    # flathub delivers updates itself; a toast pointing at github would
+    # send flatpak users the wrong way.
+    if not config.in_flatpak():
+        try:
+            updates.check_in_background(__version__, update_bridge.newer.emit)
+        except Exception:
+            pass
     # Expose so the (later) settings dialog can re-configure live.
     window._discord = discord
     window._lyric_tracker = lyric_tracker

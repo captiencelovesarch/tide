@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from .. import auth, browser_import as bi, qthreads
+from .. import auth, browser_import as bi, config, qthreads
 
 
 YT_MUSIC_URL = "https://music.youtube.com/"
@@ -167,6 +167,14 @@ class SignInDialog(QDialog):
         self._status = QLabel("")
         self._status.setWordWrap(True)
         self._status.setStyleSheet("color: palette(mid);")
+        if not self._profiles and config.in_flatpak():
+            # The sandbox can't see browser profiles unless the user opens
+            # it; the readme's flatpak section has the override command.
+            self._status.setText(
+                "the flatpak can't read your browser's profile. paste headers "
+                "instead, or let it see your browser with flatpak override "
+                "(the readme has the command) and open this window again."
+            )
 
         # Always available, even when no browser profile was found — that's
         # exactly the case the paste path exists for.

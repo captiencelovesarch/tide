@@ -4,6 +4,14 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [Unreleased]
+
+### Added
+- **flatpak.** a flathub manifest and appstream metadata under `flatpak/`: the kde 6.11 runtime, the pyside base app, and a libmpv built in. the sandbox sees `~/Music` and the audio sockets and not your browser, so the sign-in window says so and the readme has the override commands for the one-click import.
+
+### Changed
+- **inside a flatpak** the single-instance socket lives in the app's runtime dir (the place flatpak sets aside for sockets shared between instances), mpris announces itself under the app id (the sandbox owns no other name), the desktop file name follows the app id so wayland finds the icon, and the github release toast is off since flathub delivers updates.
+
 ## [2.1.0] — 2026-09-08 — the modern face
 
 modern has a face of its own now. Every bracket in that personality is gone: icons where an action has one, pills where the label is the content. The chrome got material to sit on, grids that fill the window, a player bar that floats, headings at a real size and a home hero worth the name. brutalist is untouched, byte for byte in its stylesheet. Underneath, the bass pulse reads each song ahead of time instead of listening to the speakers, and cookie import rides yt-dlp.

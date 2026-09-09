@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 captience -->
+<component type="desktop-application">
+  <id>io.github.captiencelovesarch.tide</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>tide</name>
+  <summary>one queue for every music source</summary>
+  <developer id="io.github.captiencelovesarch">
+    <name>captience</name>
+  </developer>
+  <description>
+    <p>tide is a music player for linux that pulls from youtube music, subsonic and navidrome, soundcloud, bandcamp, mixcloud and your local files, and lets you mix all of them in one queue. a youtube search result, a bandcamp deep cut and a local flac sit in the same queue and each one plays through the right backend. native Qt on top of mpv.</p>
+    <p>it is two players. brutalist is a music player and nothing else: monospace type, hard edges, bracket buttons, nothing animates. modern is the same songs, alive: springy sliders, soft corners, icons, and a backdrop that takes its color from the album cover and moves with the bass. same library and same queue underneath, and each side remembers its own customizations.</p>
+    <p>sixteen themes ship with it and none of them is a palette swap. each picks its own fonts, casing, corners and visualizer. a theme editor, a strip builder for the player bar, a keymap editor and a glyph editor live in settings, all previewing live on the running app.</p>
+    <p>day to day: synced lyrics with a karaoke mode, a home feed with your listening stats, song pages with credits and comments, a mini player, a fullscreen mode, a sleep timer, a 10-band eq with reverb and an effects drawer, ten visualizers, mpris, and an optional discord presence. spotify search and library work; spotify playback does not (the readme explains why).</p>
+    <p>signing in to youtube music happens in your own browser. the sandbox can't read browser profiles on its own, so the sign-in window has a paste-headers option, and the readme explains how to open the sandbox to your browser instead.</p>
+  </description>
+  <launchable type="desktop-id">io.github.captiencelovesarch.tide.desktop</launchable>
+  <url type="homepage">https://github.com/captiencelovesarch/tide</url>
+  <url type="bugtracker">https://github.com/captiencelovesarch/tide/issues</url>
+  <url type="vcs-browser">https://github.com/captiencelovesarch/tide</url>
+  <url type="contribute">https://github.com/captiencelovesarch/tide/blob/main/CONTRIBUTING.md</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+    <category>Music</category>
+  </categories>
+  <keywords>
+    <keyword>music</keyword>
+    <keyword>player</keyword>
+    <keyword>youtube</keyword>
+    <keyword>ytmusic</keyword>
+    <keyword>subsonic</keyword>
+    <keyword>navidrome</keyword>
+    <keyword>soundcloud</keyword>
+    <keyword>bandcamp</keyword>
+    <keyword>mixcloud</keyword>
+    <keyword>mpv</keyword>
+  </keywords>
+  <provides>
+    <binary>tide</binary>
+  </provides>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <content_rating type="oars-1.1" />
+  <screenshots>
+    <screenshot type="default">
+      <caption>modern, playing</caption>
+      <image>https://raw.githubusercontent.com/captiencelovesarch/tide/a570a4a50fbeba35b8853fd3bd372f51f0320fbd/assets/screenshots/modern-window.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>brutalist, the same library</caption>
+      <image>https://raw.githubusercontent.com/captiencelovesarch/tide/a570a4a50fbeba35b8853fd3bd372f51f0320fbd/assets/screenshots/brutalist-window.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>choose your tide, on first launch</caption>
+      <image>https://raw.githubusercontent.com/captiencelovesarch/tide/a570a4a50fbeba35b8853fd3bd372f51f0320fbd/assets/screenshots/chooser-panes.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>synced lyrics</caption>
+      <image>https://raw.githubusercontent.com/captiencelovesarch/tide/a570a4a50fbeba35b8853fd3bd372f51f0320fbd/assets/screenshots/lyrics-synced.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>the adaptive theme, recolored from the cover</caption>
+      <image>https://raw.githubusercontent.com/captiencelovesarch/tide/a570a4a50fbeba35b8853fd3bd372f51f0320fbd/assets/screenshots/now-playing-adaptive.png</image>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="2.1.0" date="2026-09-08">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.1.0</url>
+      <description>
+        <p>modern has a face of its own: icons instead of brackets, surfaces for the chrome, grids that fill the window, a floating player bar. the bass pulse reads each song ahead of time. cookie import goes through yt-dlp, with a paste-headers fallback. the rail folds, and the title has four ways to change when the track does.</p>
+      </description>
+    </release>
+    <release version="2.0.0" date="2026-08-31">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.0.0</url>
+      <description>
+        <p>two personalities, brutalist and modern, each with its own look, motion and sounds. theme editor, strip builder, keymap editor and glyph editor. fullscreen mode, liquid backdrop, real reverb and an effects drawer. one instance per config.</p>
+      </description>
+    </release>
+  </releases>
+</component>

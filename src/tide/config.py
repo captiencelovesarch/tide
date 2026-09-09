@@ -7,6 +7,15 @@ from pathlib import Path
 
 APP_NAME = "tide"
 
+# Set by the flatpak runtime. Inside that sandbox a few things move: the
+# single-instance socket, the mpris bus name, the desktop file name, and
+# flathub owns updates.
+FLATPAK_ID: str | None = os.environ.get("FLATPAK_ID") or None
+
+
+def in_flatpak() -> bool:
+    return FLATPAK_ID is not None
+
 
 def _xdg(env: str, default: str) -> Path:
     return Path(os.environ.get(env) or Path.home() / default)

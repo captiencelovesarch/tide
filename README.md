@@ -99,7 +99,27 @@ cd tide
 makepkg -si
 ```
 
-other distros: untested and unsupported, but it is plain python + PySide6 + mpv, so `PYTHONPATH=src python -m tide` after installing the deps from the tech list below will probably run. the visualizer wants `parec` from pipewire-pulse. no promises.
+every other distro: flathub. the submission is in review; once it lands this is the whole install:
+
+```sh
+flatpak install flathub io.github.captiencelovesarch.tide
+```
+
+the flatpak is the same tide on the kde 6.11 runtime with its own libmpv. the sandbox changes three things:
+
+- **signing in.** the sandbox can't read your browser's profile, so the sign-in window offers "paste headers instead": sign in on music.youtube.com, copy the request headers of any request from devtools, paste. if you would rather have the normal one-click import, let tide see the browser and open the sign-in window again. firefox:
+
+  ```sh
+  flatpak override --user --filesystem=~/.mozilla:ro --filesystem=xdg-config/mozilla:ro io.github.captiencelovesarch.tide
+  ```
+
+  a chromium-family browser also keeps its cookie key in your wallet, so it needs the profile (`xdg-config/google-chrome`, `chromium`, `BraveSoftware`, `vivaldi`, `microsoft-edge`, `opera` or `naver-whale`) and the wallet: `--talk-name=org.freedesktop.secrets` on gnome, `--talk-name=org.kde.kwalletd6` on kde. a browser that is itself a flatpak keeps its profile under `~/.var/app/<its id>/config`, grant that path instead.
+- **local files.** `~/Music` is visible out of the box. another folder: pick it in settings → sources, or `flatpak override --user --filesystem=/path/to/music:ro io.github.captiencelovesarch.tide`.
+- **updates** come from flathub, so the in-app release toast is off.
+
+the manifest lives in [`flatpak/`](flatpak/) with notes on building it yourself.
+
+running from a checkout on anything else: it is plain python + PySide6 + mpv, so `PYTHONPATH=src python -m tide` after installing the deps from the tech list below will probably run. the visualizer wants `parec` from pipewire-pulse. no promises.
 
 signing in: google blocks OAuth for the youtube music endpoints, so cookies are the only path that works. tide reads them out of your own browser (chromium, chrome, brave, vivaldi, edge, opera, whale or firefox, flatpak and snap installs included) through yt-dlp's cookie loader, with your wallet key. when the session dies, and it will die whenever google feels like it, tide notices, says so, and offers a one-click refresh that re-imports from your still-signed-in browser. sessions imported before v1.2.7 just re-import once.
 

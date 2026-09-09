@@ -14,6 +14,7 @@ module knows nothing about windows.
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Callable
 
 from PySide6.QtCore import QObject
@@ -28,6 +29,20 @@ def _server_name() -> str:
 
     digest = hashlib.sha256(str(config.CONFIG_DIR).encode("utf-8")).hexdigest()
     return f"tide-{digest[:16]}"
+
+
+def _socket_name() -> str:
+    """What the server listens on. Outside a sandbox the flat token, which
+    Qt files under the temp dir. Inside a flatpak the app's runtime dir
+    ($XDG_RUNTIME_DIR/app/<id>) is the place set aside for sockets shared
+    between instances of one app, so the guard lives there."""
+    from tide import config
+
+    name = _server_name()
+    run_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if config.in_flatpak() and run_dir:
+        return os.path.join(run_dir, "app", config.FLATPAK_ID, name)
+    return name
 
 
 class InstanceGuard(QObject):
@@ -131,7 +146,7 @@ def acquire(on_message: Callable[[str], None]) -> InstanceGuard | None:
     """Claim the single-instance name, or None when a live instance owns
     it. ``on_message`` receives lines sent via :func:`notify_running`.
     Needs a running Q(Core)Application for signal delivery, no window."""
-    name = _server_name()
+    name = _socket_name()
     server = QLocalServer()
     if not server.listen(name):
         # Name taken: live instance or stale file — only a probe can
@@ -151,7 +166,7 @@ def notify_running(command: str = "raise", timeout_ms: int = 800) -> bool:
     Blocking waits only — this runs in the doomed second process before
     any event loop."""
     sock = QLocalSocket()
-    sock.connectToServer(_server_name())
+    sock.connectToServer(_socket_name())
     if not sock.waitForConnected(timeout_ms):
         sock.abort()
         return False
