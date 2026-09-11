@@ -11,4 +11,4 @@ try:
 
     __version__ = _pkg_version("tide")
 except Exception:
-    __version__ = "2.1.0"
+    __version__ = "2.1.1"
