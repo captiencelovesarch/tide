@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable
 
 import yt_dlp
@@ -217,6 +220,15 @@ def _parse_hms(s: str) -> int:
     if len(parts) == 3:
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
     return 0
+
+
+# Radio paging: one watch-playlist page is about 50 tracks; past a few
+# pages the radio has wandered anyway, and the anchor moves on.
+_RADIO_PAGE = 50
+_RADIO_MAX = 250
+# videoType values radio leaves out (see get_radio).
+_UGC = "MUSIC_VIDEO_TYPE_UGC"
+_RADIO_SKIP_TYPES = (_UGC, "MUSIC_VIDEO_TYPE_PODCAST_EPISODE")
 
 
 def _to_track(item: dict) -> Track | None:
@@ -794,14 +806,33 @@ class YTMusicSource(MusicSource):
             return LyricsResult(plain_text=plain)
         return lrc
 
-    def get_radio(self, video_id: str, exclude: set[str] | None = None) -> list[Track]:
+    def get_radio(self, video_id: str, exclude: set[str] | None = None,
+                  depth: int = 0) -> list[Track]:
+        """The seed's radio, read ``depth`` pages further down each time
+        (ytmusicapi follows the continuations up to ``limit``), so a long
+        session stays on the radio of the song the user picked.
+
+        Fan uploads and podcast episodes are dropped unless the seed is a
+        fan upload itself: a radio seeded from a regular song otherwise
+        drifts into slowed / sped-up re-uploads and, now and then, a
+        podcast."""
         if not video_id:
             return []
         excluded = set(exclude or ())
         excluded.add(video_id)
-        res = self.yt.get_watch_playlist(videoId=video_id, radio=True)
+        limit = min(_RADIO_PAGE * (max(0, int(depth)) + 1), _RADIO_MAX)
+        res = self.yt.get_watch_playlist(videoId=video_id, radio=True,
+                                         limit=limit)
+        items = res.get("tracks", []) or []
+        seed_type = next((item.get("videoType") for item in items
+                          if item.get("videoId") == video_id), None)
+        banned = set(_RADIO_SKIP_TYPES)
+        if seed_type == _UGC:
+            banned.discard(_UGC)
         out: list[Track] = []
-        for item in res.get("tracks", []) or []:
+        for item in items:
+            if item.get("videoType") in banned:
+                continue
             tr = _to_track(item)
             if not tr or tr.video_id in excluded:
                 continue
@@ -1457,13 +1488,15 @@ _AUTH_RETRY_SECS = 30 * 60
 # provided YouTube account cookies are no longer valid…").
 _JAR_ERROR_MARKERS = ("no longer valid", "401", "unauthorized")
 
-# One auth pass at a time. YoutubeDL reads the cookie jar at construction
-# and REWRITES it on close (save_cookies — this is how rotated cookies
-# persist), so two parallel auth resolves race a truncating write against
-# a read: the loser sees a half-written jar and the auth pass dies until
-# something rewrites the file. Prefetch fires up to three workers 500ms
-# apart while each pass takes 1–4s, so the overlap is routine, not rare.
-# Anonymous passes never touch the jar and stay parallel.
+# Guards the cookie jar FILE, never a network call. YoutubeDL reads the jar
+# at construction and REWRITES it on close (save_cookies — this is how
+# rotated cookies persist), so two auth passes sharing one file race a
+# truncating write against a read and the loser sees a half-written jar.
+# The first fix held this lock across the whole extraction, which queued
+# every auth resolve behind the others: warm() fires five 500ms apart, each
+# pass takes ~4s, and a click on the fifth track waited ~19s (measured).
+# Now each pass runs on its own snapshot of the jar and only the copy in
+# and the atomic swap back out are serialized.
 _AUTH_JAR_LOCK = threading.Lock()
 
 
@@ -1528,6 +1561,42 @@ def _extract_stream_url(url: str, opts: dict) -> tuple[str | None, dict]:
     return stream_url, info
 
 
+def _extract_with_jar_snapshot(url: str, opts: dict) -> tuple[str | None, dict]:
+    """Run an auth pass against a private copy of the cookie jar.
+
+    yt-dlp gets a snapshot it can read and rewrite freely; if it rotated
+    anything, the snapshot replaces the real jar with an atomic rename, so
+    a concurrent reader sees the old file or the new one, never half of
+    either. Two passes that both rotate: last one wins, and both results
+    are cookies YouTube just handed out.
+    """
+    jar = opts["cookiefile"]
+    fd, snap = tempfile.mkstemp(prefix=".yt_cookies.", suffix=".txt",
+                                dir=os.path.dirname(jar) or None)
+    os.close(fd)
+    try:
+        with _AUTH_JAR_LOCK:
+            shutil.copyfile(jar, snap)
+        with open(snap, "rb") as fh:
+            before = fh.read()
+        try:
+            return _extract_stream_url(url, {**opts, "cookiefile": snap})
+        finally:
+            try:
+                with open(snap, "rb") as fh:
+                    rotated = fh.read() != before
+                if rotated:
+                    with _AUTH_JAR_LOCK:
+                        os.replace(snap, jar)
+            except OSError:
+                pass
+    finally:
+        try:
+            os.unlink(snap)
+        except OSError:
+            pass
+
+
 def _harvest_ytdlp_info(video_id: str, info: dict) -> None:
     """Bank the community numbers riding along on a yt-dlp extraction.
 
@@ -1575,8 +1644,6 @@ def resolve_stream_url(video_id: str) -> str:
         cache.remove_stream_url(SOURCE_SLUG, video_id)
         perf.mark(f"resolve {video_id}: disk-cache entry dead — re-resolving")
 
-    global _auth_pass_broken
-
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -1595,24 +1662,13 @@ def resolve_stream_url(video_id: str) -> str:
     from .. import auth
     cookiefile = auth.yt_dlp_cookiefile()
 
-    attempts: list[tuple[str, dict]] = []
-    if cookiefile and _should_try_auth_pass(cookiefile):
-        attempts.append(("auth", {**opts, "cookiefile": cookiefile}))
-    elif cookiefile:
-        perf.mark(f"resolve {video_id}: auth pass skipped (recent failure)")
-    attempts.append(("anon", opts))
-    for client in _FALLBACK_CLIENTS:
-        attempts.append((client, {
-            **opts,
-            "extractor_args": {"youtube": {"player_client": [client]}},
-        }))
-
-    for label, pass_opts in attempts:
+    def run_pass(label: str, pass_opts: dict) -> tuple[str, dict] | None:
+        """One extraction. The live URL and its info, or None."""
+        global _auth_pass_broken
         t0 = time.monotonic()
         try:
             if label == "auth":
-                with _AUTH_JAR_LOCK:
-                    stream_url, info = _extract_stream_url(url, pass_opts)
+                stream_url, info = _extract_with_jar_snapshot(url, pass_opts)
             else:
                 stream_url, info = _extract_stream_url(url, pass_opts)
         except Exception as exc:
@@ -1624,21 +1680,55 @@ def resolve_stream_url(video_id: str) -> str:
                     pass
             perf.mark(f"resolve {video_id}: {label} pass FAILED "
                       f"({(time.monotonic() - t0) * 1000:.0f}ms)")
-            continue
+            return None
         if label == "auth":
             _auth_pass_broken = None
         if not stream_url:
             perf.mark(f"resolve {video_id}: {label} pass returned no url")
-            continue
+            return None
         if not _stream_url_alive(stream_url):
             perf.mark(f"resolve {video_id}: {label} pass URL dead on probe "
                       f"({(time.monotonic() - t0) * 1000:.0f}ms)")
-            continue
+            return None
         perf.mark(f"resolve {video_id}: {label} pass ok "
                   f"({(time.monotonic() - t0) * 1000:.0f}ms)")
+        return stream_url, info
+
+    def accept(hit: tuple[str, dict]) -> str:
+        stream_url, info = hit
         _harvest_ytdlp_info(video_id, info)
         cache.put_stream_url(SOURCE_SLUG, video_id, stream_url,
                              ttl_seconds=YTMusicSource.STREAM_TTL_SECONDS)
         return stream_url
+
+    if cookiefile and _should_try_auth_pass(cookiefile):
+        hit = run_pass("auth", {**opts, "cookiefile": cookiefile})
+        if hit is not None:
+            return accept(hit)
+    elif cookiefile:
+        perf.mark(f"resolve {video_id}: auth pass skipped (recent failure)")
+
+    # The fallbacks run side by side and the first one in preference order
+    # that comes back live wins. Back to back, a gated song paid a full
+    # ~4s extraction per client before reaching the one that works.
+    fallbacks: list[tuple[str, dict]] = [("anon", opts)]
+    for client in _FALLBACK_CLIENTS:
+        fallbacks.append((client, {
+            **opts,
+            "extractor_args": {"youtube": {"player_client": [client]}},
+        }))
+    pool = ThreadPoolExecutor(max_workers=len(fallbacks),
+                              thread_name_prefix="tide-resolve")
+    try:
+        futures = [pool.submit(run_pass, label, pass_opts)
+                   for label, pass_opts in fallbacks]
+        for fut in futures:
+            hit = fut.result()
+            if hit is not None:
+                return accept(hit)
+    finally:
+        # Don't wait on the losers; they finish in the background and
+        # their results are dropped.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     raise RuntimeError(f"no playable audio stream for {video_id}")

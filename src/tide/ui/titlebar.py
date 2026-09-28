@@ -12,7 +12,7 @@ widget takes the decoration's place via `QMainWindow.setMenuWidget`:
   title runs through styled_case ("TIDE" in storm, l33t in synthwave);
 - drag-to-move via startSystemMove (compositor-native, so KDE snapping
   and tiling keep working), double-click maximizes;
-- edge resize via an application-level hit test → startSystemResize
+- edge resize via a hit test on the window's QWindow → startSystemResize
   (frameless windows lose the compositor's resize borders; KDE's
   Meta+drag continues to work as the native fallback).
 
@@ -22,7 +22,7 @@ transient, and the wins here are for the window you live in.
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QMouseEvent, QPainter, QPen, QWindow
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -54,40 +54,61 @@ def _edges_at(window: QWidget, global_pos: QPoint) -> Qt.Edge:
 
 
 class EdgeResizer(QObject):
-    """App-level filter that turns border presses into system resizes.
+    """Turns border presses into system resizes.
 
     Children cover a frameless window wall to wall, so a filter on the
-    window alone never sees presses near the edges — hit-testing every
-    press at the application level does.
+    window widget never sees presses near the edges. The filter sits on
+    the window's QWindow instead, which gets every mouse event for the
+    toplevel before Qt routes it to a child. It used to sit on the whole
+    application, where it ran for every event of every widget: ~24k calls
+    per stylesheet repolish, ~40% of the restyle every song change pays.
     """
 
     def __init__(self, window: QWidget) -> None:
         super().__init__(window)
         self._window = window
-        QApplication.instance().installEventFilter(self)
+        self._handle: QWindow | None = None
+        # the widget's own events are few; this only catches the native
+        # window being created or rebuilt, so the filter can follow it
+        window.installEventFilter(self)
+        self._attach()
+
+    def _attach(self) -> None:
+        handle = self._window.windowHandle()
+        if handle is self._handle:
+            return
+        self._release_handle()
+        self._handle = handle
+        if handle is not None:
+            handle.installEventFilter(self)
+
+    def _release_handle(self) -> None:
+        if self._handle is not None:
+            try:
+                self._handle.removeEventFilter(self)
+            except RuntimeError:
+                pass  # the native window was already torn down
+            self._handle = None
 
     def detach(self) -> None:
-        app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
+        self._window.removeEventFilter(self)
+        self._release_handle()
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if obj is self._window:
+            if event.type() in (QEvent.WinIdChange, QEvent.Show):
+                self._attach()
+            return False
         if event.type() != QEvent.MouseButtonPress:
             return False
         if not isinstance(event, QMouseEvent) or event.button() != Qt.LeftButton:
             return False
-        if not self._window.isVisible():
-            return False
-        # Only presses that land inside this window's frame concern us.
-        if not isinstance(obj, QWidget) or obj.window() is not self._window:
+        if obj is not self._handle or not self._window.isVisible():
             return False
         edges = _edges_at(self._window, event.globalPosition().toPoint())
         if not edges:
             return False
-        handle = self._window.windowHandle()
-        if handle is None:
-            return False
-        handle.startSystemResize(edges)
+        self._handle.startSystemResize(edges)
         return True
 
 

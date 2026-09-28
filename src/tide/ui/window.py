@@ -186,21 +186,36 @@ class _ResolveWorker(QObject):
             self.failed.emit(self.video_id, str(exc))
 
 
-class _RadioWorker(QObject):
-    done = Signal(list)
-    failed = Signal(str)
+# Radio leaves out what played this recently (entries in the local
+# history), so a long session doesn't loop back to the same songs.
+_RADIO_RECENT_EXCLUDE = 150
 
-    def __init__(self, api_obj: api.Api, video_id: str, exclude: list[str]) -> None:
+
+class _RadioWorker(QObject):
+    done = Signal(list, int)         # tracks, generation
+    failed = Signal(str, int)        # message, generation
+
+    def __init__(self, api_obj: api.Api, video_id: str, exclude: list[str],
+                 depth: int = 0, gen: int = 0) -> None:
         super().__init__()
         self.api = api_obj
         self.video_id = video_id
         self.exclude = set(exclude)
+        self.depth = depth
+        self.gen = gen
 
     def run(self) -> None:
         try:
-            self.done.emit(self.api.get_radio(self.video_id, exclude=self.exclude))
+            try:
+                recent = history_module.read_recent(_RADIO_RECENT_EXCLUDE)
+                self.exclude.update(e.video_id for e in recent if e.video_id)
+            except Exception:
+                pass
+            tracks = self.api.get_radio(self.video_id, exclude=self.exclude,
+                                        depth=self.depth)
+            self.done.emit(tracks, self.gen)
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(str(exc), self.gen)
 
 
 class _RateWorker(QObject):
@@ -222,8 +237,11 @@ class _RateWorker(QObject):
 
 
 class _PlayStartedWorker(QObject):
-    """Runs once per track start, off-thread: fetch community insights for
-    the strip, then (opt-in) report the play to the source's own history.
+    """Off-thread, once per track: fetch community insights for the strip
+    when audio starts, and (opt-in, see _maybe_report_play) report the play
+    to the source's own history once it has been listened to. One class,
+    two moments: the window runs it with ``insights`` at the start and
+    with ``report`` at the listen threshold.
 
     Insights emit before the report call so the strip updates without
     waiting on the second round-trip. Both halves swallow failures — a
@@ -233,15 +251,17 @@ class _PlayStartedWorker(QObject):
     insights_ready = Signal(str, object)     # video_id, SongInsights
     done = Signal()
 
-    def __init__(self, source, track: api.Track, report: bool) -> None:
+    def __init__(self, source, track: api.Track, report: bool,
+                 insights: bool = True) -> None:
         super().__init__()
         self.source = source
         self.track = track
         self.report = report
+        self.insights = insights
 
     def run(self) -> None:
         try:
-            if self.source.supports("insights"):
+            if self.insights and self.source.supports("insights"):
                 ins = self.source.get_song_insights(self.track.video_id)
                 if ins is not None:
                     self.insights_ready.emit(self.track.video_id, ins)
@@ -541,6 +561,11 @@ class MainWindow(QMainWindow):
         # Reset in _play_track, checked on the first PLAYING state — resume
         # from pause must not re-report, repeat-one must.
         self._play_started_fired_for: str | None = None
+        # The opt-in history ping for the current track, armed at audio
+        # start and fired by _maybe_report_play after a real listen.
+        self._report_pending_for: str | None = None
+        self._report_listened: float = 0.0
+        self._report_last_pos: float | None = None
         self._mini_mode: bool = False
         self._mini = None                   # lazy MiniPlayer window
         self._fs_mode: bool = False
@@ -2332,6 +2357,7 @@ class MainWindow(QMainWindow):
         # fresh ones arrive via _on_insights_ready after audio starts.
         self.now_label.setInsights("")
         self._play_started_fired_for = None
+        self._report_pending_for = None
         self.progress.reset()
         self.time_label.setText("0:00 / 0:00")
         style = getattr(self._settings, "loading_indicator_style", "blocks") \
@@ -2536,19 +2562,18 @@ class MainWindow(QMainWindow):
 
     # ---------- v1.5 insights + play reporting ----------
 
-    def _spawn_play_started_worker(self, track: api.Track) -> None:
+    def _spawn_play_started_worker(self, track: api.Track, *,
+                                   report: bool = False,
+                                   insights: bool = True) -> None:
         source = source_registry().get(track.source or "ytmusic")
         if source is None:
             return
-        report = bool(
-            getattr(getattr(self, "_settings", None), "report_plays", False)
-            and not self._restoring_session
-        )
-        if not (report and source.supports("history_sync")) \
-                and not source.supports("insights"):
+        report = report and source.supports("history_sync")
+        insights = insights and source.supports("insights")
+        if not (report or insights):
             return
         thread = QThread()
-        worker = _PlayStartedWorker(source, track, report)
+        worker = _PlayStartedWorker(source, track, report, insights)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.insights_ready.connect(self._on_insights_ready)
@@ -2785,6 +2810,17 @@ class MainWindow(QMainWindow):
         source = source_registry().get(track.source or "ytmusic")
         if source is None or not source.supports("rating"):
             return
+        # A dislike means "not this": radio won't bring it back this
+        # session, a queued copy goes, and the playing one is skipped,
+        # like the youtube music player does.
+        self.queue.block_from_radio(track.video_id)
+        cur = self.queue.current
+        if cur is not None and cur.video_id == track.video_id:
+            self._on_next_clicked()
+        else:
+            row = self.queue.row_of(track.video_id)
+            if row > self.queue.current_index:
+                self.queue.remove(row)
         thread = QThread()
         worker = _DislikeWorker(source, track.video_id)
         worker.moveToThread(thread)
@@ -3166,7 +3202,8 @@ class MainWindow(QMainWindow):
         self._refresh_nav_buttons()
         self._refresh_up_next()
 
-    def _on_radio_refill_requested(self, seed_video_id: str, exclude: list) -> None:
+    def _on_radio_refill_requested(self, seed_video_id: str, exclude: list,
+                                   depth: int = 0, gen: int = 0) -> None:
         # Sources without the "radio" capability can't refill — most
         # commonly Spotify in Dev Mode, whose recommendations + artist-
         # top-tracks endpoints were locked behind Extended Quota in Feb
@@ -3176,7 +3213,8 @@ class MainWindow(QMainWindow):
             self.queue.disable_radio()
             return
         thread = QThread()
-        worker = _RadioWorker(self.api, seed_video_id, list(exclude))
+        worker = _RadioWorker(self.api, seed_video_id, list(exclude),
+                              depth, gen)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.done.connect(self._on_radio_done)
@@ -3189,13 +3227,15 @@ class MainWindow(QMainWindow):
         qthreads.retain(thread, worker)
         thread.start()
 
-    def _on_radio_done(self, tracks: list) -> None:
-        added = self.queue.absorb_radio(tracks)
+    def _on_radio_done(self, tracks: list, gen: int | None = None) -> None:
+        added = self.queue.absorb_radio(tracks, gen)
         if added:
             self.statusBar().showMessage(f"radio added {added} tracks")
 
-    def _on_radio_failed(self, msg: str) -> None:
-        self.queue.absorb_radio([])
+    def _on_radio_failed(self, msg: str, gen: int | None = None) -> None:
+        if gen is not None and gen != self.queue.radio_generation:
+            return      # an old pick's refill; the new one is on its way
+        self.queue.absorb_radio([], gen)
         self.statusBar().showMessage(f"radio refill failed: {msg}")
 
     # ---------- album art ----------
@@ -3261,6 +3301,9 @@ class MainWindow(QMainWindow):
     # ---------- player state ----------
 
     def _wire_player(self) -> None:
+        speed_changed = getattr(self.player, "speed_changed", None)
+        if speed_changed is not None:
+            speed_changed.connect(lambda _rate: self._sync_backdrop_speed())
         self.player.state_changed.connect(self._on_state)
         self.player.position_changed.connect(self._on_position)
         self.player.duration_changed.connect(self._on_duration)
@@ -3285,6 +3328,16 @@ class MainWindow(QMainWindow):
             if cur and cur.video_id != self._play_started_fired_for:
                 self._play_started_fired_for = cur.video_id
                 self._spawn_play_started_worker(cur)
+                # The history ping waits for a real listen (see
+                # _maybe_report_play); arm it for this track.
+                self._report_pending_for = (
+                    cur.video_id
+                    if (getattr(getattr(self, "_settings", None),
+                                "report_plays", False)
+                        and not self._restoring_session)
+                    else None)
+                self._report_listened = 0.0
+                self._report_last_pos = None
             # One summary line per play (not per pause/resume — t0 clears).
             # This is the ground truth for tuning instant-play behavior.
             if self._perf_t0 is not None:
@@ -3332,6 +3385,32 @@ class MainWindow(QMainWindow):
         # the lead window. Idempotent (StreamPrefetch.request dedupes), but
         # the armed-for guard keeps us from hitting it every position tick.
         self._maybe_arm_prefetch(secs)
+        self._maybe_report_play(secs)
+
+    # A play counts for the source's history after this much listening, or
+    # half the song if that's shorter (the ListenBrainz rule). Reporting on
+    # the first second of audio put every skip into the account's history,
+    # and the history is what the account's recommendations learn from.
+    _REPORT_AFTER_S = 30.0
+
+    def _maybe_report_play(self, secs: float) -> None:
+        vid = getattr(self, "_report_pending_for", None)
+        cur = self._current
+        if not vid or cur is None or cur.video_id != vid:
+            return
+        last = self._report_last_pos
+        self._report_last_pos = secs
+        if last is not None and 0.0 < secs - last < 2.0:
+            # Only time actually heard; a seek jumps and doesn't count.
+            self._report_listened += secs - last
+        duration = float(self.player.duration or 0.0)
+        need = self._REPORT_AFTER_S
+        if duration > 0.0:
+            need = min(need, 0.5 * duration)
+        if self._report_listened < need:
+            return
+        self._report_pending_for = None
+        self._spawn_play_started_worker(cur, report=True, insights=False)
 
     def _maybe_arm_prefetch(self, position_secs: float) -> None:
         duration = float(self.player.duration or 0.0)
@@ -3499,6 +3578,7 @@ class MainWindow(QMainWindow):
         self._apply_window_translucency(theme)
         self._fit_nav_rail(theme)
         self._fit_strip_inset(theme)
+        self.apply_app_icon_setting()
         self.heading.set_label("results")
         self.queue_heading.set_label(f"queue · {self.queue.rowCount()}")
         # If the theme's aesthetic flipped (brutalist ↔ modern), stale slot
@@ -3657,8 +3737,11 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self.apply_nav_icons(s.nav_icon_set or "off")
-        from . import text_fx
+        from . import art_fx, lyrics, text_fx
         text_fx.set_style(getattr(s, "text_transition", "") or "scramble")
+        art_fx.set_style(getattr(s, "art_transition", "") or "flip")
+        lyrics.set_size(getattr(s, "lyrics_size", "") or "large")
+        self.apply_app_icon_setting()
         # Thumbnails are preset-owned (brutalist keeps them ON).
         from .track_row import set_thumbnail_override
         set_thumbnail_override(s.show_thumbnails or "theme")
@@ -3938,6 +4021,8 @@ class MainWindow(QMainWindow):
 
     def _on_volume_changed(self, value: int) -> None:
         self.player.set_volume(value)
+        if self._fs is not None:
+            self._fs.set_volume(value)
         # Persist debounced (see _schedule_settings_save) — a wheel spin
         # or slider drag writes the TOML once, not per tick. Falls back
         # gracefully if settings injection didn't happen.
@@ -3964,11 +4049,31 @@ class MainWindow(QMainWindow):
         probe = getattr(self.player, "active_supports_speed", None)
         supported = True if probe is None else bool(probe())
         self.speed_btn.set_backend_supported(supported)
+        if getattr(self, "_fs", None) is not None:
+            self._fs.set_speed_supported(supported)
+        self._sync_backdrop_speed()
+
+    def _sync_backdrop_speed(self) -> None:
+        """Every backdrop runs at the song's speed: the main one, the
+        mini's, fullscreen's. A source that can't change speed (Spotify)
+        plays at 1x whatever the stored speed says, so its backdrop does
+        too."""
+        rate = float(getattr(self.player, "speed", 1.0) or 1.0)
+        speed_btn = getattr(self, "speed_btn", None)
+        if speed_btn is not None and not speed_btn.backend_supported():
+            rate = 1.0
+        for owner in (self, getattr(self, "_mini", None),
+                      getattr(self, "_fs", None)):
+            bg = getattr(owner, "central_bg", None) if owner is not None else None
+            if bg is not None:
+                bg.set_speed(rate)
 
     def _on_speed_changed(self, value: float) -> None:
         # Non-supporting backends no-op set_speed; the button greys via
         # _refresh_speed_support.
         self.player.set_speed(value)
+        if self._fs is not None:
+            self._fs.set_speed(value)
         # Persist debounced, same shared timer as volume — a held [ or ]
         # key repeats fast enough to matter. Skipped until settings attach.
         current = getattr(self, "_settings", None)
@@ -4505,8 +4610,13 @@ class MainWindow(QMainWindow):
     def _swap_album_art(self, slug: str) -> None:
         new = make_album_art(slug, 96)
         self._wire_art_click(new)
+        # Carry the cover over: the new tile otherwise sat on "no art"
+        # until the next track fetched one.
+        raw = getattr(self.art, "_pixmap_raw", None)
         self._replace_in_layout(self.art, new)
         self.art = new
+        if raw is not None and not raw.isNull():
+            new.setImage(raw.toImage())
 
     def _swap_controls(self, slug: str) -> None:
         new_bundle = make_controls(slug)
@@ -4660,6 +4770,7 @@ class MainWindow(QMainWindow):
             if self._mini is None:
                 from .mini import MiniPlayer
                 self._mini = MiniPlayer(self)
+                self._sync_backdrop_speed()
             if adaptive is not None:
                 adaptive.set_mini_active(True)
             if ambient is not None:
@@ -4729,6 +4840,7 @@ class MainWindow(QMainWindow):
             if self._fs is None:
                 from .fullscreen import FullscreenPlayer
                 self._fs = FullscreenPlayer(self)
+                self._sync_backdrop_speed()
                 if adaptive is not None:
                     # Full-res cover for the liquid style — the same
                     # wiring app.py gives the main backdrop. Without it
@@ -4826,6 +4938,7 @@ class MainWindow(QMainWindow):
     LIVE_APPLY_ORDER: tuple[str, ...] = (
         "apply_ui_scale_setting",
         "apply_theme_bundle_setting",
+        "apply_app_icon_setting",
         "apply_layout_setting",
         "apply_thumbnails_setting",
         "apply_adaptive_setting",
@@ -4835,6 +4948,8 @@ class MainWindow(QMainWindow):
         "apply_nav_icons_setting",
         "apply_motion_setting",
         "apply_text_transition_setting",
+        "apply_art_transition_setting",
+        "apply_lyrics_size_setting",
         "apply_loading_setting",
         "apply_ui_sounds_setting",
         "apply_mini_setting",
@@ -4978,6 +5093,36 @@ class MainWindow(QMainWindow):
     def apply_text_transition_setting(self) -> None:
         from . import text_fx
         text_fx.set_style(getattr(self._settings, "text_transition", "") or "scramble")
+
+    def apply_app_icon_setting(self) -> None:
+        """Window + tray icon in the active theme's colours (or the classic
+        one). Runs on every theme_changed, which also fires per song for
+        the adaptive overrides; the base theme and the svg string compare
+        make those free."""
+        from PySide6.QtWidgets import QApplication
+        from . import app_icon
+        mode = getattr(getattr(self, "_settings", None), "app_icon", "") or "theme"
+        theme = theming.manager().current() if mode == "theme" else None
+        try:
+            svg = app_icon.svg_for(theme)
+        except Exception:
+            return
+        if svg == getattr(self, "_app_icon_svg", None):
+            return
+        self._app_icon_svg = svg
+        icon = app_icon.icon_for(theme)
+        QApplication.setWindowIcon(icon)
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.set_icon(icon)
+
+    def apply_art_transition_setting(self) -> None:
+        from . import art_fx
+        art_fx.set_style(getattr(self._settings, "art_transition", "") or "flip")
+
+    def apply_lyrics_size_setting(self) -> None:
+        from . import lyrics
+        lyrics.set_size(getattr(self._settings, "lyrics_size", "") or "large")
 
     def apply_loading_setting(self) -> None:
         if hasattr(self, "_loading"):

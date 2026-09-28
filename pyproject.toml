@@ -44,6 +44,7 @@ packages = ["src/tide"]
 
 [tool.hatch.build.targets.wheel.shared-data]
 "tide.desktop" = "share/applications/tide.desktop"
+"assets/icon.svg"     = "share/icons/hicolor/scalable/apps/tide.svg"
 "assets/icon-512.png" = "share/icons/hicolor/512x512/apps/tide.png"
 "assets/icon-256.png" = "share/icons/hicolor/256x256/apps/tide.png"
 "assets/icon-192.png" = "share/icons/hicolor/192x192/apps/tide.png"
@@ -85,6 +86,7 @@ include = [
   "src/tide/sounds/**/*.wav",
   "src/tide/sounds/**/*.md",
   "assets/icon-*.png",
+  "assets/icon.svg",
   "/tide.desktop",
   "/PKGBUILD",
   "/CHANGELOG.md",

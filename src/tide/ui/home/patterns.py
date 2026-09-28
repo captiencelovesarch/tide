@@ -403,6 +403,242 @@ class ChipRow(QWidget):
             self.chips.append(btn)
 
 
+def _fmt_minutes(m: float) -> str:
+    m = int(round(m))
+    if m >= 60:
+        return f"{m // 60}h {m % 60:02d}m"
+    return f"{m}m"
+
+
+class _WeekChart(QWidget):
+    """Seven bars of listening time, oldest day on the left, today on the
+    right in the accent, each day's initial under its bar. modern rounds
+    the bars; brutalist keeps them square."""
+
+    BAR = 14
+    GAP = 9
+    HEIGHT = 58
+
+    def __init__(self, minutes: list[float], days: list[str],
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._minutes = list(minutes)
+        self._days = list(days)
+        self._theme = theming.manager().current_effective()
+        self._fit()
+        self.setToolTip("\n".join(
+            f"{d} · {_fmt_minutes(m)}" for d, m in zip(self._day_names(),
+                                                     self._minutes)))
+        theming.manager().theme_changed.connect(self._on_theme)
+
+    def _day_names(self) -> list[str]:
+        import datetime as _dt
+        today = _dt.date.today()
+        return [(today - _dt.timedelta(days=6 - i)).strftime("%a").lower()
+                for i in range(7)]
+
+    def _fit(self) -> None:
+        from .. import scale as _scale
+        w = 7 * _scale.px(self.BAR) + 6 * _scale.px(self.GAP)
+        self.setFixedSize(w, _scale.px(self.HEIGHT))
+
+    def _on_theme(self, theme) -> None:
+        self._theme = theme
+        self._fit()
+        self.update()
+
+    def paintEvent(self, _ev) -> None:
+        from .. import scale as _scale
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        theme = self._theme
+        modern = getattr(theme, "aesthetic", "") == "modern"
+        accent = _qcolor(theme, "accent", "#d4b95e")
+        dim = _qcolor(theme, "dim", "#6f6f6f")
+        fg = _qcolor(theme, "fg", "#e6e6e6")
+        fm = QFontMetrics(self.font())
+        label_h = fm.height()
+        bar, gap = _scale.px(self.BAR), _scale.px(self.GAP)
+        chart_h = self.height() - label_h - _scale.px(4)
+        peak = max(max(self._minutes, default=0.0), 1.0)
+        radius = min(bar / 2.0, 3.0) if modern else 0.0
+        for i, m in enumerate(self._minutes):
+            x = i * (bar + gap)
+            h = max(_scale.px(2), round(chart_h * m / peak)) if m > 0 \
+                else _scale.px(2)
+            col = QColor(accent if i == 6 else dim)
+            if m <= 0:
+                col.setAlpha(90)
+            p.setPen(Qt.NoPen)
+            p.setBrush(col)
+            p.drawRoundedRect(QRectF(x, chart_h - h, bar, h), radius, radius)
+            p.setPen(fg if i == 6 else dim)
+            p.drawText(QRect(x - gap // 2, chart_h + _scale.px(4),
+                             bar + gap, label_h),
+                       Qt.AlignHCenter | Qt.AlignTop,
+                       theming.styled_case(self._days[i], theme))
+        p.end()
+
+
+class _RepeatRow(QWidget):
+    """One on-repeat song: small art, the title, artist and play count
+    under it. Click to play."""
+
+    clicked = Signal(object)            # Track
+    ART = 34
+    TEXT_W = 230
+
+    def __init__(self, track, plays: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from .. import scale as _scale
+        self._track = track
+        self._theme = theming.manager().current_effective()
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"{track.artists} — {track.title}")
+        self._art = QLabel()
+        px = _scale.px(self.ART)
+        self._art.setFixedSize(px, px)
+        self._title = QLabel()
+        self._title.setTextFormat(Qt.PlainText)
+        self._sub = QLabel()
+        self._sub.setTextFormat(Qt.PlainText)
+        self._sub.setProperty("class", "dim")
+        self._raw_title = track.title or ""
+        self._raw_sub = f"{track.artists} · {plays} plays" if track.artists \
+            else f"{plays} plays"
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(0)
+        text.addWidget(self._title)
+        text.addWidget(self._sub)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(_scale.px(8))
+        row.addWidget(self._art, alignment=Qt.AlignVCenter)
+        row.addLayout(text)
+        row.addStretch(1)
+        self._art_img = None
+        self._set_texts()
+        url = track.thumbnail or ""
+        if url:
+            img = art_cache.cache().request(url, self._on_art)
+            if img is not None:
+                self._on_art(img)
+        theming.manager().theme_changed.connect(self._on_theme)
+
+    def _set_texts(self) -> None:
+        from .. import scale as _scale
+        width = _scale.px(self.TEXT_W)
+        for label, raw in ((self._title, self._raw_title),
+                           (self._sub, self._raw_sub)):
+            fm = QFontMetrics(label.font())
+            label.setText(fm.elidedText(theming.styled_case(raw, self._theme),
+                                        Qt.ElideRight, width))
+
+    def _on_art(self, img) -> None:
+        if img is None or img.isNull():
+            return
+        try:
+            self._art_img = img
+            size = self._art.width()
+            pix = QPixmap.fromImage(img).scaled(
+                size, size, Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation)
+            radius = min(theming.effective_radius_px(self._theme), size // 4)
+            if radius > 0:
+                rounded = QPixmap(pix.size())
+                rounded.fill(Qt.transparent)
+                painter = QPainter(rounded)
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                path = QPainterPath()
+                path.addRoundedRect(QRectF(rounded.rect()), radius, radius)
+                painter.setClipPath(path)
+                painter.drawPixmap(0, 0, pix)
+                painter.end()
+                pix = rounded
+            self._art.setPixmap(pix)
+        except RuntimeError:
+            pass    # the home page rebuilt before the art arrived
+
+    def _on_theme(self, theme) -> None:
+        from .. import scale as _scale
+        self._theme = theme
+        px = _scale.px(self.ART)
+        self._art.setFixedSize(px, px)
+        self._set_texts()
+        if self._art_img is not None:
+            self._on_art(self._art_img)
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton:
+            self.clicked.emit(self._track)
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+
+class WeekPanel(QWidget):
+    """The hero's right side: the week at a glance (a bar per day, the
+    streak, artists new to you) and the songs on repeat. Local history
+    only (see view.week_summary)."""
+
+    track_clicked = Signal(object)      # Track
+
+    def __init__(self, week: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from .. import scale as _scale
+        self._texts: list[tuple[QLabel, str]] = []
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(_scale.px(32))
+
+        week_col = QVBoxLayout()
+        week_col.setContentsMargins(0, 0, 0, 0)
+        week_col.setSpacing(_scale.px(6))
+        week_col.addWidget(self._dim("this week"))
+        self.chart = _WeekChart(week.get("minutes", [0.0] * 7),
+                                week.get("days", [""] * 7))
+        week_col.addWidget(self.chart)
+        streak = int(week.get("streak", 0) or 0)
+        if streak >= 2:
+            week_col.addWidget(self._dim(f"{streak} days in a row"))
+        new = list(week.get("new") or [])
+        if new:
+            shown = ", ".join(new[:2]) + (f" +{len(new) - 2}" if len(new) > 2 else "")
+            lbl = self._dim(f"new to you: {shown}")
+            lbl.setToolTip(", ".join(new))
+            week_col.addWidget(lbl)
+        week_col.addStretch(1)
+        row.addLayout(week_col)
+
+        repeat = list(week.get("repeat") or [])
+        if repeat:
+            rep_col = QVBoxLayout()
+            rep_col.setContentsMargins(0, 0, 0, 0)
+            rep_col.setSpacing(_scale.px(6))
+            rep_col.addWidget(self._dim("on repeat"))
+            self.repeat_rows: list[_RepeatRow] = []
+            for track, plays in repeat:
+                r = _RepeatRow(track, plays)
+                r.clicked.connect(self.track_clicked.emit)
+                rep_col.addWidget(r)
+                self.repeat_rows.append(r)
+            rep_col.addStretch(1)
+            row.addLayout(rep_col)
+        theming.manager().theme_changed.connect(self._on_theme)
+
+    def _dim(self, raw: str) -> QLabel:
+        lbl = QLabel(theming.styled_case(raw))
+        lbl.setProperty("class", "dim")
+        lbl.setTextFormat(Qt.PlainText)
+        self._texts.append((lbl, raw))
+        return lbl
+
+    def _on_theme(self, theme) -> None:
+        for label, raw in self._texts:
+            label.setText(theming.styled_case(raw, theme))
+
+
 class Hero(QWidget):
     """Greeting + keep-listening. All local data — renders instantly and
     for every source, which is why it leads the page.
@@ -421,6 +657,7 @@ class Hero(QWidget):
 
     def __init__(self, greeting: str, stats_line: str, last_track,
                  *, can_resume: bool, show_likes: bool,
+                 week: dict | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         from .. import scale as _scale
@@ -512,6 +749,12 @@ class Hero(QWidget):
             if self._art is not None:
                 resume_row.addWidget(self._art, alignment=Qt.AlignTop)
             resume_row.addLayout(text_col, stretch=1)
+            # The rest of the row used to be empty: the week goes there.
+            self.week_panel = None
+            if week:
+                self.week_panel = WeekPanel(week)
+                self.week_panel.track_clicked.connect(self.track_clicked.emit)
+                resume_row.addWidget(self.week_panel, alignment=Qt.AlignTop)
             col.addLayout(resume_row)
 
         theming.manager().theme_changed.connect(self._on_theme)

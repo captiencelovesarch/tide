@@ -42,13 +42,14 @@ from . import art_cache, motion as motion_module, scale as _scale, text_fx
 from .central_bg import CentralBg
 from .lyrics import LyricsView
 from .mini import _BACKDROP_CHOICES
-from .variants import ThinProgress
+from .speed import SPEED_STEP, SpeedButton
+from .variants import ThinProgress, make_volume
 from .widgets import AlbumArt, BracketButton
 
 _ZEN_IDLE_MS = 3000
-# Read-from-the-couch multiplier for the embedded lyrics panel
-# (13pt active line → ~23pt, karaoke center line → ~50pt).
-_LYRICS_FONT_SCALE = 1.8
+# Read-from-the-couch multiplier on top of the lyric size step (at the
+# default "large" and normal scale: 20pt lines, 25pt active, 40pt karaoke).
+_LYRICS_FONT_SCALE = 1.25
 
 # Scoped transparency so the gradient shows through — same story as the
 # mini's _MINI_QSS: themes paint `QWidget { background: @bg }` globally
@@ -330,6 +331,16 @@ class FullscreenPlayer(QWidget):
         self.time_lbl = QLabel("0:00 / 0:00")
         self.time_lbl.setTextFormat(Qt.PlainText)
         self.time_lbl.setProperty("class", "dim")
+        # Speed + volume: the couch needs them as much as skip does. Both
+        # hand their changes to the main window's controls, which own the
+        # player calls and the saved values; the main window pushes every
+        # change back through set_volume / set_speed.
+        self.speed_btn = SpeedButton()
+        self.speed_btn.setFocusPolicy(Qt.NoFocus)
+        self.speed_btn.speed_changed.connect(self._on_speed_picked)
+        self._volume_slug = getattr(window, "_slot_volume", "") or "blocks"
+        self.volume = make_volume(self._volume_slug)
+        self.volume.volume_changed.connect(self._on_volume_picked)
 
         self._bottom_bar = QWidget()
         self._bottom_bar.setMouseTracking(True)
@@ -346,6 +357,11 @@ class FullscreenPlayer(QWidget):
         bottom.addWidget(self.progress, stretch=1)
         bottom.addSpacing(_scale.px(10))
         bottom.addWidget(self.time_lbl)
+        bottom.addSpacing(_scale.px(18))
+        bottom.addWidget(self.speed_btn)
+        bottom.addSpacing(_scale.px(6))
+        bottom.addWidget(self.volume)
+        self._bottom_layout = bottom
         col.addWidget(self._bottom_bar)
 
         self.central_bg = CentralBg(content)
@@ -409,6 +425,11 @@ class FullscreenPlayer(QWidget):
                 window.volume.volume() + 5),
             "volume_down": lambda: window.volume.setVolume(
                 window.volume.volume() - 5),
+            "speed_slower": lambda: window.speed_btn.set_speed(
+                window.speed_btn.speed() - SPEED_STEP),
+            "speed_faster": lambda: window.speed_btn.set_speed(
+                window.speed_btn.speed() + SPEED_STEP),
+            "speed_reset": lambda: window.speed_btn.reset(),
         }
         self._keymap_shortcuts: dict[str, QShortcut] = {
             action_id: QShortcut(QKeySequence(), self, handler)
@@ -587,6 +608,8 @@ class FullscreenPlayer(QWidget):
         """Full refresh, called right before every show so a fullscreen
         opened mid-song is correct on frame one."""
         self.refresh_glyphs()
+        self._sync_volume_face()
+        self._sync_playback_controls()
         self._apply_track(track, animate=False)
         self.progress.setDuration(duration or 0.0)
         self.progress.setPosition(position or 0.0)
@@ -740,6 +763,47 @@ class FullscreenPlayer(QWidget):
             f"color: {dim}; background: transparent; "
             f"font-size: {_scale.round_pt(13)}pt;"
         )
+
+    # ---------- volume / speed ----------
+
+    def _sync_volume_face(self) -> None:
+        """Follow the strip's volume variant (blocks, spring, knob …); the
+        strip builder can change it while this window is hidden."""
+        slug = getattr(self._window, "_slot_volume", "") or "blocks"
+        if slug == self._volume_slug:
+            return
+        new = make_volume(slug)
+        new.volume_changed.connect(self._on_volume_picked)
+        self._bottom_layout.replaceWidget(self.volume, new)
+        self.volume.deleteLater()
+        self.volume = new
+        self._volume_slug = slug
+        self._install_wake_filters()
+
+    def _sync_playback_controls(self) -> None:
+        try:
+            self.set_volume(self._window.volume.volume())
+            self.set_speed(self._window.speed_btn.speed())
+            self.set_speed_supported(
+                self._window.speed_btn.backend_supported())
+        except (AttributeError, RuntimeError):
+            pass
+
+    def set_volume(self, value: int) -> None:
+        """Main window → here. Display only, never re-emits."""
+        self.volume.setVolume(int(value), emit=False)
+
+    def set_speed(self, value: float) -> None:
+        self.speed_btn.set_speed(float(value), emit=False)
+
+    def set_speed_supported(self, supported: bool) -> None:
+        self.speed_btn.set_backend_supported(bool(supported))
+
+    def _on_volume_picked(self, value: int) -> None:
+        self._window.volume.setVolume(int(value))
+
+    def _on_speed_picked(self, value: float) -> None:
+        self._window.speed_btn.set_speed(float(value))
 
     # ---------- like / nav state pushed by MainWindow ----------
 
@@ -917,6 +981,9 @@ class FullscreenPlayer(QWidget):
 
     def _zen_sleep(self) -> None:
         if self._menu is not None and self._menu.isVisible():
+            return
+        popover = getattr(self.speed_btn, "_popover", None)
+        if popover is not None and popover.isVisible():
             return
         if self._zen_asleep:
             return

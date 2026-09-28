@@ -468,12 +468,23 @@ class MiniZenAndPulseTest(unittest.TestCase):
         self.w.set_mini_mode(True)
         mini = self.w._mini
         self.assertEqual(mini.pin_btn._label, "📌")
+        self.assertEqual(mini.pin_btn.iconKey(), "pin")
+        self.assertFalse(mini.pin_btn.activeState())
         mini._on_pin_btn()
         self.assertTrue(self.w._settings.mini_pin)
         self.assertEqual(mini.pin_btn._label, "📍")
+        # modern paints the icon key, so the on state has to live there too.
+        self.assertEqual(mini.pin_btn.iconKey(), "pin_on")
+        self.assertTrue(mini.pin_btn.activeState())
         mini._on_pin_btn()
         self.assertFalse(self.w._settings.mini_pin)
         self.assertEqual(mini.pin_btn._label, "📌")
+        self.assertEqual(mini.pin_btn.iconKey(), "pin")
+        self.assertFalse(mini.pin_btn.activeState())
+
+    def test_pin_on_icon_ships(self) -> None:
+        from tide.ui import nav_icons
+        self.assertIsNotNone(nav_icons.svg_text_for("pin_on"))
 
     def test_mini_art_is_borderless(self) -> None:
         self.w.set_mini_mode(True)

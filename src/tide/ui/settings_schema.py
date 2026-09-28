@@ -210,6 +210,18 @@ def text_transition_choices() -> tuple[tuple[str, str], ...]:
     return text_fx.choices()
 
 
+def art_transition_choices() -> tuple[tuple[str, str], ...]:
+    """Track-change album-art styles, in art_fx's order."""
+    from . import art_fx
+    return art_fx.choices()
+
+
+def lyrics_size_choices() -> tuple[tuple[str, str], ...]:
+    """Lyric size steps, smallest first."""
+    from . import lyrics
+    return lyrics.size_choices()
+
+
 def scale_choices() -> tuple[tuple[str, str], ...]:
     """Scale presets; the multiplier labels read off the factor table."""
     from . import scale as scale_module
@@ -299,6 +311,13 @@ REGISTRY: tuple[OptionDesc, ...] = (
         tooltip="multiplies the theme's type size, which cascades to "
                 "every widget. applied before the theme restyle.",
     ),
+    OptionDesc(
+        key="lyrics_size", label="lyrics size", kind="choice",
+        tab="appearance", section="typography",
+        choices="lyrics_size_choices", live="apply_lyrics_size_setting",
+        tooltip="lyric lines, measured against the rest of the text. "
+                "fullscreen makes them bigger again, the mini smaller.",
+    ),
     # ---- appearance · layout ----
     OptionDesc(
         key="layout", label="layout", kind="choice",
@@ -323,6 +342,17 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices="nav_icon_choices", per_preset=True,
         live="apply_nav_icons_setting",
         tooltip="a small glyph rendered before each nav label.",
+    ),
+    OptionDesc(
+        key="app_icon", label="app icon", kind="choice",
+        tab="appearance", section="chrome",
+        choices=(
+            ("theme", "follow the theme"),
+            ("classic", "classic · the launcher's icon"),
+        ),
+        live="apply_app_icon_setting",
+        tooltip="the window and tray icon. the launcher keeps the classic "
+                "one, it's read before tide starts.",
     ),
     OptionDesc(
         key="csd_titlebar",
@@ -408,6 +438,13 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices="text_transition_choices",
         live="apply_text_transition_setting",
         tooltip="how the title changes when the track does. motion off makes it instant.",
+    ),
+    OptionDesc(
+        key="art_transition", label="art transition", kind="choice",
+        tab="appearance", section="motion & sound",
+        choices="art_transition_choices",
+        live="apply_art_transition_setting",
+        tooltip="how the album art changes when the track does. motion off makes it instant.",
     ),
     OptionDesc(
         key="ui_sounds_enabled",

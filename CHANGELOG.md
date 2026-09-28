@@ -4,6 +4,39 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [Unreleased]
+
+### Added
+- **volume and speed in fullscreen.** the bottom bar has the speed button and the volume control now, next to the time. both stay in step with the main window, and the `[` `]` `\` speed keys work there too.
+- **album art transitions.** the cover used to swap in one frame. now it flips over like a card (in modern it swings a few degrees past and settles), or slides, pops, breaks into blocks and rebuilds, or fades. settings → appearance → motion & sound → art transition. motion off makes it instant. the strip, the mini and fullscreen all use it.
+- **four new backdrops.** ripples (every kick drops a ring on the water), stage lights (beams sweep through haze), contours (topo lines that shift with the bass) and vinyl (a record's grooves catching a swinging light, with the album cover as its label, turning). contours and vinyl draw their lines at full window resolution.
+- **lyrics size**, in settings → appearance → typography. small is the old size.
+- **the backdrop moves at the song's speed.** slow a song down and every backdrop drifts slower, speed it up and it hurries: the scenes, the liquid cover, the ripples, the spinning vinyl label. a source that can't change speed keeps it at normal.
+- **the home greeting shows your week.** next to keep listening: a bar for each of the last 7 days, your streak, artists new to you this week, and the three songs you've had on repeat (click one to play it). all from tide's own history, so it's there for every source.
+- **a new icon.** a crescent moon over the sea, its reflection laid on the water as bars. the window and tray icon take the active theme's colours, and brutalist themes get a flat, framed cut of it. settings → appearance → chrome → app icon keeps the classic one instead. the launcher shows the classic.
+
+### Changed
+- **lyrics are bigger and follow the ui scale.** they were a fixed 10pt, so at "huge" they came out smaller than the checkbox above them. the default is now 1.6 times your body text. fullscreen scales that up again and the mini keeps its old size.
+- **radio stays on the song you picked.** every refill used to start a new radio from whatever was playing, which after the first batch was always a track the radio chose, so a long session drifted away from the pick one hop at a time. refills now read further down the same radio and only move on when it runs out.
+- **radio leaves out fan uploads and podcast episodes** unless the song you started from is one. slowed and sped-up re-uploads kept turning up in the radio of the original.
+- **radio leaves out repeats:** the same song under another id (the music video and the audio track), anything in your last 150 plays, and anything you disliked this session.
+- **play reporting waits for a listen.** with "report plays" on, tide told youtube you played a track the moment audio started, so every skip went into your youtube history, and that history is what your recommendations learn from. a play counts after 30 seconds now, or half of a short song.
+- **dislike skips the song**, like youtube music does, and a queued copy of it goes too.
+
+### Removed
+- **the deep water, caustics, aurora and smoke backdrops.** a saved pick of one of them becomes its closest replacement: deep water and caustics become ripples, aurora and smoke become stage lights.
+
+### Fixed
+- **the mini player's pin shows when it's on.** in modern it drew the same icon either way. it's filled and in the accent now.
+- **with shuffle on, radio refilled every dozen tracks or so**, whenever a random pick landed near the bottom of the queue. it refills when few unplayed tracks are left now.
+- **a radio refill could land in the wrong queue.** picking a new song while the last one's radio was still loading added the old radio to the new queue. those answers are dropped now.
+- **circle and polaroid art turned square** after every song change, until the next theme change redrew it.
+- **changing the album art style left the player bar on "no art"** (the strip builder, or a theme with another art style) until the next song. the cover carries over now.
+- **launch no longer stalls on youtube.** building the yt music client downloaded the whole music.youtube.com page to read one id, on the ui thread, before the window could respond. about a second on a good connection, longer on a bad one. the id is cached now (30 days, reset when you sign in again).
+- **songs stop waiting in line to resolve.** every signed-in stream lookup took a lock on the cookie file for its entire run, so the prefetches for the next few tracks queued up behind each other and a click could sit at 95% for 15 seconds or more. each lookup now works on its own copy of the cookies and only the copy and the swap back are locked. if the signed-in lookup fails, the fallback clients run at the same time instead of one after another.
+- **song changes hitch less.** the frameless window's edge-resize check ran for every event of every widget in the app, including the whole repolish that happens when the album art changes the accent. it now watches only the window's own mouse presses. the restyle on each song change drops from about 270 ms to about 165 ms.
+- **the fx rack doesn't clip anymore.** it never touched bitrate. the crunch was clipping: eq boosts, the compressor's makeup gain and the reverb all pushed peaks past full scale (the "slowed" reverb at full wet clipped 9% of samples), and the exciter and stereo width filters hard-clipped internally. the rack now starts with a preamp that cancels the eq and shelf boost, runs those two filters without their clip stage, mixes the reverb at constant loudness, and ends with a limiter just under full scale. eq boosts play a few dB quieter than before because of the preamp. turn the volume up to taste.
+
 ## [2.1.1] — 2026-09-11 — flatpak
 
 ### Added

@@ -37,13 +37,15 @@ class TideTray(QObject):
     # ---------- icon ----------
 
     def _best_icon(self) -> QIcon:
-        # Prefer the installed hicolor icon; fall back to the bundled asset path.
-        from PySide6.QtGui import QIcon
-        icon = QIcon.fromTheme("tide")
+        # The window icon first: MainWindow draws it in the theme's colours
+        # (ui/app_icon.py) before the tray exists. Then the installed one.
+        icon = QApplication.windowIcon()
         if not icon.isNull():
             return icon
-        # Last resort: app icon
-        return QIcon()
+        return QIcon.fromTheme("tide")
+
+    def set_icon(self, icon: QIcon) -> None:
+        self._tray.setIcon(icon)
 
     # ---------- menu ----------
 

@@ -160,11 +160,49 @@ def refresh_from_browser() -> str | None:
     return None
 
 
+# ytmusicapi fetches the whole music.youtube.com page on construction just
+# to read one value (VISITOR_DATA) unless the headers already carry it.
+# That fetch ran on the GUI thread before the window came up: ~1.2s on a
+# good connection, with no timeout on a bad one. The value is derived from
+# the VISITOR_INFO1_LIVE cookie, which YouTube keeps for months, so a
+# cached copy is as good as a fresh one.
+_VISITOR_NS = "yt-visitor"
+_VISITOR_TTL = 30 * 24 * 3600
+_VISITOR_HEADER = "X-Goog-Visitor-Id"
+
+
+def _auth_stamp() -> int:
+    try:
+        return config.BROWSER_AUTH_FILE.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 def yt_client() -> YTMusic:
     """Return an authenticated YTMusic client, or raise if no auth is saved."""
     if not config.BROWSER_AUTH_FILE.is_file():
         raise RuntimeError("not signed in")
-    return YTMusic(auth=str(config.BROWSER_AUTH_FILE))
+    from . import cache
+    try:
+        headers = json.loads(config.BROWSER_AUTH_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        headers = None
+    if not isinstance(headers, dict):
+        # let ytmusicapi raise its own error about the file
+        return YTMusic(auth=str(config.BROWSER_AUTH_FILE))
+    stamp = _auth_stamp()
+    # keyed to this sign-in: a fresh browser.json fetches its own id
+    hit = cache.get_json(_VISITOR_NS, "id")
+    cached = hit.get("id") if isinstance(hit, dict) and hit.get("auth") == stamp else None
+    if cached and not any(k.lower() == _VISITOR_HEADER.lower() for k in headers):
+        headers[_VISITOR_HEADER] = cached
+    yt = YTMusic(auth=headers)
+    if not cached:
+        fetched = yt.base_headers.get(_VISITOR_HEADER)
+        if fetched:
+            cache.put_json(_VISITOR_NS, "id", {"id": fetched, "auth": stamp},
+                           _VISITOR_TTL)
+    return yt
 
 
 def yt_dlp_cookiefile() -> str | None:

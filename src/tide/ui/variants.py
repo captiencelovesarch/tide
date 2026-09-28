@@ -569,7 +569,7 @@ def make_volume(slug: str) -> QWidget:
 class CircleAlbumArt(AlbumArt):
     """Round-masked album art."""
 
-    def _render(self, pix: QPixmap) -> None:
+    def _compose(self, pix: QPixmap) -> QPixmap:
         scaled = pix.scaled(
             self._size, self._size,
             Qt.KeepAspectRatioByExpanding,
@@ -585,7 +585,7 @@ class CircleAlbumArt(AlbumArt):
         painter.setClipPath(path)
         painter.drawPixmap(0, 0, scaled)
         painter.end()
-        self.setPixmap(out)
+        return out
 
     def _apply_theme(self, theme) -> None:
         # Override: no border on circle; ring is implicit.
@@ -603,10 +603,10 @@ class PolaroidAlbumArt(AlbumArt):
     BORDER = 6
     ROT_DEG = -3.0
 
-    def _render(self, pix: QPixmap) -> None:
+    def _compose(self, pix: QPixmap) -> QPixmap:
         inner = self._size - self.BORDER * 2
         if inner <= 0:
-            return
+            return QPixmap()
         scaled = pix.scaled(
             inner, inner,
             Qt.KeepAspectRatioByExpanding,
@@ -627,8 +627,7 @@ class PolaroidAlbumArt(AlbumArt):
         t.translate(self._size / 2, self._size / 2)
         t.rotate(self.ROT_DEG)
         t.translate(-self._size / 2, -self._size / 2)
-        rotated = out.transformed(t, Qt.SmoothTransformation)
-        self.setPixmap(rotated)
+        return out.transformed(t, Qt.SmoothTransformation)
 
     def _apply_theme(self, theme) -> None:
         # No frame — the polaroid speaks for itself.

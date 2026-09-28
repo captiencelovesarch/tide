@@ -15,10 +15,17 @@ here — replaying the same track is an audio decision, so the window's
 track-ended handler consults `repeat_mode` itself. A manual [next] always
 moves on.
 
-Radio: when `radio_enabled` is true, once playback enters the last 3 slots
-we ask the API to fetch a radio playlist seeded from the most recent track
-and append non-duplicate tracks. Refill is one-shot per dip below the
-threshold so we don't hammer the API.
+Radio: when `radio_enabled` is true, once fewer than 4 unplayed tracks are
+left we ask the API for more radio and append the ones that aren't already
+here. Every refill stays on the radio of the song the user picked (the
+anchor) and just reads further down it (``depth``); only when that radio
+runs dry does the anchor move to the playing track. Re-seeding from the
+current track on every refill used to walk the radio away from the pick
+one hop at a time, since after the first batch the current track is
+always one the radio chose. Refills carry a generation, so an answer that
+lands after the user picked something else is dropped instead of being
+appended to the new queue. Refill is one-shot per dip below the threshold
+so we don't hammer the API.
 
 The model is exposed as a QAbstractListModel so QListView/QListWidget can
 bind directly. Custom data roles are exposed for the title, artist,
@@ -27,6 +34,7 @@ duration string, and whether a row is the current one.
 from __future__ import annotations
 
 import random
+import re
 
 from enum import Enum, IntEnum
 from typing import Callable, Iterable
@@ -34,6 +42,20 @@ from typing import Callable, Iterable
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, Signal
 
 from .api import Track
+
+
+_BRACKETS = re.compile(r"[\(\[][^\)\]]*[\)\]]")
+_NON_WORD = re.compile(r"[^0-9a-z]+")
+
+
+def song_key(track: Track) -> str:
+    """Loose identity for "the same song": first artist + title with the
+    bracketed tags ("(official video)", "[audio]", "(lyrics)") and the
+    punctuation dropped. The official audio and the music video of one
+    song have different ids and the same key."""
+    title = _BRACKETS.sub(" ", (track.title or "").lower())
+    artist = (track.artists or "").lower().split(",")[0].split("&")[0]
+    return f"{_NON_WORD.sub('', artist)}|{_NON_WORD.sub('', title)}"
 
 
 class Role(IntEnum):
@@ -66,7 +88,10 @@ class RepeatMode(str, Enum):
 
 class Queue(QAbstractListModel):
     current_changed = Signal(object)        # Track or None
-    refill_requested = Signal(str, list)    # seed_video_id, exclude_ids — UI runs the network
+    # seed_video_id, exclude_ids, depth, generation — the UI runs the
+    # network and hands the answer back to absorb_radio with the same
+    # generation.
+    refill_requested = Signal(str, list, int, int)
     radio_state_changed = Signal(bool)
     # The currently-playing row was removed. Payload is the track that took
     # its slot and should start playing now (skip-to-next), or None when
@@ -77,13 +102,22 @@ class Queue(QAbstractListModel):
     modes_changed = Signal()
 
     REFILL_TAIL = 3
+    # A refill that brings back fewer new tracks than this means the
+    # anchor's radio has been read to the end.
+    RADIO_DRY = 5
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._tracks: list[Track] = []
         self._current: int = -1
         self._radio_enabled: bool = False
+        # The anchor: the song the radio belongs to (see module docstring).
         self._radio_seed: str | None = None
+        self._radio_depth: int = 0
+        self._radio_gen: int = 0
+        # Tracks the user turned down this session (dislike); radio never
+        # brings them back.
+        self._radio_blocked: set[str] = set()
         self._refill_in_flight: bool = False
         self._shuffle: bool = False
         self._repeat: RepeatMode = RepeatMode.OFF
@@ -202,6 +236,15 @@ class Queue(QAbstractListModel):
     def upcoming_count(self) -> int:
         return max(0, len(self._tracks) - 1 - self._current)
 
+    def _unplayed_count(self) -> int:
+        """What's left to hear. Under shuffle that is the rows this cycle
+        hasn't played, wherever they sit; counting rows after the current
+        one refilled whenever a random pick landed near the bottom."""
+        if not self._shuffle:
+            return self.upcoming_count
+        return sum(1 for i, t in enumerate(self._tracks)
+                   if i != self._current and t.video_id not in self._played_vids)
+
     def peek_next(self) -> Track | None:
         """Return the track that ``advance()`` would next select, without
         moving the pointer. Used by the prefetch system to pre-resolve the
@@ -318,6 +361,9 @@ class Queue(QAbstractListModel):
         self._played_vids.clear()
         self._shuffle_trail.clear()
         self._shuffle_next = None
+        # A new timeline is a new radio: forget the anchor (the next
+        # current track becomes it) and orphan any refill in flight.
+        self._new_radio_session(None)
         self.endResetModel()
         self.current_changed.emit(None)
 
@@ -330,8 +376,23 @@ class Queue(QAbstractListModel):
     def add(self, track: Track) -> None:
         self._append_one(track)
 
-    def add_many(self, tracks: Iterable[Track]) -> int:
-        new = [t for t in tracks if t and t.video_id not in self.video_ids()]
+    def add_many(self, tracks: Iterable[Track], *,
+                 skip_same_song: bool = False) -> int:
+        ids = self.video_ids()
+        keys = ({k for k in map(song_key, self._tracks) if not k.endswith("|")}
+                if skip_same_song else set())
+        new: list[Track] = []
+        for t in tracks:
+            if not t or t.video_id in ids:
+                continue
+            if skip_same_song:
+                key = song_key(t)
+                if key in keys:
+                    continue
+                if not key.endswith("|"):     # untitled: nothing to match
+                    keys.add(key)
+            ids.add(t.video_id)
+            new.append(t)
         if not new:
             return 0
         row = len(self._tracks)
@@ -497,10 +558,32 @@ class Queue(QAbstractListModel):
     def enable_radio(self, seed_video_id: str | None) -> None:
         was = self._radio_enabled
         self._radio_enabled = True
-        self._radio_seed = seed_video_id
+        if not (was and seed_video_id and seed_video_id == self._radio_seed):
+            # A new pick is a new radio. Re-enabling for the anchor already
+            # in force (play-now sets it through set_current first) keeps
+            # the refill that is already on its way.
+            self._new_radio_session(seed_video_id)
         if not was:
             self.radio_state_changed.emit(True)
         self._maybe_refill()
+
+    @property
+    def radio_generation(self) -> int:
+        return self._radio_gen
+
+    def row_of(self, video_id: str) -> int:
+        """Row holding ``video_id``, or -1."""
+        return self._row_for_vid(video_id)
+
+    def block_from_radio(self, video_id: str) -> None:
+        if video_id:
+            self._radio_blocked.add(video_id)
+
+    def _new_radio_session(self, seed: str | None) -> None:
+        self._radio_seed = seed
+        self._radio_depth = 0
+        self._radio_gen += 1
+        self._refill_in_flight = False
 
     def disable_radio(self) -> None:
         # Always clear the in-flight guard, even if radio was already off.
@@ -514,29 +597,47 @@ class Queue(QAbstractListModel):
         if not self._radio_enabled:
             return
         self._radio_enabled = False
-        self._radio_seed = None
+        self._new_radio_session(None)
         self.radio_state_changed.emit(False)
 
-    def absorb_radio(self, tracks: list[Track]) -> int:
+    def absorb_radio(self, tracks: list[Track], gen: int | None = None) -> int:
+        """Append a refill's answer. ``gen`` is the generation the request
+        went out with; an answer for an older one is dropped (the user has
+        moved on) and leaves the newer request's in-flight guard alone."""
+        if gen is not None and gen != self._radio_gen:
+            return 0
         self._refill_in_flight = False
-        return self.add_many(tracks)
+        if not self._radio_enabled and gen is not None:
+            return 0
+        added = self.add_many(
+            [t for t in tracks if t and t.video_id not in self._radio_blocked],
+            skip_same_song=True)
+        if added >= self.RADIO_DRY:
+            self._radio_depth += 1
+            return added
+        # The anchor's radio is read out. Carry on from what is playing
+        # now, which at least is a song the user stayed on.
+        cur = self.current
+        if cur is not None and cur.video_id != self._radio_seed:
+            self._new_radio_session(cur.video_id)
+            if added == 0:
+                self._maybe_refill()
+        return added
 
     def _maybe_refill(self) -> None:
         if not self._radio_enabled or self._refill_in_flight:
             return
-        if self.upcoming_count > self.REFILL_TAIL:
+        if self._unplayed_count() > self.REFILL_TAIL:
             return
-        seed = self._latest_video_id_for_seed()
+        if not self._radio_seed:
+            cur = self.current
+            self._radio_seed = (cur.video_id if cur is not None
+                                else (self._tracks[-1].video_id
+                                      if self._tracks else None))
+        seed = self._radio_seed
         if not seed:
             return
         self._refill_in_flight = True
-        self.refill_requested.emit(seed, list(self.video_ids()))
-
-    def _latest_video_id_for_seed(self) -> str | None:
-        # Use the current track as the seed if available, else the most recent
-        # track in the queue, else the originally enabled seed.
-        if self.current is not None:
-            return self.current.video_id
-        if self._tracks:
-            return self._tracks[-1].video_id
-        return self._radio_seed
+        exclude = self.video_ids() | self._radio_blocked
+        self.refill_requested.emit(seed, list(exclude), self._radio_depth,
+                                   self._radio_gen)

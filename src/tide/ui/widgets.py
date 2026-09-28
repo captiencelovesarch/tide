@@ -859,8 +859,11 @@ class AlbumArt(QLabel):
             self._size = new_size
             self.setFixedSize(self._size, self._size)
         border = f"1px solid {frame_col}" if self._framed else "none"
+        # Unframed art sits on a backdrop (the mini, fullscreen). A bg
+        # fill there showed as a dark slab behind a cover mid-flip.
+        ground = bg if self._framed else "transparent"
         self.setStyleSheet(
-            f"QLabel {{ background: {bg}; border: {border}; "
+            f"QLabel {{ background: {ground}; border: {border}; "
             f"border-radius: {radius}px; color: {fg}; }}"
         )
         if self._pixmap_raw is None:
@@ -896,42 +899,43 @@ class AlbumArt(QLabel):
         return out
 
     def setImage(self, image: QImage | None) -> None:
-        from . import motion as motion_module
+        from . import art_fx
 
         if image is None or image.isNull():
+            art_fx.cancel(self)
             self._pixmap_raw = None
             self._render_empty()
             return
         new_raw = QPixmap.fromImage(image)
-        new_scaled = self._shape(new_raw.scaled(
-            self._size, self._size,
-            Qt.KeepAspectRatioByExpanding,
-            Qt.FastTransformation,
-        ))
-        # Capture what's currently on screen so the crossfade has a "from".
-        # Reading from QLabel.pixmap() lets us cross from whatever the user
-        # last saw, including a mid-crossfade intermediate frame if the
-        # tracks change rapidly — the helper's prior-cancellation makes this
-        # safe.
+        # What is on screen right now is the "from": the last cover, or a
+        # frame of a transition that is still running. A null pixmap (the
+        # first load, the empty state) makes art_fx snap.
         old_display = self.pixmap()
         self._pixmap_raw = new_raw
-        # The helper snaps when old_display is null/empty (first-ever load
-        # or coming from the "[no art]" state), and respects motion=OFF
-        # globally. No special-casing here.
-        motion_module.crossfade_pixmap(
-            setter=self.setPixmap,
-            old_pixmap=old_display,
-            new_pixmap=new_scaled,
-            owner=self,
-        )
+        art_fx.play(self, old_display, self._compose(new_raw),
+                    on_done=self._settle)
 
-    def _render(self, pix: QPixmap) -> None:
-        scaled = self._shape(pix.scaled(
+    def _settle(self) -> None:
+        # Land on a fresh render, not the frame the transition captured:
+        # the song change restyles the app mid-flight (accent, corners,
+        # scale), and the cover has to end up in the new look.
+        if self._pixmap_raw is None:
+            self._render_empty()
+        else:
+            self._render(self._pixmap_raw)
+
+    def _compose(self, pix: QPixmap) -> QPixmap:
+        """The cover as this tile shows it: scaled to the tile and shaped.
+        The circle and polaroid variants override this, so a transition
+        moves between the covers they actually draw."""
+        return self._shape(pix.scaled(
             self._size, self._size,
             Qt.KeepAspectRatioByExpanding,
             Qt.FastTransformation,
         ))
-        self.setPixmap(scaled)
+
+    def _render(self, pix: QPixmap) -> None:
+        self.setPixmap(self._compose(pix))
 
     def _render_empty(self) -> None:
         self.setPixmap(QPixmap())

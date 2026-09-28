@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import os
 import random
+import time
 from enum import Enum
 from typing import Callable, Optional
 
@@ -580,6 +581,109 @@ def value_lerp(
             on_done()
 
     anim.finished.connect(_finish)
+    _register(owner, kind, anim)
+    anim.start()
+    return anim
+
+
+# The longest single step a Tween takes, in ms. Anything longer was the
+# GUI thread stalling (the song-change restyle runs ~150-250 ms), and a
+# wall-clock animation would jump straight past that part of the curve.
+_TWEEN_MAX_STEP_MS = 40.0
+
+
+class Tween(QObject):
+    """A stall-tolerant value_lerp. It advances on its own clock and caps
+    each step at _TWEEN_MAX_STEP_MS, so a frozen event loop pauses the
+    motion instead of skipping it. Same stop() surface as a
+    QVariantAnimation, so the kind table can cancel it."""
+
+    def __init__(self, start: float, end: float, dur: int,
+                 easing: QEasingCurve,
+                 on_update: Callable[[float], None],
+                 on_done: Optional[Callable[[], None]],
+                 parent: Optional[QObject]) -> None:
+        super().__init__(parent)
+        self._start = float(start)
+        self._end = float(end)
+        self._dur = max(1.0, float(dur))
+        self._easing = easing
+        self._on_update = on_update
+        self._on_done = on_done
+        self._elapsed = 0.0
+        self._last = 0.0
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self) -> None:
+        self._last = time.monotonic()
+        self._timer.start()
+        self._emit(0.0)
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def state(self) -> QAbstractAnimation.State:
+        return (QAbstractAnimation.Running if self._timer.isActive()
+                else QAbstractAnimation.Stopped)
+
+    def _emit(self, progress: float) -> None:
+        eased = self._easing.valueForProgress(progress)
+        try:
+            self._on_update(self._start + (self._end - self._start) * eased)
+        except RuntimeError:
+            # The target died mid-flight (C++ side deleted); nothing to
+            # draw on anymore.
+            self._timer.stop()
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        step = min(_TWEEN_MAX_STEP_MS, max(0.0, (now - self._last) * 1000.0))
+        self._last = now
+        self._elapsed += step
+        progress = min(1.0, self._elapsed / self._dur)
+        self._emit(progress)
+        if progress >= 1.0:
+            self._timer.stop()
+            if self._on_done is not None:
+                self._on_done()
+
+
+def tween(
+    start: float,
+    end: float,
+    *,
+    on_update: Callable[[float], None],
+    dur: Optional[int] = None,
+    easing: Optional[QEasingCurve] = None,
+    on_done: Optional[Callable[[], None]] = None,
+    owner: Optional[QObject] = None,
+    kind: str = "tween",
+) -> Optional[Tween]:
+    """value_lerp for motion that has to be seen whole (the album-art
+    transitions): a stall pauses it rather than skipping frames. OFF
+    snaps, like every helper."""
+    _cancel_prior(owner, kind)
+    if intensity() == Intensity.OFF:
+        on_update(float(end))
+        if on_done:
+            on_done()
+        return None
+    dur = _dur("med") if dur is None else dur
+    easing = _ease("out") if easing is None else easing
+    anim: Optional[Tween] = None
+
+    def _finish() -> None:
+        if owner is not None:
+            table = getattr(owner, "_motion_anims", None)
+            if table is not None and table.get(kind) is anim:
+                table.pop(kind, None)
+        if on_done:
+            on_done()
+
+    anim = Tween(start, end, dur, easing, on_update, _finish, owner)
     _register(owner, kind, anim)
     anim.start()
     return anim

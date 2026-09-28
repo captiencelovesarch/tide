@@ -63,7 +63,7 @@ class ResolveTruthTableTest(unittest.TestCase):
                         backdrops.resolve(backdrops.OFF,
                                           adaptive_on=adaptive_on,
                                           surface=surface,
-                                          main_style="aurora"),
+                                          main_style="stage"),
                         "off")
 
     def test_follow_mirrors_the_main_style_when_adaptive_is_on(self) -> None:
@@ -71,8 +71,8 @@ class ResolveTruthTableTest(unittest.TestCase):
             with self.subTest(surface=surface):
                 self.assertEqual(
                     backdrops.resolve(backdrops.FOLLOW, adaptive_on=True,
-                                      surface=surface, main_style="aurora"),
-                    "aurora")
+                                      surface=surface, main_style="stage"),
+                    "stage")
 
     def test_adaptive_off_divergence_is_explicit_data(self) -> None:
         # fullscreen mirrors the main surface's whole look, master toggle
@@ -80,21 +80,21 @@ class ResolveTruthTableTest(unittest.TestCase):
         # backdrop — this split is the reason resolve exists
         self.assertEqual(
             backdrops.resolve(backdrops.FOLLOW, adaptive_on=False,
-                              surface="fullscreen", main_style="aurora"),
+                              surface="fullscreen", main_style="stage"),
             "off")
         self.assertEqual(
             backdrops.resolve(backdrops.FOLLOW, adaptive_on=False,
-                              surface="mini", main_style="aurora"),
-            "aurora")
+                              surface="mini", main_style="stage"),
+            "stage")
 
     def test_empty_pick_means_follow(self) -> None:
         self.assertEqual(
             backdrops.resolve("", adaptive_on=True, surface="mini",
-                              main_style="smoke"),
-            "smoke")
+                              main_style="vinyl"),
+            "vinyl")
         self.assertEqual(
             backdrops.resolve("", adaptive_on=False, surface="fullscreen",
-                              main_style="smoke"),
+                              main_style="vinyl"),
             "off")
 
     def test_follow_defaults_to_field_when_the_main_style_is_unset(self) -> None:

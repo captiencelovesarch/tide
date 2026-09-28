@@ -17,12 +17,12 @@ SLUGS: tuple[str, ...] = (
     "vbeam",
     "horizon",
     "lightning",
-    "depths",
+    "ripples",
+    "stage",
     "rimlight",
     "liquid",
-    "aurora",
-    "smoke",
-    "caustics",
+    "contours",
+    "vinyl",
 )
 
 # Picker labels, verbatim from the shipped settings dialog.
@@ -32,12 +32,22 @@ LABELS: dict[str, str] = {
     "vbeam": "bass arch · hazy hill swells on bass",
     "horizon": "sunset horizon · sun low over water",
     "lightning": "lightning · strikes on the beat",
-    "depths": "deep water · glow wells up from below",
+    "ripples": "ripples · every kick drops a ring on the water",
+    "stage": "stage lights · beams sweep through the haze",
     "rimlight": "rim light · edges hold the light",
     "liquid": "liquid cover · the album art, melted",
-    "aurora": "aurora · slow curtains of light",
-    "smoke": "smoke · drifts, glows from within",
-    "caustics": "caustics · underwater light web",
+    "contours": "contours · topo lines that shift with the bass",
+    "vinyl": "vinyl · the grooves catch the light",
+}
+
+# Styles that shipped once and were cut, mapped to the nearest one still
+# here. settings.load rewrites a stored pick through this, so nobody
+# silently lands on "field" with a picker showing nothing selected.
+RETIRED: dict[str, str] = {
+    "depths": "ripples",
+    "caustics": "ripples",
+    "aurora": "stage",
+    "smoke": "stage",
 }
 
 # Sentinels the companion-window pickers wrap around the real styles.

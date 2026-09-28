@@ -15,6 +15,7 @@ Widget tone fields are assigned directly instead of going through the
 theming manager so the matrix is deterministic and theme-order
 independent.
 """
+import math
 import os
 import sys
 import tempfile
@@ -31,8 +32,8 @@ from tide.ui.central_bg import CentralBg, _bg_tone
 
 
 ALL_SLUGS = [
-    "field", "band", "vbeam", "horizon", "lightning", "depths",
-    "rimlight", "liquid", "aurora", "smoke", "caustics",
+    "field", "band", "vbeam", "horizon", "lightning", "ripples",
+    "stage", "rimlight", "liquid", "contours", "vinyl",
 ]
 
 SIZES = [(1280, 800), (800, 1280), (300, 200), (40, 30)]
@@ -167,6 +168,73 @@ class BackdropStyleMatrixTest(unittest.TestCase):
                     per_frame_ms, BUDGET_MS,
                     f"{slug} spends {per_frame_ms:.2f} ms per frame")
 
+    def test_line_styles_stroke_at_window_resolution(self) -> None:
+        # contours and vinyl drew their lines into the ~220 px field and
+        # came out smeared at window size. Their lines are vector strokes
+        # now; the whole paint (field, upscale, strokes) must still fit
+        # a frame.
+        from PySide6.QtCore import QRect
+        W, H = 2000, 1080
+        for slug in ("contours", "vinyl"):
+            w = _make_bg(slug, "full", DARK_BG, 0.5)
+            w._fx_phase = 6.0
+            w._t0 -= 6.0
+            img = QImage(W, H, QImage.Format_RGB32)
+
+            def frame() -> None:
+                p = QPainter(img)
+                p.drawImage(QRect(0, 0, W, H), w._render_buffer(W, H))
+                self.assertIsNotNone(w._vec, f"{slug} lost its vector layer")
+                w._paint_vec(p, QRect(0, 0, W, H))
+                p.end()
+
+            for _ in range(3):
+                frame()
+            t0 = time.perf_counter()
+            for _ in range(15):
+                frame()
+            per_frame_ms = (time.perf_counter() - t0) / 15 * 1000.0
+            with self.subTest(slug=slug):
+                self.assertLess(per_frame_ms, 2 * BUDGET_MS,
+                                f"{slug} paints in {per_frame_ms:.1f} ms")
+
+    def test_vinyl_label_is_the_spinning_cover(self) -> None:
+        from PySide6.QtCore import QRect
+        W, H = 800, 450
+
+        def corner(w) -> QColor:
+            img = QImage(W, H, QImage.Format_RGB32)
+            p = QPainter(img)
+            p.drawImage(QRect(0, 0, W, H), w._render_buffer(W, H))
+            w._paint_vec(p, QRect(0, 0, W, H))
+            p.end()
+            return img.pixelColor(W - 20, H - 20)
+
+        plain = _make_bg("vinyl", "full", DARK_BG, 0.0)
+        covered = _make_bg("vinyl", "full", DARK_BG, 0.0)
+        covered.set_art(_synth_cover())
+        self.assertNotEqual(corner(plain).name(), corner(covered).name(),
+                            "the label ignored the album art")
+        # It turns with scene time: two moments, two angles.
+        covered._fx_phase = 1.0
+        covered._render_buffer(W, H)
+        a = covered._vec[-1]
+        covered._fx_phase = 2.0
+        covered._render_buffer(W, H)
+        self.assertNotEqual(a, covered._vec[-1])
+
+    def test_contours_trace_every_level(self) -> None:
+        from tide.ui.central_bg import _contour_segments
+        ys, xs = np.mgrid[0:40, 0:40].astype(np.float32)
+        level = np.hypot(xs - 20.0, ys - 20.0) / 4.0     # rings every 4 px
+        segs, majors = _contour_segments(level)
+        self.assertGreater(len(segs), 50)
+        self.assertTrue(majors.any())
+        # Every segment end sits on its ring (radius 4k), within a pixel.
+        for x0, y0, x1, y1 in segs[:200]:
+            r = math.hypot(x0 - 20.0, y0 - 20.0) / 4.0
+            self.assertLess(abs(r - round(r)), 0.25)
+
     def test_save_style_previews(self) -> None:
         # One PNG per style so a human can eyeball the scenes. Not an
         # assertion of beauty — just that a frame with motion history and
@@ -189,6 +257,133 @@ class BackdropStyleMatrixTest(unittest.TestCase):
             path = os.path.join(out_dir, f"{slug}.png")
             with self.subTest(slug=slug):
                 self.assertTrue(big.save(path), f"could not save {path}")
+
+
+class PlaybackSpeedTest(unittest.TestCase):
+    """The scene clocks run at the song's speed: the fx and liquid phases
+    (on top of the motion setting) and the song clock the gradients and
+    ripples read."""
+
+    def setUp(self) -> None:
+        _app()
+
+    def _advance(self, w, rate: float) -> tuple[float, float, float]:
+        w.set_speed(rate)
+        w._fx_last = w._liq_last = None
+        w._song_last = None
+        w._fx_time()
+        w._song_time()
+        f0, s0 = w._fx_phase, w._song_t
+        w._fx_last -= 1.0
+        w._song_last -= 1.0
+        w._fx_time()
+        w._song_time()
+        return w._fx_phase - f0, w._song_t - s0, rate
+
+    def test_scene_clocks_scale_with_speed(self) -> None:
+        w = _make_bg("stage", "full", DARK_BG, 0.0)
+        fx1, song1, _ = self._advance(w, 1.0)
+        fx2, song2, _ = self._advance(w, 1.5)
+        self.assertAlmostEqual(fx1, 0.25, places=2)     # 1 s, capped per step
+        self.assertAlmostEqual(fx2 / fx1, 1.5, places=2)
+        self.assertAlmostEqual(song2 / song1, 1.5, places=2)
+
+    def test_motion_off_still_freezes_the_scene(self) -> None:
+        w = _make_bg("stage", "off", DARK_BG, 0.0)
+        fx, _song, _ = self._advance(w, 2.0)
+        self.assertEqual(fx, 0.0)
+
+    def test_speed_is_clamped(self) -> None:
+        w = _make_bg("field", "full", DARK_BG, 0.0)
+        w.set_speed(0.0)
+        self.assertEqual(w._speed, 1.0)       # "no speed" means normal
+        w.set_speed(99.0)
+        self.assertEqual(w._speed, 4.0)
+
+    def test_every_style_renders_at_odd_speeds(self) -> None:
+        for slug in ALL_SLUGS:
+            for rate in (0.5, 2.0):
+                w = _make_bg(slug, "full", DARK_BG, 0.4)
+                w.set_speed(rate)
+                with self.subTest(slug=slug, rate=rate):
+                    self.assertFalse(w._render_buffer(320, 200).isNull())
+
+
+class WindowSpeedTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _app()
+        from tide import settings as settings_module
+        from tide.playback import MpvBackend, PlaybackRouter
+        from tide.settings import Settings
+        from tide.sources.local import LocalSource
+        from tide.ui.window import MainWindow
+        self._real_save = settings_module.save
+        settings_module.save = lambda s: None
+        router = PlaybackRouter()
+        router.register(MpvBackend())
+        self.w = MainWindow(LocalSource(), router)
+        self.w._settings = Settings()
+
+    def tearDown(self) -> None:
+        from tide import settings as settings_module
+        self.w.close()
+        settings_module.save = self._real_save
+
+    def test_every_backdrop_follows_the_song_speed(self) -> None:
+        self.w.set_fullscreen_mode(True)
+        self.w.speed_btn.set_speed(1.25)
+        self.assertAlmostEqual(self.w.central_bg._speed, 1.25)
+        self.assertAlmostEqual(self.w._fs.central_bg._speed, 1.25)
+        self.w.set_fullscreen_mode(False)
+        self.w.set_mini_mode(True)
+        self.assertAlmostEqual(self.w._mini.central_bg._speed, 1.25,
+                               msg="a mini opened later starts at the speed")
+
+    def test_a_source_without_speed_keeps_the_backdrop_at_1x(self) -> None:
+        self.w.speed_btn.set_speed(1.5)
+        self.w.speed_btn.set_backend_supported(False)
+        self.w._sync_backdrop_speed()
+        self.assertAlmostEqual(self.w.central_bg._speed, 1.0)
+
+
+class RetiredStyleMigrationTest(unittest.TestCase):
+    """2.1.2 cut depths / caustics / aurora / smoke. A stored pick of one
+    loads as the style that replaced it, stashes included, instead of
+    quietly rendering "field" under a picker with nothing selected."""
+
+    def setUp(self) -> None:
+        from pathlib import Path
+        from tide import config
+        self._tmp = tempfile.TemporaryDirectory()
+        self._orig = config.SETTINGS_FILE
+        config.SETTINGS_FILE = Path(self._tmp.name) / "settings.toml"
+
+    def tearDown(self) -> None:
+        from tide import config
+        config.SETTINGS_FILE = self._orig
+        self._tmp.cleanup()
+
+    def test_retired_picks_load_as_their_replacements(self) -> None:
+        from tide import backdrops, config, settings as settings_module
+        config.SETTINGS_FILE.write_text(
+            'adaptive_background_style = "aurora"\n'
+            'mini_backdrop_style = "depths"\n'
+            'fullscreen_backdrop_style = "caustics"\n'
+            '[preset_state.modern]\n'
+            'adaptive_background_style = "smoke"\n'
+            'mini_backdrop_style = "follow"\n',
+            encoding="utf-8")
+        s = settings_module.load()
+        self.assertEqual(s.adaptive_background_style, "stage")
+        self.assertEqual(s.mini_backdrop_style, "ripples")
+        self.assertEqual(s.fullscreen_backdrop_style, "ripples")
+        stash = s.preset_state["modern"]
+        self.assertEqual(stash["adaptive_background_style"], "stage")
+        self.assertEqual(stash["mini_backdrop_style"], "follow")
+        for old, new in backdrops.RETIRED.items():
+            with self.subTest(old=old):
+                self.assertNotIn(old, backdrops.SLUGS)
+                self.assertIn(new, backdrops.SLUGS)
 
 
 if __name__ == "__main__":

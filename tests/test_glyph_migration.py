@@ -298,12 +298,12 @@ class BackdropChoicesMigrationTest(unittest.TestCase):
         ("bass arch", "vbeam"),
         ("sunset horizon", "horizon"),
         ("lightning", "lightning"),
-        ("deep water", "depths"),
+        ("ripples", "ripples"),
+        ("stage lights", "stage"),
         ("rim light", "rimlight"),
         ("liquid cover", "liquid"),
-        ("aurora", "aurora"),
-        ("smoke", "smoke"),
-        ("caustics", "caustics"),
+        ("contours", "contours"),
+        ("vinyl", "vinyl"),
         ("off · flat", "off"),
     ]
     OLD_STYLE_COMBO = [
@@ -312,12 +312,12 @@ class BackdropChoicesMigrationTest(unittest.TestCase):
         ("bass arch · hazy hill swells on bass", "vbeam"),
         ("sunset horizon · sun low over water", "horizon"),
         ("lightning · strikes on the beat", "lightning"),
-        ("deep water · glow wells up from below", "depths"),
+        ("ripples · every kick drops a ring on the water", "ripples"),
+        ("stage lights · beams sweep through the haze", "stage"),
         ("rim light · edges hold the light", "rimlight"),
         ("liquid cover · the album art, melted", "liquid"),
-        ("aurora · slow curtains of light", "aurora"),
-        ("smoke · drifts, glows from within", "smoke"),
-        ("caustics · underwater light web", "caustics"),
+        ("contours · topo lines that shift with the bass", "contours"),
+        ("vinyl · the grooves catch the light", "vinyl"),
     ]
 
     def test_mini_menu_choices_are_byte_identical(self) -> None:

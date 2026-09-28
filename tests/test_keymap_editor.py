@@ -490,7 +490,10 @@ class CompanionKeymapTests(_WindowCase):
             {"fullscreen": "F11", "mini_mode": "Ctrl+M",
              "play_pause": "Space", "next_track": "Ctrl+Right",
              "prev_track": "Ctrl+Left", "like": "Ctrl+H",
-             "volume_up": "Ctrl+Up", "volume_down": "Ctrl+Down"})
+             "volume_up": "Ctrl+Up", "volume_down": "Ctrl+Down",
+             # 2.1.2: fullscreen got a speed control, and its keys.
+             "speed_slower": "[", "speed_faster": "]",
+             "speed_reset": "\\"})
 
     def test_companion_built_after_a_rebind_wears_it(self) -> None:
         from tide.ui.mini import MiniPlayer

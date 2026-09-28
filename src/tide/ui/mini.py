@@ -62,6 +62,7 @@ _PROGRESS_CHOICES = [
 _CORNER_RADIUS = 12          # the mini is always "rounded" — that's the look
 _ZEN_IDLE_MS = 2600
 _LYRICS_PANEL_H = 210
+_LYRICS_FONT_SCALE = 0.65
 _TICKER_MAX_LINES = 3        # long synced lines wrap this far, then elide
 _PULSE_PAD_MAX = 8           # px each side the window swells on full bass
 _SCREEN_FIT_SLACK = 24       # breathing room when checking screen fit
@@ -853,7 +854,9 @@ class MiniPlayer(QWidget):
         self._lyrics_open = want
         if self.lyrics_panel is None and want:
             from .lyrics import LyricsView
-            panel = LyricsView(self._window.api)
+            # The mini is ~300px wide: undo most of the size step so the
+            # default lands where the mini's lyrics always were.
+            panel = LyricsView(self._window.api, font_scale=_LYRICS_FONT_SCALE)
             for chrome in (panel.heading, panel.karaoke_check, panel.mute_btn,
                            panel.swap_status):
                 chrome.hide()
@@ -1152,6 +1155,10 @@ class MiniPlayer(QWidget):
         glyph = "📍" if on else "📌"
         self.pin_btn.setLabel(glyph)
         self.pin_btn.setGlyph(glyph)
+        # modern draws the icon key, not the glyph, so the swap above never
+        # reached it: a filled pin in the accent says "on" there.
+        self.pin_btn.setIconKey("pin_on" if on else "pin")
+        self.pin_btn.setActiveState(on)
         self.pin_btn.setToolTip("pinned on top. click to release" if on
                                 else "keep on top of other windows")
         from PySide6.QtGui import QGuiApplication

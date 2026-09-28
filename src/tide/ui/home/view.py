@@ -101,6 +101,77 @@ def _weekly_stats() -> str:
     return line
 
 
+# How far back the hero's week panel reads, and what it takes to make
+# "on repeat" (plays of one song in the last 7 days).
+_WEEK_HISTORY_LINES = 5000
+_REPEAT_MIN_PLAYS = 3
+
+
+def week_summary(entries, now: float | None = None) -> dict | None:
+    """The hero's week panel, from the local history (newest first, as
+    history.read_recent gives it). None when the last 7 days are empty.
+
+      minutes  7 floats, oldest day first, today last (listening time,
+               estimated from the durations of the plays that started)
+      days     7 one-letter day names to label them
+      streak   days in a row with a play, ending today (or yesterday,
+               when today hasn't started yet)
+      repeat   up to 3 (Track, plays) for the most-played songs this week
+      new      first artists heard for the first time this week, when the
+               history reaches back far enough to tell (two weeks)
+    """
+    import datetime as _dt
+    from collections import Counter
+
+    now = time.time() if now is None else float(now)
+    today = _dt.date.fromtimestamp(now)
+    secs = [0.0] * 7
+    plays: Counter = Counter()
+    latest: dict = {}
+    dates: set = set()
+    first_seen: dict[str, float] = {}
+    oldest = now
+    for e in entries:
+        when = float(e.played_at or 0.0)
+        if when <= 0:
+            continue
+        oldest = min(oldest, when)
+        day = _dt.date.fromtimestamp(when)
+        dates.add(day)
+        artist = (e.artists or "").split(",")[0].strip()
+        if artist:
+            key = artist.lower()
+            first_seen[key] = min(first_seen.get(key, when), when)
+        back = (today - day).days
+        if 0 <= back < 7:
+            secs[6 - back] += max(0, int(e.duration_seconds or 0))
+            if e.video_id:
+                plays[e.video_id] += 1
+                latest.setdefault(e.video_id, e)
+    if not any(secs) and not plays:
+        return None
+    streak = 0
+    day = today if today in dates else today - _dt.timedelta(days=1)
+    while day in dates:
+        streak += 1
+        day -= _dt.timedelta(days=1)
+    repeat = [(latest[vid].to_track(), n) for vid, n in plays.most_common(3)
+              if n >= _REPEAT_MIN_PLAYS]
+    new: list[str] = []
+    if oldest < now - 14 * 86400:
+        cutoff = now - 7 * 86400
+        names = {}
+        for e in entries:
+            artist = (e.artists or "").split(",")[0].strip()
+            if artist and first_seen.get(artist.lower(), 0) >= cutoff:
+                names.setdefault(artist.lower(), artist)
+        new = list(names.values())
+    days = [(today - _dt.timedelta(days=6 - i)).strftime("%a")[0].lower()
+            for i in range(7)]
+    return {"minutes": [s / 60.0 for s in secs], "days": days,
+            "streak": streak, "repeat": repeat, "new": new}
+
+
 # ---------- workers ----------
 
 
@@ -339,10 +410,12 @@ class HomeView(QWidget):
 
     def _build_hero(self) -> None:
         last_track = None
+        week = None
         try:
-            recent = history_module.read_recent(1)
+            recent = history_module.read_recent(_WEEK_HISTORY_LINES)
             if recent:
                 last_track = recent[0].to_track()
+                week = week_summary(recent)
         except Exception:
             pass
         can_resume = False
@@ -356,6 +429,7 @@ class HomeView(QWidget):
             greeting, _weekly_stats(), last_track,
             can_resume=can_resume,
             show_likes=(getattr(self.api, "slug", "") == "ytmusic"),
+            week=week,
         )
         hero.resume_clicked.connect(self.resume_requested.emit)
         hero.track_clicked.connect(lambda tr: self.play_now_requested.emit(tr, True))

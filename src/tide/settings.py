@@ -42,9 +42,7 @@ class Settings:
     mini_mode_default: bool = False
     # v1.2.7 mini player redo — the dedicated frameless window (ui/mini.py).
     # Backdrop: "follow" = use adaptive_background_style; or a concrete
-    # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths" |
-    # "rimlight" | "liquid" | "aurora" | "smoke" | "caustics", or "off"
-    # for a flat card.
+    # style slug from backdrops.SLUGS, or "off" for a flat card.
     mini_backdrop_style: str = "follow"
     # "ring" = window border fills as the progress bar; "thin" = classic bar.
     mini_progress_style: str = "ring"
@@ -92,9 +90,7 @@ class Settings:
     # When True, the main app surface paints an album-palette backdrop (see
     # ui/central_bg.py).
     adaptive_background: bool = False
-    # Adaptive backdrop style: "field" | "band" | "vbeam" | "horizon" |
-    # "lightning" | "depths" | "rimlight" | "liquid" | "aurora" | "smoke"
-    # | "caustics".
+    # Adaptive backdrop style: one of backdrops.SLUGS.
     adaptive_background_style: str = "field"
     # When True (and adaptive_background is on), that gradient also swells /
     # brightens on heavy bass, app-wide while playing. Needs the monitor
@@ -119,6 +115,16 @@ class Settings:
     # "rise" | "off" (see ui/text_fx.py). Motion "off" makes any of them
     # instant.
     text_transition: str = "scramble"
+    # How the album art changes when the track does: "flip" | "slide" |
+    # "pop" | "blocks" | "fade" | "off" (see ui/art_fx.py). Motion "off"
+    # makes any of them instant.
+    art_transition: str = "flip"
+    # Lyric type, relative to the body text: "small" | "medium" | "large"
+    # | "huge" (see ui/lyrics.py SIZES). The ui scale multiplies it too.
+    lyrics_size: str = "large"
+    # Window + tray icon: "theme" draws it in the active theme's colours
+    # (see ui/app_icon.py), "classic" keeps the launcher's night-blue one.
+    app_icon: str = "theme"
     # Font-family override. Empty = use the active theme's typography.family.
     # When set, the theming manager pushes this family on every theme apply.
     font_family_override: str = ""
@@ -358,12 +364,41 @@ def load() -> Settings:
             pass
     known = {f.name for f in fields(Settings)}
     filtered = {k: v for k, v in raw.items() if k in known}
+    _retire_backdrops(filtered)
     # If a settings file exists at all, the user is past first launch —
     # the file only gets written by `save()` which only runs after the
     # wizard, in-app settings dialog, etc. Auto-stamp existing configs so
     # users upgrading from pre-wizard versions don't get re-onboarded.
     filtered.setdefault("first_launch_complete", True)
     return Settings(**filtered)
+
+
+_BACKDROP_FIELDS = (
+    "adaptive_background_style",
+    "mini_backdrop_style",
+    "fullscreen_backdrop_style",
+)
+
+
+def _retire_backdrops(raw: dict) -> None:
+    """Rewrite backdrop picks that name a style tide no longer ships,
+    top level and every personality's stash, to the style that replaced
+    it."""
+    from .backdrops import RETIRED
+
+    def fix(d) -> None:
+        if not isinstance(d, dict):
+            return
+        for key in _BACKDROP_FIELDS:
+            value = d.get(key)
+            if isinstance(value, str) and value in RETIRED:
+                d[key] = RETIRED[value]
+
+    fix(raw)
+    stash = raw.get("preset_state")
+    if isinstance(stash, dict):
+        for state in stash.values():
+            fix(state)
 
 
 def save(s: Settings) -> None:

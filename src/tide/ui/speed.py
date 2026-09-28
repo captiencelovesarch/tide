@@ -127,6 +127,9 @@ class SpeedButton(BracketButton):
         """``"spring"`` under the modern personality, else ``"bracket"``
         (unknown/absent settings, tests, third-party presets → bracket)."""
         settings = getattr(self.window(), "_settings", None)
+        if callable(settings):
+            # The fullscreen window exposes its settings as a getter.
+            settings = settings()
         preset = str(getattr(settings, "preset", "") or "")
         return "spring" if preset == "modern" else "bracket"
 

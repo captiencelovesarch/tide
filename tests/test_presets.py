@@ -343,10 +343,10 @@ class ApplyPresetTests(_FakeManagersCase):
     def test_flip_keeps_incoming_presets_own_tweaks(self) -> None:
         s = _brutalist_customized()
         apply_preset(s, "modern", persist=False)
-        s.adaptive_background_style = "aurora"   # a modern-side tweak
+        s.adaptive_background_style = "stage"   # a modern-side tweak
         apply_preset(s, "brutalist", persist=False)
         apply_preset(s, "modern", persist=False)
-        self.assertEqual(s.adaptive_background_style, "aurora")
+        self.assertEqual(s.adaptive_background_style, "stage")
 
     def test_shared_fields_survive_a_flip(self) -> None:
         s = _brutalist_customized()

@@ -8,9 +8,9 @@ into mpv. Persistence is JSON-in-a-settings-string so the TOML stays
 shallow (the existing serializer doesn't handle lists of dicts).
 
 Filter order in the chain is deliberate:
-    EQ bands → exciter → bass shelf → treble shelf → lofi →
+    preamp → EQ bands → exciter → bass shelf → treble shelf → lofi →
     stereo width → compressor → chorus → flanger → phaser → tremolo →
-    reverb → crossfeed → loudness norm → mono
+    reverb → crossfeed → loudness norm → mono → safety limiter
 
 EQ first to shape the source signal cleanly, the exciter right after so
 its synthesized harmonics ride the corrected spectrum before the broad
@@ -19,13 +19,25 @@ character, then image/dynamics, then the modulation family (motion
 before space — a chorused signal into reverb sounds like an ensemble in
 a room, a reverbed signal into chorus sounds like seasickness), then
 the convolution reverb, headphone crossfeed on the summed result,
-loudness leveling near the end, and the optional mono fold as the very
-last step. mpv layers its own scaletempo + volume in front of our
-chain.
+loudness leveling near the end, and the optional mono fold as the last
+real effect.
+
+Gain staging: nothing in the rack may push the signal past full scale,
+because past full scale is clipping, and clipping is what made the rack
+sound "crunchy" next to the bypass. Measured on a real track: bass
+boost peaked +3.6 dB over, the compressor +6.1, hall reverb +5.8, and
+"slowed" at full wet +12.2 with 9% of samples clipped. So the chain
+opens with a preamp that cancels the EQ + shelf boost (computed from
+the actual filter response, since overlapping bands stack), the
+exciter and width filters run with their built-in hard clip off, the
+reverb mixes equal-power instead of adding the wet on top, and a
+lookahead limiter a hair under full scale catches whatever is left.
 """
 from __future__ import annotations
 
+import cmath
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 
@@ -303,6 +315,76 @@ def _clamp(value, lo: float, hi: float, default: float) -> float:
         return default
 
 
+# ---------- gain staging ----------
+
+# Ceiling for the safety limiter, a hair under full scale (-0.5 dBFS) so
+# inter-sample peaks from the resampler after us don't clip either.
+LIMITER_CEILING = 0.944
+
+# Frequency grid for the boost estimate: 1/24 octave, 20 Hz – 20 kHz. Fine
+# enough to land within ~0.05 dB of a half-octave band's true peak.
+_RESPONSE_FS = 48000.0
+_RESPONSE_GRID_HZ: tuple[float, ...] = tuple(
+    20.0 * 2.0 ** (k / 24.0) for k in range(int(24 * math.log2(1000.0)) + 1)
+)
+# ffmpeg's bass/treble default width: Q 0.707 (checked against an impulse
+# through the real filters: 0.00 dB off; the same check put the octave-
+# width peaking model 0.01 dB off).
+_SHELF_Q = 0.7071
+
+
+def _peaking(f0: float, gain_db: float, bw_oct: float) -> tuple:
+    a = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * f0 / _RESPONSE_FS
+    alpha = math.sin(w0) * math.sinh(math.log(2.0) / 2.0 * bw_oct * w0 / math.sin(w0))
+    c = math.cos(w0)
+    return ((1 + alpha * a, -2 * c, 1 - alpha * a),
+            (1 + alpha / a, -2 * c, 1 - alpha / a))
+
+
+def _shelf(low: bool, f0: float, gain_db: float) -> tuple:
+    a = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * f0 / _RESPONSE_FS
+    c = math.cos(w0)
+    s = 2.0 * math.sqrt(a) * math.sin(w0) / (2.0 * _SHELF_Q)
+    sign = 1.0 if low else -1.0
+    b = (a * ((a + 1) - sign * (a - 1) * c + s),
+         sign * 2 * a * ((a - 1) - sign * (a + 1) * c),
+         a * ((a + 1) - sign * (a - 1) * c - s))
+    d = ((a + 1) + sign * (a - 1) * c + s,
+         -sign * 2 * ((a - 1) + sign * (a + 1) * c),
+         (a + 1) + sign * (a - 1) * c - s)
+    return b, d
+
+
+def eq_peak_boost_db(state: AudioFxState) -> float:
+    """Highest point of the EQ bands + bass/treble shelves' combined
+    magnitude response, in dB (0 when nothing boosts). Adjacent boosted
+    bands overlap and a shelf stacks on top of them, so this can run well
+    past any single slider: the bass boost preset plus a +4 bass shelf
+    peaks at +10.3 dB."""
+    sections = [
+        _peaking(freq, float(g), EQ_BAND_WIDTH_OCTAVES)
+        for freq, g in zip(EQ_FREQUENCIES_HZ, state.eq_bands)
+        if abs(float(g or 0.0)) >= 0.05
+    ]
+    if abs(state.bass_db) >= 0.05:
+        sections.append(_shelf(True, 120.0, state.bass_db))
+    if abs(state.treble_db) >= 0.05:
+        sections.append(_shelf(False, 8000.0, state.treble_db))
+    if not sections:
+        return 0.0
+    peak = 0.0
+    for f in _RESPONSE_GRID_HZ:
+        z1 = cmath.exp(-1j * 2.0 * math.pi * f / _RESPONSE_FS)
+        z2 = z1 * z1
+        h = 1.0 + 0j
+        for b, d in sections:
+            h *= (b[0] + b[1] * z1 + b[2] * z2) / (d[0] + d[1] * z1 + d[2] * z2)
+        peak = max(peak, 20.0 * math.log10(abs(h)))
+    return peak
+
+
 # ---------- chain builder ----------
 
 def _ffmpeg_quote(text: str) -> str:
@@ -344,8 +426,9 @@ def _reverb_lavfi_entry(preset: str, wet: float) -> str | None:
     convolve one branch (``irnorm=-1`` — afir's auto IR normalization
     also crushed the level ~40 dB on our long unit-energy IRs), and
     amix it back against the untouched branch. amix weights carry the
-    user's wet knob; ``normalize=0`` keeps the dry branch at exact
-    unity so wet→0 converges on bypass. afir adds no latency (measured
+    user's wet knob, scaled equal-power so the room doesn't raise the
+    level; ``normalize=0`` so amix applies those weights exactly as
+    given. afir adds no latency (measured
     with an impulse: wet onset = pre-delay exactly), so the branches
     stay time-aligned. The IR carries no impulse at t=0 — the wet
     branch is pure room.
@@ -361,11 +444,18 @@ def _reverb_lavfi_entry(preset: str, wet: float) -> str | None:
     # Quoted twice: once for the graph splitter, once for the filter
     # arg splitter (each strips one layer — see docstring).
     escaped = _ffmpeg_quote(_ffmpeg_quote(str(path)))
+    # Equal-power mix: the wet tail is uncorrelated with the dry signal,
+    # so their powers add. Scaling both by 1/sqrt(1 + w²) keeps the
+    # loudness where it was instead of adding the room on top (which
+    # pushed "slowed" at full wet +7 dB louder and deep into clipping).
+    # The wet/dry balance is unchanged, and w → 0 still converges on
+    # bypass.
+    norm = 1.0 / math.sqrt(1.0 + w * w)
     graph = (
         "asplit[dry][srcw];"
         f"amovie=filename={escaped}[ir];"
         "[srcw][ir]afir=dry=1:wet=1:irnorm=-1[wet];"
-        f"[dry][wet]amix=inputs=2:weights='1 {w:.3f}':normalize=0"
+        f"[dry][wet]amix=inputs=2:weights='{norm:.3f} {w * norm:.3f}':normalize=0"
     )
     # %len% counts bytes, not characters — encode before measuring so a
     # non-ascii cache path doesn't truncate the graph mid-token.
@@ -386,6 +476,14 @@ def build_filter_chain(state: AudioFxState) -> str:
 
     chain: list[str] = []
 
+    # 0. Preamp: cancel the EQ + shelf boost up front so the boosted
+    # band lands where the loudest part of the song already was, not
+    # past full scale. Also leaves the later stages the headroom they
+    # expect.
+    boost = eq_peak_boost_db(state)
+    if boost >= 0.05:
+        chain.append(f"volume=volume={-boost:.2f}dB")
+
     # 1. 10-band graphic EQ (only emit non-zero bands).
     for freq, gain in zip(EQ_FREQUENCIES_HZ, state.eq_bands):
         g = float(gain or 0.0)
@@ -398,8 +496,11 @@ def build_filter_chain(state: AudioFxState) -> str:
     # 2. Exciter (crystalizer) — synthesized top-end sparkle, placed
     # right after the EQ so the shelves below still get the last word
     # on overall brightness.
+    # c=0: crystalizer hard-clips at full scale by default, which is
+    # exactly the crunch this rack must not add. The limiter at the end
+    # handles its overs smoothly instead.
     if state.exciter and state.exciter_amount > 0.05:
-        chain.append(f"crystalizer=i={state.exciter_amount:g}")
+        chain.append(f"crystalizer=i={state.exciter_amount:g}:c=0")
 
     # 3. Bass shelf at 120 Hz.
     if abs(state.bass_db) >= 0.05:
@@ -423,7 +524,8 @@ def build_filter_chain(state: AudioFxState) -> str:
 
     # 6. Stereo width (1.0 == identity, skip).
     if abs(state.stereo_width - 1.0) >= 0.01:
-        chain.append(f"extrastereo=m={state.stereo_width:g}")
+        # c=0 for the same reason as the exciter: no built-in hard clip.
+        chain.append(f"extrastereo=m={state.stereo_width:g}:c=0")
 
     # 7. Compressor.
     if state.compressor:
@@ -470,6 +572,14 @@ def build_filter_chain(state: AudioFxState) -> str:
     if state.mono:
         chain.append("lavfi=[pan=mono|c0=0.5*c0+0.5*c1]")
 
+    # 16. Safety limiter. level=0 turns off alimiter's auto makeup gain,
+    # which would otherwise pump everything up toward the ceiling; with
+    # it off, anything under the ceiling passes through untouched.
+    if chain:
+        chain.append(
+            f"alimiter=limit={LIMITER_CEILING}:attack=5:release=50:level=0"
+        )
+
     return ",".join(chain)
 
 
@@ -485,4 +595,5 @@ __all__ = [
     "REVERB_PRESETS",
     "build_filter_chain",
     "detect_eq_preset",
+    "eq_peak_boost_db",
 ]

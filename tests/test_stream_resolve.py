@@ -13,6 +13,7 @@ every song.
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -87,7 +88,8 @@ class ResolveFallbackTest(unittest.TestCase):
                 mock.patch.object(ym, "_stream_url_alive", self._alive):
             url = ym.resolve_stream_url("vid1")
         self.assertEqual(url, LIVE_URL)
-        self.assertEqual(calls, ["auth", "anon", "web_music"])
+        self.assertEqual(calls[0], "auth")
+        self.assertIn("web_music", calls)
 
     def test_dead_urls_are_never_cached(self) -> None:
         """Only the URL that answered the probe may enter the disk cache."""
@@ -124,9 +126,10 @@ class ResolveFallbackTest(unittest.TestCase):
                 mock.patch.object(ym, "_stream_url_alive", self._alive):
             ym.resolve_stream_url("vid4")
             self.assertIsNone(ym._auth_pass_broken)
+            del calls[:]
             ym.resolve_stream_url("vid5")
         # The second resolve still tried the auth pass first.
-        self.assertEqual(calls, ["auth", "anon", "auth", "anon"])
+        self.assertEqual(calls[0], "auth")
 
     def test_bot_check_does_not_break_the_auth_pass(self) -> None:
         """'Sign in to confirm you're not a bot' is IP reputation, not a
@@ -178,9 +181,124 @@ class ResolveFallbackTest(unittest.TestCase):
                 mock.patch.object(ym, "_stream_url_alive", self._alive):
             ym.resolve_stream_url("vid6")
             self.assertIsNotNone(ym._auth_pass_broken)
+            del calls[:]
             ym.resolve_stream_url("vid7")
         # The second resolve skipped straight to anonymous.
-        self.assertEqual(calls, ["auth", "anon", "anon"])
+        self.assertNotIn("auth", calls)
+
+    def test_fallback_preference_beats_arrival_order(self) -> None:
+        """Fallbacks race, but a slower preferred client still wins over a
+        faster one further down the list."""
+        other = "https://rr3.example/videoplayback?android=1"
+        release = threading.Event()
+
+        class SlowWebMusic:
+            def __init__(self, opts):
+                clients = (opts.get("extractor_args", {})
+                           .get("youtube", {}).get("player_client"))
+                self.key = clients[0] if clients else (
+                    "auth" if opts.get("cookiefile") else "anon")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                if self.key == "android":
+                    release.set()
+                    return {"url": other}
+                if self.key == "web_music":
+                    release.wait(2.0)
+                    return {"url": LIVE_URL}
+                raise Exception("Requested format is not available")
+
+        with mock.patch.object(ym.yt_dlp, "YoutubeDL", SlowWebMusic), \
+                mock.patch.object(ym, "_stream_url_alive",
+                                  lambda u: u in (LIVE_URL, other)):
+            url = ym.resolve_stream_url("vid11")
+        self.assertEqual(url, LIVE_URL)
+
+
+class JarSnapshotTest(unittest.TestCase):
+    """Auth passes must not queue behind each other on the cookie jar."""
+
+    def setUp(self) -> None:
+        ym._auth_pass_broken = None
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jar = Path(self.tmp.name) / "yt_cookies.txt"
+        self.jar.write_text("# Netscape HTTP Cookie File\nold\n")
+        self.enterContext(mock.patch.object(
+            auth, "yt_dlp_cookiefile", return_value=str(self.jar)))
+        self.enterContext(mock.patch.object(
+            ym.cache, "get_stream_url", return_value=None))
+        self.enterContext(mock.patch.object(ym.cache, "put_stream_url"))
+        self.enterContext(mock.patch.object(
+            ym, "_stream_url_alive", lambda u: u == LIVE_URL))
+
+    def test_auth_passes_overlap(self) -> None:
+        inside = threading.Barrier(2, timeout=2.0)
+
+        class FakeYDL:
+            def __init__(self, opts):
+                self.opts = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                # Both passes must be mid-extraction at once; the old
+                # lock-around-everything version breaks the barrier.
+                inside.wait()
+                return {"url": LIVE_URL}
+
+        results = []
+        with mock.patch.object(ym.yt_dlp, "YoutubeDL", FakeYDL):
+            threads = [threading.Thread(
+                target=lambda v=v: results.append(ym.resolve_stream_url(v)))
+                for v in ("a", "b")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(5.0)
+        self.assertEqual(results, [LIVE_URL, LIVE_URL])
+
+    def test_rotated_cookies_replace_the_jar(self) -> None:
+        seen = []
+
+        class RotatingYDL:
+            def __init__(self, opts):
+                self.path = opts["cookiefile"]
+                seen.append(self.path)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                Path(self.path).write_text("# Netscape HTTP Cookie File\nnew\n")
+                return False
+
+            def extract_info(self, url, download=False):
+                return {"url": LIVE_URL}
+
+        with mock.patch.object(ym.yt_dlp, "YoutubeDL", RotatingYDL):
+            ym.resolve_stream_url("vid12")
+        self.assertNotEqual(seen[0], str(self.jar))  # worked on a copy
+        self.assertIn("new", self.jar.read_text())
+        self.assertEqual(sorted(p.name for p in Path(self.tmp.name).iterdir()),
+                         ["yt_cookies.txt"])
+
+    def test_untouched_jar_is_not_rewritten(self) -> None:
+        fake, _ = _fake_ydl({"auth": LIVE_URL})
+        before = self.jar.stat().st_mtime_ns
+        with mock.patch.object(ym.yt_dlp, "YoutubeDL", fake):
+            ym.resolve_stream_url("vid13")
+        self.assertEqual(self.jar.stat().st_mtime_ns, before)
 
 
 class RemoveStreamUrlTest(unittest.TestCase):

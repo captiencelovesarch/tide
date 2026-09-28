@@ -649,7 +649,8 @@ class SpotifySource(MusicSource):
 
     # ---------- radio ----------
 
-    def get_radio(self, video_id: str, exclude: set[str] | None = None) -> list[Track]:
+    def get_radio(self, video_id: str, exclude: set[str] | None = None,
+                  depth: int = 0) -> list[Track]:
         """Resolve a track-station URI. Spotify deprecated its
         `/v1/recommendations` endpoint in late 2024, so we use the
         track-station path which Spotify generates server-side and

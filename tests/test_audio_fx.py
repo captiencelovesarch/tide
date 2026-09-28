@@ -28,8 +28,10 @@ from tide import fx_ir
 from tide.audio_fx import (
     AudioFxState,
     EQ_BAND_COUNT,
+    LIMITER_CEILING,
     REVERB_PRESETS,
     build_filter_chain,
+    eq_peak_boost_db,
 )
 
 MPV = shutil.which("mpv")
@@ -155,7 +157,8 @@ class ChainBuilderTests(unittest.TestCase):
         # ("AVOption 'mono|c0' not found") — the fold must go through
         # a lavfi graph entry.
         s = AudioFxState(master_enabled=True, mono=True)
-        self.assertEqual(build_filter_chain(s), "lavfi=[pan=mono|c0=0.5*c0+0.5*c1]")
+        self.assertEqual(build_filter_chain(s).split(",alimiter=")[0],
+                         "lavfi=[pan=mono|c0=0.5*c0+0.5*c1]")
 
     def test_reverb_wet_zero_bypasses(self):
         s = AudioFxState(master_enabled=True)
@@ -194,7 +197,9 @@ class ChainBuilderTests(unittest.TestCase):
         half = build_filter_chain(s)
 
         def weight(chain: str) -> float:
-            return float(chain.split("weights='1 ")[1].split("'")[0])
+            # wet relative to dry; both carry the equal-power scale
+            dry, wet = chain.split("weights='")[1].split("'")[0].split()
+            return float(wet) / float(dry)
 
         self.assertAlmostEqual(weight(half) * 2.0, weight(full), places=2)
 
@@ -255,10 +260,46 @@ class ChainBuilderTests(unittest.TestCase):
         chain = build_filter_chain(s)
         self.assertTrue(chain.startswith("lavfi=%"), chain)
         declared = int(chain.split("%")[1])
-        graph = chain.split("%", 2)[2]
+        rest = chain.split("%", 2)[2].encode("utf-8")
         # The prefix counts bytes; a wrong count truncates the graph
-        # mid-token inside mpv.
-        self.assertEqual(declared, len(graph.encode("utf-8")))
+        # mid-token inside mpv, or swallows the entry after it.
+        self.assertTrue(rest[declared:].startswith(b",alimiter="), rest[declared - 20:])
+
+
+    def test_preamp_cancels_the_combined_boost(self):
+        # soft warmth tops out at its +3 dB 32 Hz band; overlapping bands
+        # plus a shelf stack well past any single slider
+        s = AudioFxState(master_enabled=True)
+        s.apply_eq_preset("soft warmth")
+        self.assertAlmostEqual(eq_peak_boost_db(s), 3.1, places=1)
+        self.assertTrue(build_filter_chain(s).startswith("volume=volume=-3.10dB,"))
+        s.apply_eq_preset("bass boost")
+        s.bass_db = 4.0
+        # ffmpeg's own impulse response peaks at +10.29 dB for this
+        self.assertAlmostEqual(eq_peak_boost_db(s), 10.3, delta=0.1)
+
+    def test_cuts_need_no_preamp(self):
+        s = AudioFxState(master_enabled=True, eq_bands=[-3.0] * 10, bass_db=-2.0)
+        self.assertEqual(eq_peak_boost_db(s), 0.0)
+        self.assertNotIn("volume=", build_filter_chain(s))
+
+    def test_no_filter_hard_clips(self):
+        s = AudioFxState(master_enabled=True, exciter=True, stereo_width=1.8)
+        chain = build_filter_chain(s)
+        self.assertIn("crystalizer=i=2:c=0", chain)
+        self.assertIn("extrastereo=m=1.8:c=0", chain)
+
+    def test_limiter_closes_every_active_chain(self):
+        chain = build_filter_chain(_full_state())
+        self.assertTrue(chain.endswith(
+            f"alimiter=limit={LIMITER_CEILING}:attack=5:release=50:level=0"), chain)
+        self.assertEqual(build_filter_chain(AudioFxState(master_enabled=True)), "")
+
+    def test_reverb_mix_is_equal_power(self):
+        s = AudioFxState(master_enabled=True, reverb_preset="slowed", reverb_wet=1.0)
+        dry, wet = (float(v) for v in
+                    build_filter_chain(s).split("weights='")[1].split("'")[0].split())
+        self.assertAlmostEqual(dry * dry + wet * wet, 1.0, places=2)
 
 
 class StateFuzzTests(unittest.TestCase):
@@ -531,6 +572,35 @@ class MpvEndToEndTests(unittest.TestCase):
                                "no reverb tail from hostile cache path")
         finally:
             fx_ir.IR_DIR = saved
+
+    def test_loud_input_never_clips(self):
+        # A full-scale bass-heavy signal through every level-raising stage
+        # at once. Rendered to s16, so anything past full scale shows up
+        # as samples pinned at the rails.
+        sr = 44100
+        t = np.arange(int(sr * 2.0)) / sr
+        sig = 0.6 * np.sin(2 * np.pi * 50 * t) + 0.4 * np.sin(2 * np.pi * 440 * t)
+        pcm = (np.stack([sig, sig], axis=1) * 32767.0).astype("<i2")
+        loud = str(Path(self._dir) / "loud.wav")
+        with wave.open(loud, "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            w.writeframes(pcm.tobytes())
+        s = AudioFxState(master_enabled=True, compressor=True, exciter=True,
+                         stereo_width=1.6, reverb_preset="slowed", reverb_wet=1.0)
+        s.apply_eq_preset("bass boost")
+        s.bass_db = 4.0
+        out = str(Path(self._dir) / "loud_out.wav")
+        proc = subprocess.run(
+            [MPV, "--no-config", "--no-video", "--ao=pcm", "--audio-format=s16",
+             f"--ao-pcm-file={out}", f"--af={build_filter_chain(s)}", loud],
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        with wave.open(out, "rb") as w:
+            data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+        self.assertGreater(np.abs(data).max(), 3000, "render produced no signal")
+        self.assertLess(np.abs(data).max() / 32768.0, LIMITER_CEILING + 0.01)
 
     def test_mono_fold_runs_in_mpv(self):
         # Regression: the old bare 'pan=mono|…' entry died at filter

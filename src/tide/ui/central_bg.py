@@ -27,10 +27,11 @@ import random
 
 import numpy as np
 
-from PySide6.QtCore import QLineF, QRectF, Qt, QTimer
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QConicalGradient,
     QImage,
     QLinearGradient,
     QPainter,
@@ -102,16 +103,22 @@ _LIQ_MEAN_L_LIGHT = 0.74
 # upscale in paintEvent. Their shared ingredient is a seeded stack of value-
 # noise lattices; _fbm() blends octave pairs over time so the field *churns*
 # instead of merely scrolling — that churn is what makes the scenes read as
-# haze / water / smoke rather than stacked gradient primitives.
+# haze / water / terrain rather than stacked gradient primitives.
 _FX_LATTICE = 48                 # lattice cells per side, wrap-sampled
 _FX_LATTICE_COUNT = 10           # planes in the stack; styles pick pairs
 _FX_SEED = 20260827              # fixed so a style always looks like itself
 
 # The styles that go through the procedural-field renderer.
 _FX_STYLES = frozenset({
-    "vbeam", "horizon", "lightning", "depths", "rimlight",
-    "aurora", "smoke", "caustics",
+    "vbeam", "horizon", "lightning", "ripples", "stage", "rimlight",
+    "contours", "vinyl",
 })
+
+# Ripples: how many rings can be on the water at once, and how long one
+# lasts before it has faded to nothing.
+_DROP_MAX = 8
+_DROP_LIFE_S = 3.4
+_DROP_TILT = 0.58
 
 # set_style's whitelist, from the backdrop registry so pickers and the
 # renderer share one list. The assert makes a slug added to backdrops.py
@@ -135,6 +142,64 @@ def _fx_lattices() -> np.ndarray:
         _fx_lattice_stack = rng.random(
             (_FX_LATTICE_COUNT, _FX_LATTICE, _FX_LATTICE)).astype(np.float32)
     return _fx_lattice_stack
+
+
+def _contour_segments(level: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Marching squares over ``level`` at every integer: (N, 4) float32
+    segments as x0, y0, x1, y1 in grid pixels, and an (N,) bool that
+    marks the index lines (every fifth level). One vectorised pass per
+    level; the field is smooth, so saddle cells are rare enough to pair
+    by edge order."""
+    v00 = level[:-1, :-1]
+    v10 = level[:-1, 1:]
+    v11 = level[1:, 1:]
+    v01 = level[1:, :-1]
+    lo = np.minimum(np.minimum(v00, v10), np.minimum(v01, v11))
+    hi = np.maximum(np.maximum(v00, v10), np.maximum(v01, v11))
+    out: list[np.ndarray] = []
+    flags: list[np.ndarray] = []
+    for k in range(int(math.floor(float(lo.min()))) + 1,
+                   int(math.floor(float(hi.max()))) + 1):
+        jj, ii = np.nonzero((lo < k) & (hi >= k))
+        if jj.size == 0:
+            continue
+        a = v00[jj, ii]
+        b = v10[jj, ii]
+        c = v11[jj, ii]
+        d = v01[jj, ii]
+        fi = ii.astype(np.float32)
+        fj = jj.astype(np.float32)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # top, right, bottom, left edge crossings
+            pts = np.stack([
+                np.stack([fi + (k - a) / (b - a), fj], 1),
+                np.stack([fi + 1.0, fj + (k - b) / (c - b)], 1),
+                np.stack([fi + (k - d) / (c - d), fj + 1.0], 1),
+                np.stack([fi, fj + (k - a) / (d - a)], 1),
+            ], 1)
+        crossed = np.stack([(a < k) != (b < k), (b < k) != (c < k),
+                            (d < k) != (c < k), (a < k) != (d < k)], 1)
+        order = np.argsort(~crossed, axis=1, kind="stable")
+        rows = np.arange(jj.size)
+        first = pts[rows, order[:, 0]]
+        second = pts[rows, order[:, 1]]
+        segs = [np.concatenate([first, second], 1)]
+        saddle = crossed.all(axis=1)
+        if saddle.any():
+            segs.append(np.concatenate([pts[saddle, 2], pts[saddle, 3]], 1))
+        seg = np.concatenate(segs, 0)
+        out.append(seg)
+        flags.append(np.full(seg.shape[0], k % 5 == 0))
+    if not out:
+        return np.zeros((0, 4), np.float32), np.zeros(0, bool)
+    return (np.nan_to_num(np.concatenate(out, 0)).astype(np.float32),
+            np.concatenate(flags, 0))
+
+
+# Vinyl grooves per unit of window height, and how fast the label (the
+# album cover) turns at full motion: a turn every 9 s.
+_GROOVES_PER_UNIT = 80.0
+_LABEL_DEG_PER_S = 40.0
 
 
 def _lerp(a: QColor, b: QColor, t: float) -> QColor:
@@ -208,8 +273,7 @@ class CentralBg(QWidget):
 
         self._enabled: bool = False
         self._radius: int = 0
-        # "field" | "band" | "vbeam" | "horizon" | "lightning" | "depths"
-        # | "rimlight" | "liquid" | "aurora" | "smoke" | "caustics"
+        # One of backdrops.SLUGS.
         self._style: str = "field"
         self._motion: str = "lite"          # "off" freezes the drift
         self._bg = QColor("#0b0b0b")
@@ -233,12 +297,30 @@ class CentralBg(QWidget):
         self._pulse_shown: float = 0.0      # smoothed value actually painted
         self._last_tick: float = 0.0        # when _tick last painted
         self._t0 = time.monotonic()
+        # Playback speed (see set_speed) and the song clock it drives.
+        self._speed: float = 1.0
+        self._song_t: float = 0.0
+        self._song_last: float | None = None
         # Lightning-style strike state. Seed regenerates per strike so each
         # bolt has its own shape; t0 drives the flash/fade envelope.
         self._bolt_seed: int = 1
         self._bolt_t0: float = -10.0
         self._strike_prev: float = 0.0
         self._next_auto_strike: float = 3.0
+        # Ripples state: live drops as (x 0..1, y 0..1, born, strength) in
+        # the same wall clock as the strikes.
+        self._drops: list[tuple[float, float, float, float]] = []
+        self._drop_seed: int = 7
+        self._drop_prev: float = 0.0
+        self._last_drop: float = -10.0
+        self._next_auto_drop: float = 0.6
+        # Vector strokes for the current frame (contours, vinyl), set by the
+        # renderer and drawn over the upscaled field at window resolution.
+        self._vec: tuple | None = None
+        self._groove_img: QImage | None = None
+        self._groove_key: tuple | None = None
+        self._label_img: QImage | None = None
+        self._label_key: tuple | None = None
         self._buf: QImage | None = None
         # Liquid-cover state. The full-res art is cached whatever the current
         # style is (it arrives whenever the adaptive pipeline fetches it, and
@@ -360,6 +442,27 @@ class CentralBg(QWidget):
             self._snap_tones()
         self._sync_timer()
         self.update()
+
+    def set_speed(self, rate: float) -> None:
+        """The song's playback speed. Every scene's clock runs at it, so a
+        slowed song drifts slower and a sped-up one faster. Phases
+        accumulate, so a change never jumps the picture, only its pace.
+        Palette crossfades and lightning's flash stay on real time."""
+        self._speed = max(0.25, min(4.0, float(rate or 1.0)))
+
+    def _song_time(self) -> float:
+        """Wall time at the playback speed, for the scenes that move with
+        the song rather than with the motion setting (the gradient drift,
+        ripples). Starts from the wall clock so a fresh widget matches
+        the old behaviour at 1x; gaps (hidden, stalled) count as 0.25 s
+        at most."""
+        now = time.monotonic()
+        if self._song_last is None:
+            self._song_t = now - self._t0
+        else:
+            self._song_t += min(0.25, max(0.0, now - self._song_last)) * self._speed
+        self._song_last = now
+        return self._song_t
 
     def set_pulse(self, level: float) -> None:
         """Feed the current bass-energy envelope (0..1). Normally stored only
@@ -614,7 +717,7 @@ class CentralBg(QWidget):
         motion = 0.0
         if self._motion != "off":
             motion = 1.0 if self._motion == "full" else 0.58
-        self._liq_phase += dt * 0.9 * motion
+        self._liq_phase += dt * 0.9 * motion * self._speed
         tt = self._liq_phase
         pulse = math.pow(max(0.0, min(1.0, self._pulse_shown)), 1.12)
         dark = self._bg.lightnessF() <= 0.5
@@ -699,7 +802,7 @@ class CentralBg(QWidget):
         motion = 0.0
         if self._motion != "off":
             motion = 1.0 if self._motion == "full" else 0.58
-        self._fx_phase += dt * motion
+        self._fx_phase += dt * motion * self._speed
         return self._fx_phase
 
     @staticmethod
@@ -930,54 +1033,91 @@ class CentralBg(QWidget):
             layers.append((heart * (0.55 + 0.45 * pulse), qc))
             return self._fx_compose(rw, rh, layers)
 
-        if self._style == "depths":
-            # Deep water. The well of light breathes through an fbm field
-            # (volumetric wobble), a faint full-frame haze gives the
-            # medium body, and each mote carries a wide dim halo under its
-            # core so it hangs IN the water instead of floating over it.
-            wob = self._fbm(ax * 2.1, gy * 2.1 - t * 0.05, t, first=1)
-            wx = 0.50 * aspect + 0.05 * aspect * math.sin(t * 0.11)
-            www = aspect * (0.52 + 0.14 * pulse)
-            whh = 0.62 + 0.38 * pulse
-            wex = np.exp(-(((xs - wx) / www) ** 2) * 1.7)
-            wey = np.exp(-(((ys - 1.18) / whh) ** 2) * 1.7)
-            well = wey[:, None] * wex[None, :] * (0.35 + 1.10 * wob)
-            haze = self._fbm(ax * 1.5, gy * 1.5 + t * 0.02, t,
-                             first=6, octaves=2)
-            layers.append((haze * (0.11 + 0.07 * pulse), qa))
-            layers.append((well * (0.75 + 0.45 * pulse), qb))
-            cex = np.exp(-(((xs - wx) / www) ** 2) * 4.2)
-            cey = np.exp(-(((ys - 1.18) / whh) ** 2) * 4.2)
-            layers.append((cey[:, None] * cex[None, :]
-                           * (0.42 + 0.45 * pulse) * (0.4 + 0.9 * wob), qc))
-            motes = (
-                (0.18, 0.045, qc, 47.0, 0.15),
-                (0.38, 0.030, qb, 71.0, 0.45),
-                (0.57, 0.060, qb, 61.0, 0.55),
-                (0.80, 0.050, qc, 53.0, 0.85),
-                (0.68, 0.026, qa, 83.0, 0.05),
-            )
-            for base_x, r, tone, period, phase0 in motes:
-                # Progress wraps 0→1 forever; the sine fade births each
-                # mote dim near the floor and dissolves it near the
-                # surface, so the wrap-around never pops.
-                prog = (phase0 + t / period) % 1.0
-                fade = math.sin(math.pi * prog)
-                if fade < 0.03:
+        if self._style == "ripples":
+            # Rain on dark water. Each kick drops a ring that runs out
+            # across the surface and fades, with a fainter ring trailing
+            # it; between kicks (and on songs the pulse can't read) a drop
+            # falls every couple of seconds on its own. Rings live on the
+            # song clock (wall time at the playback speed), not the motion
+            # clock, so a ring already falling finishes even with motion
+            # frozen, and runs out faster on a sped-up song.
+            tw = self._song_time()
+            prev = self._drop_prev
+            self._drop_prev = pulse
+            onset = (pulse - prev > 0.10 and pulse > 0.30
+                     and tw - self._last_drop > 0.16)
+            if onset or (self._motion != "off"
+                         and tw >= self._next_auto_drop):
+                rng = random.Random(self._drop_seed)
+                self._drop_seed = (self._drop_seed * 69069
+                                   + int(tw * 997.0) + 1) & 0xFFFFFF
+                strength = (0.55 + 0.45 * pulse) if onset else 0.45
+                self._drops.append((rng.uniform(0.10, 0.90),
+                                    rng.uniform(0.12, 0.88), tw, strength))
+                self._drops = self._drops[-_DROP_MAX:]
+                self._last_drop = tw
+                self._next_auto_drop = tw + 1.4 + 2.0 * rng.random()
+
+            swell = self._fbm(ax * 1.7, gy * 1.7, t, first=4, octaves=2)
+            layers.append(((0.24 + 0.34 * swell) * (0.9 + 0.3 * pulse), qa))
+            # A slow sheen across the surface, lit from the top.
+            sheen = (np.exp(-((ys - 0.18) / 0.55) ** 2)[:, None]
+                     * np.clip(swell - 0.35, 0.0, None) * 1.4)
+            layers.append((sheen * (0.30 + 0.20 * pulse), qb))
+            rings = np.zeros((rh, rw), np.float32)
+            crest = np.zeros((rh, rw), np.float32)
+            alive = []
+            for fx_, fy_, t0_, strength in self._drops:
+                age = tw - t0_
+                if age < 0.0 or age > _DROP_LIFE_S:
                     continue
-                my = 1.15 - 1.30 * prog
-                mx = (base_x
-                      + 0.05 * math.sin(t * 0.17 + phase0 * 6.0)) * aspect
-                mdx = ((xs - mx) ** 2) / (r * r)
-                mdy = ((ys - my) ** 2) / (r * r)
-                # Core + wide dim halo in one field: the halo is what makes
-                # the mote read as suspended in the medium, not pasted on.
-                core = np.exp(-mdy)[:, None] * np.exp(-mdx)[None, :]
-                halo = (np.exp(-mdy * 0.22)[:, None]
-                        * np.exp(-mdx * 0.22)[None, :])
-                layers.append((core * (fade * (0.30 + 0.35 * pulse))
-                               + halo * (fade * (0.08 + 0.10 * pulse)),
+                alive.append((fx_, fy_, t0_, strength))
+                rad = 0.04 + 0.34 * age
+                wid = 0.022 + 0.018 * age
+                fade = strength * math.exp(-age / 1.15)
+                # Squashed vertically: a water plane seen at an angle, so
+                # the rings read as ripples on a surface, not bubbles. The
+                # swell bends them a little.
+                d = np.sqrt((((ys - fy_) / _DROP_TILT) ** 2)[:, None]
+                            + ((xs - fx_ * aspect) ** 2)[None, :]) \
+                    + 0.03 * (swell - 0.5)
+                u = (d - rad) / wid
+                lead = np.exp(-u * u)
+                u2 = (d - rad + 0.075) / (wid * 1.4)
+                rings += (lead + 0.45 * np.exp(-u2 * u2)) * fade
+                crest += lead * lead * fade
+            self._drops = alive
+            layers.append((rings * 0.60, qb))
+            layers.append((crest * 0.55, qc))
+            return self._fx_compose(rw, rh, layers)
+
+        if self._style == "stage":
+            # Stage lights. Three lamps above the frame throw cones that
+            # sweep side to side at their own pace; the haze they cut
+            # through decides what lights up, and the light pools on the
+            # floor. Bass widens and brightens the cones.
+            haze = self._fbm(ax * 2.2, gy * 2.2 - t * 0.05, t, first=3)
+            lit = 0.30 + 1.00 * haze
+            layers.append((haze * 0.12 + 0.04, qa))
+            wid = 0.075 + 0.055 * pulse
+            for bx, tone, ph, spd in ((0.18, qb, 0.0, 0.31),
+                                      (0.50, qc, 2.1, 0.23),
+                                      (0.82, qb, 4.2, 0.27)):
+                ox = bx * aspect
+                aim = 0.40 * math.sin(t * spd + ph) + (0.5 - bx) * 0.55
+                dx = (xs - ox)[None, :]
+                dy = (ys + 0.12)[:, None]
+                off = np.arctan2(dx, dy) - aim
+                fall = np.exp(-np.sqrt(dx * dx + dy * dy) * 0.55)
+                cone = np.exp(-(off / wid) ** 2)
+                core = np.exp(-(off / (wid * 0.35)) ** 2)
+                layers.append((cone * fall * lit * (0.55 + 0.60 * pulse),
                                tone))
+                layers.append((core * fall * lit * (0.22 + 0.35 * pulse),
+                               tone))
+            floor = (np.exp(-((ys - 1.04) / 0.24) ** 2)[:, None]
+                     * (0.6 + 0.6 * haze))
+            layers.append((floor * (0.22 + 0.30 * pulse), qa))
             return self._fx_compose(rw, rh, layers)
 
         if self._style == "rimlight":
@@ -1130,94 +1270,74 @@ class CentralBg(QWidget):
                 pp.end()
             return img
 
-        if self._style == "aurora":
-            # Aurora. Three curtains, one per tone, each a soft sheet
-            # whose centerline is a 1-D fbm ridge drifting sideways. The
-            # sheet falls off short above the ridge and long below it (the
-            # hanging-curtain shape); a fine ray field striates it
-            # vertically and a slow ripple moves light along it. The
-            # ripple field is shared — the curtains sit at different
-            # heights, so they cut different slices of it anyway and one
-            # 2-D fbm serves all three. Bass widens and brightens them.
-            ripple = 0.60 + 0.65 * self._fbm(
-                ax * 2.8, gy * 1.8 - t * 0.05, t, first=6, octaves=2)
-            for tone, base_y, width, ph, spd in (
-                    (qa, 0.26, 0.085, 0.0, 0.8),
-                    (qb, 0.44, 0.110, 2.3, 1.0),
-                    (qc, 0.60, 0.070, 4.1, 1.3)):
-                row = np.full_like(xs, 1.3 + ph)
-                ridge = self._fbm(xs * 1.4 + ph * 3.7, row, t * 0.7 * spd,
-                                  first=int(ph * 2) % 8, octaves=2)
-                yc = (base_y + 0.05 * math.sin(t * 0.10 * spd + ph)
-                      + 0.20 * (ridge - 0.5))
-                dy_ = gy - yc[None, :]
-                wid = width * (1.0 + 0.35 * pulse)
-                tail = np.where(dy_ > 0.0, dy_ / (wid * 2.2), dy_ / wid)
-                band = np.exp(-tail * tail)
-                # Vertical striation — the aurora's "rays". Clipped from
-                # below so the gaps between rays actually go dark instead
-                # of everything averaging into fog.
-                rays = np.clip(1.7 * self._fbm(
-                    xs * 10.0 + ph * 5.1, row + 4.2, t * 1.2 * spd,
-                    first=(int(ph * 2) + 3) % 8, octaves=2) - 0.35,
-                    0.12, None)[None, :]
-                layers.append(
-                    (band * rays * ripple * (0.45 + 0.50 * pulse), tone))
+        if self._style == "contours":
+            # A topographic map. One slow fbm is the terrain; its contour
+            # lines drift uphill over time and bass pushes them further,
+            # every fifth one heavier like a survey map's index lines. The
+            # field only carries the terrain shading and a faint bloom
+            # under each line: the lines themselves are traced from it
+            # (marching squares) and stroked at full resolution in
+            # paintEvent. Drawn into the ~220 px field and stretched to the
+            # window, they came out as smeared bands.
+            h = self._fbm(ax * 1.4, gy * 1.4, t * 0.45, first=2,
+                          drift=0.02)
+            level = h * 14.0 - t * 0.12 - 0.9 * pulse
+            nearest = np.round(level)
+            gy_l, gx_l = np.gradient(level)
+            slope = np.sqrt(gx_l * gx_l + gy_l * gy_l) + 1e-3
+            dist = np.abs(level - nearest) / slope
+            bloom = np.exp(-(dist / 2.6) ** 2)
+            major = (np.mod(nearest, 5.0) == 0.0).astype(np.float32)
+            layers.append(((0.12 + 0.32 * h) * (0.85 + 0.30 * pulse), qa))
+            layers.append((bloom * (0.10 + 0.08 * pulse)
+                           * (1.0 + 1.5 * major), qb))
+            # Traced on every other grid point: the terrain is smooth, the
+            # lines land in the same place, and there are half as many
+            # segments to stroke.
+            segs, majors = _contour_segments(level[::2, ::2])
+            self._vec = ("contours", rw, rh, segs * 2.0, majors,
+                         QColor(qb), QColor(qc), pulse)
             return self._fx_compose(rw, rh, layers)
 
-        if self._style == "smoke":
-            # Smoke. One fbm field warps the domain of another, so the
-            # density folds and curls instead of merely scrolling; the
-            # soft knee keeps the wisps translucent. Bass widens the
-            # billows (lower spatial frequency) and lights the thickest
-            # folds from within.
-            warp = self._fbm(ax * 1.5, gy * 1.5 + t * 0.03, t,
-                             first=7, octaves=2)
-            scale = 3.0 / (1.0 + 0.20 * pulse)
-            den = self._fbm(ax * scale + 0.9 * (warp - 0.5) + t * 0.05,
-                            gy * scale - t * 0.03 + 0.6 * (warp - 0.5),
-                            t, first=1)
-            d = np.clip((den - 0.33) * 3.2, 0.0, None)
-            d = d / (1.0 + d)
-            mixn = self._fbm(ax * 1.1 - t * 0.02, gy * 1.1, t,
-                             first=8, octaves=1)
-            layers.append((d * (1.0 - mixn) * (0.90 + 0.30 * pulse), qa))
-            layers.append((d * mixn * (0.80 + 0.30 * pulse), qb))
-            # The bright folds — a steeper knee on the same density, so
-            # the thickest smoke catches the most light. This is what
-            # keeps the drift readable instead of a uniform grey wash.
-            hi = np.clip((den - 0.50) * 3.5, 0.0, None)
-            layers.append((hi * (0.50 + 0.35 * pulse), qb))
-            emb = np.clip(den - 0.55, 0.0, None) * 3.4
-            layers.append((emb * emb * (0.35 + 1.00 * pulse), qc))
-            return self._fx_compose(rw, rh, layers)
-
-        # caustics — the last fx style. Traveling plane waves interfere;
-        # exp(−|sum|·sharp) is bright exactly where a sum crosses zero, so
-        # the ridges form the shifting light web you see on a pool floor.
-        # An fbm warp bends the lattice organically, and bass tightens the
-        # focus (thinner, brighter filaments) like the surface tensing.
-        wn = self._fbm(ax * 1.7, gy * 1.7, t * 0.8, first=9, octaves=2)
-        wx_ = ax + 0.11 * (wn - 0.5)
-        wy_ = gy + 0.11 * (0.5 - wn)
-        two_pi = 2.0 * math.pi
-        s1 = np.sin(two_pi * (1.6 * wx_ + 0.6 * wy_) + t * 0.9)
-        s2 = np.sin(two_pi * (-1.1 * wx_ + 1.5 * wy_) + t * 0.7 + 1.7)
-        s3 = np.sin(two_pi * (0.5 * wx_ - 1.8 * wy_) - t * 1.1 + 3.4)
-        s4 = np.sin(two_pi * (2.2 * wx_ + 1.7 * wy_) - t * 0.6 + 5.1)
-        sharp = 1.1 + 1.3 * pulse
-        web1 = np.exp(-np.abs(s1 + s2 + s3) * sharp)
-        web2 = np.exp(-np.abs(s2 + s3 + s4) * sharp)
-        fade = 0.55 + 0.45 * (1.0 - gy)      # light falls from the surface
-        layers.append(((0.10 + 0.05 * pulse) * (0.5 + 0.7 * wn), qa))
-        layers.append((web1 * fade * (0.30 + 0.25 * pulse), qb))
-        layers.append((web2 * fade * (0.22 + 0.20 * pulse), qb))
-        layers.append((web1 * web2 * fade * (0.45 + 0.55 * pulse), qc))
+        # vinyl — the last fx style. A record much bigger than the window,
+        # its center just past the bottom-right corner, so the grooves
+        # cross the frame as arcs. A wedge of reflected light swings back
+        # and forth over the quarter of the disc in view (a full turn left
+        # the frame dark half the time); the smooth gaps between songs
+        # ring the disc; the label peeks in at the corner. Bass lifts the
+        # sheen and pumps a ring out from the label. The field is the
+        # disc and its soft light; the grooves and the label's edge are
+        # vector strokes laid on in paintEvent (see contours).
+        cx = aspect + 0.16
+        cy = 1.10
+        dx = (xs - cx)[None, :]
+        dy = (ys - cy)[:, None]
+        r = np.sqrt(dx * dx + dy * dy)
+        ang = np.arctan2(dy, dx)
+        gaps = np.abs(np.mod(r * 2.3, 1.0) - 0.5)
+        tracks = 1.0 - 0.60 * np.exp(-(gaps / 0.035) ** 2)
+        label_r = 0.34
+        disc = np.clip((r - label_r) / 0.02, 0.0, 1.0)
+        aim = -0.75 * math.pi + 0.50 * math.sin(t * 0.21)
+        d1 = np.mod(ang - aim + math.pi, 2.0 * math.pi) - math.pi
+        sw = 0.34 + 0.12 * pulse
+        wedge = np.exp(-(d1 / sw) ** 2)
+        layers.append((0.20 * tracks * disc * (0.9 + 0.3 * pulse), qa))
+        layers.append((wedge * 0.75 * tracks * disc
+                       * (0.45 + 0.45 * pulse), qb))
+        if pulse > 0.01:
+            kick = np.exp(-((r - (label_r + 0.05 + 0.55 * pulse)) / 0.05) ** 2)
+            layers.append((kick * disc * 0.45 * pulse, qc))
+        # The label is the album cover, turning with the record (scene
+        # time, so motion "off" stops it and lite slows it).
+        self._vec = ("vinyl", cx / aspect, cy, label_r, QColor(qc),
+                     (t * _LABEL_DEG_PER_S) % 360.0)
         return self._fx_compose(rw, rh, layers)
 
     # ---------- paint ----------
 
     def _render_buffer(self, w: int, h: int) -> QImage:
+        self._vec = None
         if self._style == "liquid":
             liq = self._render_liquid(w, h)
             if liq is not None:
@@ -1251,7 +1371,7 @@ class CentralBg(QWidget):
             self._buf = QImage(bw, bh, fmt)
         img = self._buf
 
-        t = time.monotonic() - self._t0
+        t = self._song_time()
         motion = 0.0
         if self._motion != "off":
             motion = 1.0 if self._motion == "full" else 0.58
@@ -1377,6 +1497,137 @@ class CentralBg(QWidget):
         pp.end()
         return img
 
+    def _paint_vec(self, p: QPainter, rect) -> None:
+        """Stroke the frame's vector layer at window resolution."""
+        vec = self._vec
+        W, H = float(rect.width()), float(rect.height())
+        unit = max(1.0, min(W, H) / 640.0)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.translate(rect.left(), rect.top())
+        if vec[0] == "contours":
+            _, rw, rh, segs, majors, minor_c, major_c, pulse = vec
+            if len(segs):
+                sx, sy = W / rw, H / rh
+                # +0.5: grid values sit at pixel centres of the field image
+                # drawImage stretched over the rect.
+                pts = (segs + 0.5) * np.array([sx, sy, sx, sy], np.float32)
+                # Minor lines are hairlines (Qt's cheap 1px path); the
+                # index lines scale with the window.
+                for mask, col, width, alpha in (
+                        (~majors, _lerp(minor_c, major_c, 0.25), 1.0,
+                         0.75 + 0.25 * pulse),
+                        (majors, major_c, 1.8 * unit, 0.85 + 0.15 * pulse)):
+                    chosen = pts[mask]
+                    if not len(chosen):
+                        continue
+                    pen = QPen(_alpha(col, int(255 * min(1.0, alpha))),
+                               width)
+                    # Flat, not round: round caps on ~2k short segments
+                    # cost four times the rest of the paint.
+                    pen.setCapStyle(Qt.FlatCap)
+                    p.setPen(pen)
+                    p.drawLines([QLineF(*row) for row in chosen.tolist()])
+        else:
+            _, cxu, cyu, label_r, qc, spin = vec
+            cx, cy = cxu * W, cyu * H
+            p.drawImage(0, 0, self._groove_layer(int(W), int(H), cx, cy,
+                                                 label_r))
+            lr = label_r * H
+            cover = self._label_cover(int(round(2 * lr)))
+            if cover is not None:
+                p.save()
+                p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                p.translate(cx, cy)
+                p.rotate(spin)
+                p.drawImage(QPointF(-cover.width() / 2.0,
+                                    -cover.height() / 2.0), cover)
+                p.restore()
+                p.setBrush(Qt.NoBrush)
+                p.setPen(QPen(_alpha(qc, 170), 1.5 * unit))
+            else:
+                # No cover (nothing playing, the fetch failed): a plain
+                # label in the album's colour, with a crisp edge.
+                p.setPen(Qt.NoPen)
+                p.setBrush(_alpha(qc, 235))
+            p.drawEllipse(QRectF(cx - lr, cy - lr, 2 * lr, 2 * lr))
+        p.restore()
+
+    def _groove_layer(self, W: int, H: int, cx: float, cy: float,
+                      label_r: float) -> QImage:
+        """The record's grooves at window resolution, drawn once per size
+        and theme: they never move, only the light over them does, and
+        restroking ~200k pixels of hairline every frame cost ~10 ms.
+
+        Each groove is a hairline in the theme's own bg, a fine cut back
+        to the background: on the lit wedge of the disc they read as
+        grooves catching the light, on the dark part they all but
+        vanish, which is what the sheen on a real record does."""
+        key = (W, H, round(cx, 2), round(cy, 2), label_r, self._bg.rgb())
+        if self._groove_key == key and self._groove_img is not None:
+            return self._groove_img
+        img = QImage(W, H, QImage.Format_ARGB32_Premultiplied)
+        img.fill(QColor(0, 0, 0, 0))
+        p = QPainter(img)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            cut = QColor(self._bg.rgb())
+            pen = QPen(_alpha(cut, 130), 1.0)
+            pen.setCapStyle(Qt.FlatCap)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            r_max = math.hypot(cx, cy) / H + 0.02
+            r = label_r + 0.04
+            step = 1.0 / _GROOVES_PER_UNIT
+            while r < r_max:
+                # The smooth gaps between songs stay bare.
+                if abs(((r * 2.3) % 1.0) - 0.5) > 0.04:
+                    rp = r * H
+                    # Only the quarter facing the window: the centre sits
+                    # past its bottom-right corner.
+                    p.drawArc(QRectF(cx - rp, cy - rp, 2 * rp, 2 * rp),
+                              90 * 16, 90 * 16)
+                r += step
+        finally:
+            p.end()
+        self._groove_key = key
+        self._groove_img = img
+        return img
+
+    def _label_cover(self, diameter: int) -> QImage | None:
+        """The current cover cut to a round label ``diameter`` px across,
+        its rim shaded into the disc. Cut once per cover and size; each
+        frame only rotates it."""
+        art = self._art
+        if art is None or art.isNull() or diameter < 4:
+            return None
+        key = (art.cacheKey(), diameter, self._bg.rgb())
+        if self._label_key == key and self._label_img is not None:
+            return self._label_img
+        scaled = art.scaled(diameter, diameter, Qt.KeepAspectRatioByExpanding,
+                            Qt.SmoothTransformation)
+        img = QImage(diameter, diameter, QImage.Format_ARGB32_Premultiplied)
+        img.fill(QColor(0, 0, 0, 0))
+        p = QPainter(img)
+        try:
+            p.setRenderHint(QPainter.Antialiasing, True)
+            path = QPainterPath()
+            path.addEllipse(QRectF(0, 0, diameter, diameter))
+            p.setClipPath(path)
+            p.drawImage(QPointF((diameter - scaled.width()) / 2.0,
+                                (diameter - scaled.height()) / 2.0), scaled)
+            rim = QRadialGradient(diameter / 2.0, diameter / 2.0,
+                                  diameter / 2.0)
+            rim.setColorAt(0.0, _alpha(self._bg, 0))
+            rim.setColorAt(0.78, _alpha(self._bg, 0))
+            rim.setColorAt(1.0, _alpha(self._bg, 110))
+            p.fillRect(QRectF(0, 0, diameter, diameter), QBrush(rim))
+        finally:
+            p.end()
+        self._label_key = key
+        self._label_img = img
+        return img
+
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
         try:
@@ -1405,6 +1656,8 @@ class CentralBg(QWidget):
                 img = self._render_buffer(max(1, rect.width()), max(1, rect.height()))
                 p.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 p.drawImage(rect, img)
+                if self._vec is not None:
+                    self._paint_vec(p, rect)
             elif self._bg.alpha() == 255:
                 p.fillRect(rect, self._bg)
             # else: translucent theme — the styled window is the base; paint

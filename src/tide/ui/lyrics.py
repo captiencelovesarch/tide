@@ -19,6 +19,7 @@ karaoke mode interpolates word position from the line's duration window
 from __future__ import annotations
 
 import html
+import weakref
 
 from PySide6.QtCore import (
     QObject, QThread, Qt, QVariantAnimation, Signal, QTimer,
@@ -36,8 +37,72 @@ from PySide6.QtWidgets import (
 )
 
 from .. import api, qthreads, theming
-from . import motion as motion_module
+from . import motion as motion_module, scale as _scale
 from .headings import Heading, line_heading as _line_heading
+
+
+# Lyric type is sized against the app's body text (the theme's size, or
+# the user's override, times the ui scale), never a fixed point size: at
+# "huge" the old fixed 10pt lines came out smaller than the checkbox above
+# them. Multipliers per step: (timed line, active line, karaoke side
+# line, karaoke center line).
+SIZES: dict[str, tuple[float, float, float, float]] = {
+    "small": (1.0, 1.3, 1.2, 2.8),
+    "medium": (1.3, 1.6, 1.3, 3.0),
+    "large": (1.6, 2.0, 1.45, 3.2),
+    "huge": (2.1, 2.6, 1.7, 3.6),
+}
+SIZE_BLURBS: dict[str, str] = {
+    "small": "small · the size of the text around it",
+    "medium": "medium",
+    "large": "large",
+    "huge": "huge · for across the room",
+}
+DEFAULT_SIZE = "large"
+
+_size: str = DEFAULT_SIZE
+_views: "weakref.WeakSet[LyricsView]" = weakref.WeakSet()
+
+
+def set_size(name: str) -> None:
+    """Pick a lyric size and restyle every open lyrics view (the panel,
+    the mini's, fullscreen's). Unknown names fall back to the default."""
+    global _size
+    name = str(name or "").strip().lower()
+    _size = name if name in SIZES else DEFAULT_SIZE
+    for view in list(_views):
+        try:
+            view.refresh_type()
+        except RuntimeError:
+            pass    # C++ side already gone
+
+
+def size() -> str:
+    return _size
+
+
+def size_choices() -> tuple[tuple[str, str], ...]:
+    return tuple((k, SIZE_BLURBS[k]) for k in SIZES)
+
+
+def _body_pt() -> float:
+    mgr = theming.manager()
+    theme = mgr.current_effective()
+    base = 0.0
+    try:
+        base = float(mgr.user_font_size() or 0)
+    except Exception:
+        base = 0.0
+    if base <= 0:
+        base = float(theme.t("typography", "size_pt", 10) if theme else 10)
+    return base * _scale.factor()
+
+
+def type_pt(role: str, font_scale: float = 1.0) -> int:
+    """Point size for one lyric role ("line", "active", "side", "center")
+    at the current size step, body text and ui scale."""
+    idx = ("line", "active", "side", "center").index(role)
+    return max(1, round(_body_pt() * SIZES[_size][idx] * font_scale))
 
 
 class _LyricsWorker(QObject):
@@ -130,8 +195,8 @@ class _KaraokeWidget(QWidget):
         theme = self._theme
         dim = theme.token("dim", "#6f6f6f") if theme else "#6f6f6f"
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
-        side_pt = max(1, round(12 * self._font_scale))
-        cur_pt = max(1, round(28 * self._font_scale))
+        side_pt = type_pt("side", self._font_scale)
+        cur_pt = type_pt("center", self._font_scale)
         self.prev_label.setStyleSheet(
             f"color: {dim}; background: transparent; font-size: {side_pt}pt; padding: 0;"
         )
@@ -237,6 +302,7 @@ class LyricsView(QWidget):
         # fullscreen mode). 1.0 = the classic panel sizes, unchanged.
         self._font_scale = float(font_scale)
         theming.manager().theme_changed.connect(self._on_theme)
+        _views.add(self)
 
         self._current_video_id: str | None = None
         self._current_track = None
@@ -320,6 +386,7 @@ class LyricsView(QWidget):
         layout.addLayout(toggles_row)
         layout.addWidget(self.swap_status)
         layout.addWidget(self._scroll, stretch=1)
+        self.refresh_type()
 
     # ---------- public ----------
 
@@ -459,7 +526,7 @@ class LyricsView(QWidget):
         accent = QColor(
             theme.token("accent", "#d4b95e") if theme else "#d4b95e")
         lbl = self._line_widgets[idx]
-        pt = max(1, round(13 * self._font_scale))
+        pt = type_pt("active", self._font_scale)
 
         def _apply(c: QColor, lbl=lbl, pt=pt) -> None:
             try:
@@ -518,8 +585,8 @@ class LyricsView(QWidget):
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
         dim = theme.token("dim", "#6f6f6f") if theme else "#6f6f6f"
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
-        active_pt = max(1, round(13 * self._font_scale))
-        rest_pt = max(1, round(10 * self._font_scale))
+        active_pt = type_pt("active", self._font_scale)
+        rest_pt = type_pt("line", self._font_scale)
         for i, lbl in enumerate(self._line_widgets):
             if i == self._active_line_index:
                 lbl.setStyleSheet(
@@ -578,6 +645,13 @@ class LyricsView(QWidget):
 
     def _on_theme(self, theme) -> None:
         self._theme = theme
+        self.refresh_type()
+
+    def refresh_type(self) -> None:
+        """Re-derive every lyric size: theme, scale or the size step
+        changed."""
+        self._plain_label.setStyleSheet(
+            f"font-size: {type_pt('line', self._font_scale)}pt;")
         if self._line_widgets:
             self._restyle_lines()
-        self._karaoke_widget.set_theme(theme)
+        self._karaoke_widget.set_theme(self._theme)

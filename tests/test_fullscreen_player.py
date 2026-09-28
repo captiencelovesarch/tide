@@ -250,6 +250,72 @@ class FullscreenToggleTest(unittest.TestCase):
         self.assertIs(self.w.active_app_window(), self.w)
 
 
+class FullscreenVolumeSpeedTest(unittest.TestCase):
+    """The couch controls: volume and speed live on fullscreen's bottom
+    bar and stay in step with the main window both ways."""
+
+    def setUp(self) -> None:
+        _app()
+        self._real_save = settings_module.save
+        settings_module.save = lambda s: None
+        self.w = _window()
+        self.w._settings = Settings()
+        self.w.set_fullscreen_mode(True)
+        self.fs = self.w._fs
+
+    def tearDown(self) -> None:
+        self.w.close()
+        settings_module.save = self._real_save
+
+    def test_controls_sit_on_the_bottom_bar(self) -> None:
+        bar = self.fs._bottom_bar
+        self.assertTrue(bar.isAncestorOf(self.fs.volume))
+        self.assertTrue(bar.isAncestorOf(self.fs.speed_btn))
+
+    def test_opens_with_the_main_window_values(self) -> None:
+        self.w.set_fullscreen_mode(False)
+        self.w.volume.setVolume(37)
+        self.w.speed_btn.set_speed(1.25)
+        self.w.set_fullscreen_mode(True)
+        self.assertEqual(self.fs.volume.volume(), 37)
+        self.assertAlmostEqual(self.fs.speed_btn.speed(), 1.25)
+
+    def test_fullscreen_volume_drives_the_player_path(self) -> None:
+        self.fs.volume.setVolume(22)
+        self.assertEqual(self.w.volume.volume(), 22)
+        self.assertEqual(self.w._settings.volume, 22)
+
+    def test_main_volume_changes_reach_fullscreen(self) -> None:
+        # The keymap's volume keys call the main widget directly.
+        self.w.volume.setVolume(64)
+        self.assertEqual(self.fs.volume.volume(), 64)
+
+    def test_fullscreen_speed_drives_the_player_path(self) -> None:
+        self.fs.speed_btn.set_speed(1.5)
+        self.assertAlmostEqual(self.w.speed_btn.speed(), 1.5)
+        self.assertAlmostEqual(self.w._settings.playback_speed, 1.5)
+
+    def test_main_speed_changes_reach_fullscreen(self) -> None:
+        self.w.speed_btn.set_speed(0.75)
+        self.assertAlmostEqual(self.fs.speed_btn.speed(), 0.75)
+
+    def test_speed_greys_with_the_backend(self) -> None:
+        self.fs.set_speed_supported(False)
+        self.assertFalse(self.fs.speed_btn.isEnabled())
+        self.fs.set_speed_supported(True)
+        self.assertTrue(self.fs.speed_btn.isEnabled())
+
+    def test_volume_face_follows_the_strip(self) -> None:
+        self.w.set_fullscreen_mode(False)
+        self.w._slot_volume = "spring"
+        self.w.set_fullscreen_mode(True)
+        from tide.ui.variants import SpringVolume
+        self.assertIsInstance(self.fs.volume, SpringVolume)
+        self.assertTrue(self.fs._bottom_bar.isAncestorOf(self.fs.volume))
+        self.fs.volume.setVolume(41)
+        self.assertEqual(self.w.volume.volume(), 41)
+
+
 class FullscreenGateTest(unittest.TestCase):
     """The fullscreen window shares the mini's consumer gates."""
 
@@ -351,9 +417,9 @@ class FullscreenBackdropAndScreenTest(unittest.TestCase):
         self.assertFalse(fs.central_bg._enabled)
 
         self.w._settings.adaptive_background = True
-        self.w._settings.adaptive_background_style = "aurora"
+        self.w._settings.adaptive_background_style = "stage"
         fs.apply_settings()
-        self.assertEqual(fs.resolved_backdrop_style(), "aurora")
+        self.assertEqual(fs.resolved_backdrop_style(), "stage")
         self.assertTrue(fs.central_bg._enabled)
 
     def test_explicit_style_ignores_the_main_toggle(self) -> None:
@@ -538,11 +604,11 @@ class FullscreenPaletteCarryTest(unittest.TestCase):
 
 class FullscreenSettingsTest(unittest.TestCase):
     def test_fields_round_trip_through_toml(self) -> None:
-        s = Settings(fullscreen_backdrop_style="aurora",
+        s = Settings(fullscreen_backdrop_style="stage",
                      fullscreen_pane="queue",
                      fullscreen_pulse=False)
         raw = tomllib.loads(settings_module._to_toml(s))
-        self.assertEqual(raw["fullscreen_backdrop_style"], "aurora")
+        self.assertEqual(raw["fullscreen_backdrop_style"], "stage")
         self.assertEqual(raw["fullscreen_pane"], "queue")
         self.assertFalse(raw["fullscreen_pulse"])
 
@@ -599,14 +665,48 @@ class LyricsMotionTest(unittest.TestCase):
 
 
 class LyricsFontScaleTest(unittest.TestCase):
-    """The fullscreen embed reads from across the room; 1.0 must stay
-    bit-for-bit the classic panel."""
+    """Lyric type follows the size step, the body text and the ui scale;
+    the fullscreen embed multiplies on top. "small" at the normal scale
+    is the classic 10 / 13 / 12 / 28 panel."""
 
     def setUp(self) -> None:
         _app()
+        from tide.ui import lyrics, scale
+        self._lyrics = lyrics
+        self._scale = scale
+        self._size0 = lyrics.size()
+        self._scale0 = scale.current()
+        scale.set_factor("normal")
+
+    def tearDown(self) -> None:
+        self._lyrics.set_size(self._size0)
+        self._scale.set_factor(self._scale0)
+
+    def test_small_is_the_classic_panel(self) -> None:
+        from tide.ui.lyrics import LyricsView, _KaraokeWidget
+        self._lyrics.set_size("small")
+        view = LyricsView(LocalSource())
+        view._show_timed([(0.0, "one"), (5.0, "two")])
+        self.assertIn("10pt", view._line_widgets[0].styleSheet())
+        view.update_position(1.0)
+        self.assertIn("13pt", view._line_widgets[0].styleSheet())
+        classic = _KaraokeWidget()
+        self.assertIn("28pt", classic.current_label.styleSheet())
+        self.assertIn("12pt", classic.prev_label.styleSheet())
+
+    def test_default_is_bigger_than_the_body_text(self) -> None:
+        from tide.ui.lyrics import LyricsView
+        self.assertEqual(self._lyrics.DEFAULT_SIZE, "large")
+        self._lyrics.set_size("large")
+        view = LyricsView(LocalSource())
+        view._show_timed([(0.0, "one"), (5.0, "two")])
+        self.assertIn("16pt", view._line_widgets[0].styleSheet())
+        view.update_position(1.0)
+        self.assertIn("20pt", view._line_widgets[0].styleSheet())
 
     def test_timed_lines_scale(self) -> None:
         from tide.ui.lyrics import LyricsView
+        self._lyrics.set_size("small")
         view = LyricsView(LocalSource(), font_scale=2.0)
         view._show_timed([(0.0, "one"), (5.0, "two")])
         self.assertIn("20pt", view._line_widgets[0].styleSheet())
@@ -614,22 +714,35 @@ class LyricsFontScaleTest(unittest.TestCase):
         self.assertIn("26pt", view._line_widgets[0].styleSheet(),
                       "active line scales its 13pt base")
 
-    def test_default_scale_is_unchanged(self) -> None:
+    def test_ui_scale_reaches_the_lines(self) -> None:
+        # The reported bug: at "huge" the rest of the app grew and the
+        # lyrics stayed at a fixed 10pt.
         from tide.ui.lyrics import LyricsView
+        self._lyrics.set_size("small")
+        self._scale.set_factor("huge")
         view = LyricsView(LocalSource())
         view._show_timed([(0.0, "one"), (5.0, "two")])
-        self.assertIn("10pt", view._line_widgets[0].styleSheet())
-        view.update_position(1.0)
         self.assertIn("13pt", view._line_widgets[0].styleSheet())
+
+    def test_size_change_restyles_open_views(self) -> None:
+        from tide.ui.lyrics import LyricsView
+        self._lyrics.set_size("small")
+        view = LyricsView(LocalSource())
+        view._show_timed([(0.0, "one"), (5.0, "two")])
+        self._lyrics.set_size("huge")
+        self.assertIn("21pt", view._line_widgets[0].styleSheet())
+        self.assertIn("21pt", view._plain_label.styleSheet())
+
+    def test_unknown_size_falls_back(self) -> None:
+        self._lyrics.set_size("enormous")
+        self.assertEqual(self._lyrics.size(), self._lyrics.DEFAULT_SIZE)
 
     def test_karaoke_scales(self) -> None:
         from tide.ui.lyrics import _KaraokeWidget
+        self._lyrics.set_size("small")
         big = _KaraokeWidget(font_scale=2.0)
         self.assertIn("56pt", big.current_label.styleSheet())
         self.assertIn("24pt", big.prev_label.styleSheet())
-        classic = _KaraokeWidget()
-        self.assertIn("28pt", classic.current_label.styleSheet())
-        self.assertIn("12pt", classic.prev_label.styleSheet())
 
 
 if __name__ == "__main__":
