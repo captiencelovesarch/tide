@@ -4,7 +4,7 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
-## [Unreleased]
+## [2.1.2] — 2026-09-28 — new icon, better radio
 
 ### Added
 - **volume and speed in fullscreen.** the bottom bar has the speed button and the volume control now, next to the time. both stay in step with the main window, and the `[` `]` `\` speed keys work there too.
@@ -36,6 +36,9 @@ The canonical source of truth for the diff lives in the [GitHub Releases](https:
 - **songs stop waiting in line to resolve.** every signed-in stream lookup took a lock on the cookie file for its entire run, so the prefetches for the next few tracks queued up behind each other and a click could sit at 95% for 15 seconds or more. each lookup now works on its own copy of the cookies and only the copy and the swap back are locked. if the signed-in lookup fails, the fallback clients run at the same time instead of one after another.
 - **song changes hitch less.** the frameless window's edge-resize check ran for every event of every widget in the app, including the whole repolish that happens when the album art changes the accent. it now watches only the window's own mouse presses. the restyle on each song change drops from about 270 ms to about 165 ms.
 - **the fx rack doesn't clip anymore.** it never touched bitrate. the crunch was clipping: eq boosts, the compressor's makeup gain and the reverb all pushed peaks past full scale (the "slowed" reverb at full wet clipped 9% of samples), and the exciter and stereo width filters hard-clipped internally. the rack now starts with a preamp that cancels the eq and shelf boost, runs those two filters without their clip stage, mixes the reverb at constant loudness, and ends with a limiter just under full scale. eq boosts play a few dB quieter than before because of the preamp. turn the volume up to taste.
+
+### Notes
+- The suite is at 1699 tests, all runnable offscreen.
 
 ## [2.1.1] — 2026-09-11 — flatpak
 

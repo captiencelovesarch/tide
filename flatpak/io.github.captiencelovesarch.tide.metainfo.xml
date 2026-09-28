@@ -73,6 +73,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.1.2" date="2026-09-28">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.1.2</url>
+      <description>
+        <p>volume and speed in fullscreen. the album art flips, slides or rebuilds from blocks when the song changes. four new backdrops, and every backdrop moves at the song's speed. radio stays on the song you picked. bigger lyrics, a new icon, and your week on the home page.</p>
+      </description>
+    </release>
     <release version="2.1.1" date="2026-09-11">
       <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.1.1</url>
       <description>
