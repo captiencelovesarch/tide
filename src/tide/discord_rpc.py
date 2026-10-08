@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import os
 import time
+from bisect import bisect_right
+from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -25,6 +27,10 @@ from PySide6.QtCore import QObject, QTimer, Qt, Signal
 
 try:
     from pypresence import ActivityType, Presence  # type: ignore
+    try:
+        from pypresence import StatusDisplayType  # type: ignore
+    except Exception:                       # pypresence < 4.4
+        StatusDisplayType = None  # type: ignore
     from pypresence.exceptions import (            # type: ignore
         DiscordError,
         DiscordNotFound,
@@ -45,20 +51,44 @@ if TYPE_CHECKING:
 
 RECONNECT_INTERVAL_MS = 30_000
 
-# Discord silently drops presence writes past ~5 per 20s. We coalesce all
-# pushes through a trailing-edge timer spaced at least this far apart so the
-# *latest* desired state (crucially, a pause/clear) always lands even when the
-# user mashes play/pause or skips rapidly.
+# Discord silently drops presence writes past 5 per 20 s. Every push goes
+# through a trailing-edge timer that sends the *latest* desired state when
+# the budget allows, so a burst of skips or play/pause collapses into one
+# send of the final state and a pause/clear is never the write that drops.
+PUSH_BUDGET = 5
+PUSH_WINDOW_S = 20.0
+# Track changes, pause and resume: at least this far apart, inside the budget.
 MIN_PUSH_INTERVAL_S = 2.0
 
-# Lyric pushes are *sustained* traffic — a line every few seconds for the
-# whole song — unlike the bursty track-change/pause pushes above. Discord's
-# ~5/20s drop threshold is a budget, so sustained spacing must stay under
-# one write per 4s or writes silently stop landing (worst case swallowing a
-# later pause/clear). At 4.5s, fast verses skip lines — the trailing-edge
-# flush sends whichever line is current at fire time — which is the right
-# behavior for a status display: always the *now* line, never a backlog.
-MIN_LYRIC_PUSH_INTERVAL_S = 4.5
+# Lyrics are sustained traffic (a line every few seconds for the whole
+# song), so they may use at most this many writes of any 20 s window. The
+# last one is held back for pause/skip.
+LYRIC_BUDGET = 4
+# Lyric writes never closer than this.
+MIN_LYRIC_INTERVAL_S = 2.5
+# ...and paced like a token bucket: one write's worth comes back every
+# LYRIC_REFILL_S, at most LYRIC_BURST saved up. Spending the window's
+# budget in a burst left the rest of it dark, so the lines in between all
+# had to ride along on one write, ten seconds early. Only writes that put
+# new lines up spend from it; every write counts against the hard window.
+LYRIC_REFILL_S = 5.0
+LYRIC_BURST = 1.0
+# A line is pushed this far ahead of its timestamp (song time): Discord
+# takes about a second to reach the people looking at the profile.
+LYRIC_LEAD_S = 0.8
+# A write never carries lines further ahead than this (song seconds). When
+# the budget is tight, a line too far out waits for a later write instead
+# of showing up absurdly early.
+LYRIC_REACH_S = 12.0
+# A new track's write waits this long so it usually goes out together with
+# the "audio started" one (two writes per song start became one).
+TRACK_SETTLE_S = 1.0
+# Discord's state field limit.
+STATE_MAX = 128
+_LYRIC_JOIN = " / "
+# Activity fields newer Discord clients understand; dropped if refused.
+_NEWER_FIELDS = ("status_display_type", "details_url", "state_url",
+                 "large_url", "buttons")
 
 
 @dataclass
@@ -78,9 +108,14 @@ class _Activity:
     # wall-clock time, so a slowed/sped track needs start/end scaled by this
     # or the bar drifts out of sync with the audio.
     speed: float = 1.0
-    # Current synced-lyric line (LyricTracker). Empty = no line under the
-    # playhead; the state field falls back to artist · album.
+    # The lyric text on the profile right now (one line, or the lines that
+    # fall inside one push window joined with " / "). Empty = no line under
+    # the playhead; the state field falls back to artist · album.
     lyric: str = ""
+    # Links (https only; "" = none): the track, its first artist, its album.
+    track_url: str = ""
+    artist_url: str = ""
+    album_url: str = ""
 
 
 class DiscordPresence(QObject):
@@ -104,6 +139,24 @@ class DiscordPresence(QObject):
         self._show_paused: bool = False
         self._show_progress: bool = True
         self._activity_type: str = "listening"
+        # What the member list says after the verb: "song" (line 1) or
+        # "app" (the Discord application's name, the old behaviour).
+        self._status_display: str = "song"
+        # Title / artist / cover link out, plus a "listen on" button.
+        self._links: bool = True
+        # Privacy: hide the presence entirely, or just for local files.
+        self._hidden: bool = False
+        self._hide_local: bool = False
+        # Whether Discord currently shows something of ours (so a hidden
+        # presence clears once instead of on every event).
+        self._showing: bool = False
+        # Set when Discord refused the newer activity fields (see _flush).
+        self._plain_only: bool = False
+        # The synced lyrics of the current track (LyricTracker), and which
+        # of its lines are on the profile now as (first, last).
+        self._lyric_times: list[float] = []
+        self._lyric_lines: list[str] = []
+        self._lyric_shown: tuple[int, int] | None = None
         # Last known playback position (seconds). Tracked from
         # ``position_changed`` so ``_on_state_changed(PLAYING)`` can anchor
         # ``started_at`` to actual audio progress on first-play or resume.
@@ -116,8 +169,11 @@ class DiscordPresence(QObject):
         # Outbound rate-limit guard. Every push/clear request updates
         # ``_last_activity`` then asks this trailing-edge timer to flush the
         # current desired state; the timer reads the latest activity at fire
-        # time, so intermediate states collapse into the final one.
-        self._last_push_monotonic: float = 0.0
+        # time, so intermediate states collapse into the final one. The
+        # deque holds when recent writes went out (monotonic), for the budget.
+        self._push_times: deque[float] = deque()
+        self._lyric_tokens: float = LYRIC_BURST
+        self._lyric_tokens_at: float = 0.0
         self._flush_timer = QTimer(self)
         self._flush_timer.setSingleShot(True)
         self._flush_timer.timeout.connect(self._flush)
@@ -151,6 +207,10 @@ class DiscordPresence(QObject):
         show_paused: bool = False,
         show_progress: bool = True,
         activity_type: str = "listening",
+        status_display: str = "song",
+        links: bool = True,
+        hidden: bool = False,
+        hide_local: bool = False,
     ) -> None:
         """Presence customization knobs (Settings → discord). Applying them
         re-pushes the current activity so the profile updates without
@@ -162,15 +222,34 @@ class DiscordPresence(QObject):
             bool(show_progress),
             activity_type if activity_type in ("listening", "playing", "watching")
             else "listening",
+            status_display if status_display in ("song", "app") else "song",
+            bool(links),
+            bool(hidden),
+            bool(hide_local),
         )
         old = (self._details_template, self._state_template, self._show_paused,
-               self._show_progress, self._activity_type)
+               self._show_progress, self._activity_type, self._status_display,
+               self._links, self._hidden, self._hide_local)
         if new == old:
             return
         (self._details_template, self._state_template, self._show_paused,
-         self._show_progress, self._activity_type) = new
-        if self._connected and self._last_activity is not None:
+         self._show_progress, self._activity_type, self._status_display,
+         self._links, self._hidden, self._hide_local) = new
+        if self._connected and (self._last_activity is not None or self._showing):
             self._push_current()
+
+    def set_hidden(self, hidden: bool) -> None:
+        """The quick privacy switch (tray). Same as set_options(hidden=)."""
+        hidden = bool(hidden)
+        if hidden == self._hidden:
+            return
+        self._hidden = hidden
+        if self._connected:
+            self._push_current()
+
+    @property
+    def hidden(self) -> bool:
+        return self._hidden
 
     def start_wire(self) -> None:
         """Subscribe to track + state changes so presence stays current."""
@@ -235,6 +314,7 @@ class DiscordPresence(QObject):
             except Exception:
                 pass
         self._client = None
+        self._showing = False
         if self._connected:
             self._connected = False
             self.connection_changed.emit(False)
@@ -242,6 +322,7 @@ class DiscordPresence(QObject):
     # ---------- track signal handlers ----------
 
     def _on_current_changed(self, track) -> None:
+        self._lyric_shown = None
         if track is None:
             self._last_activity = None
             self._last_position = 0.0
@@ -267,10 +348,12 @@ class DiscordPresence(QObject):
             # Carry the current playback rate onto the new track — speed is a
             # global player setting that persists across skips.
             speed=self._current_speed(),
+            **_links_for(track),
         )
         # Push title/artist/album only so Discord shows what's coming up.
-        # The progress bar appears once audio actually starts.
-        self._push_current()
+        # The progress bar appears once audio actually starts; a fast start
+        # lands inside the settle and both go out as one write.
+        self._push_current(settle=TRACK_SETTLE_S)
 
     def _on_state_changed(self, state) -> None:
         if self._last_activity is None:
@@ -314,11 +397,11 @@ class DiscordPresence(QObject):
             self._push_current()
 
     def _on_position_changed(self, secs: float) -> None:
-        # Discord rate-limits presence updates to ~5/min, so we don't push on
-        # every tick — the client renders smoothly from the `start` field once
-        # set. We DO cache the latest position so _on_state_changed(PLAYING)
-        # can anchor started_at to it on resume / reconnect.
+        # Discord renders the clock smoothly from the `start` field, so ticks
+        # never push by themselves. The position anchors started_at on
+        # resume / reconnect, and drives the lyric schedule.
         self._last_position = float(secs)
+        self._lyric_tick()
 
     def _on_speed_changed(self, rate: float) -> None:
         # A speed change reshapes Discord's progress bar (its end timestamp is
@@ -333,18 +416,81 @@ class DiscordPresence(QObject):
             self._last_activity.started_at = self._anchor(self._last_position, self._last_activity.speed)
             self._push_current()
 
-    def set_lyric(self, text: object) -> None:
-        """Live synced-lyric line for the state field; None/"" falls back
-        to artist · album. Fed by LyricTracker (which is gated by the
-        settings toggle upstream, so a disabled feature never gets here
-        with real lines)."""
-        lyric = text.strip() if isinstance(text, str) else ""
-        if self._last_activity is None:
+    def set_lyric_timeline(self, timeline: object) -> None:
+        """The current track's synced lyrics as ``(times, lines)``, or None
+        (no timed lyrics, the feature is off, or the track changed). Fed by
+        LyricTracker, which is gated by the settings toggle upstream."""
+        if isinstance(timeline, tuple) and len(timeline) == 2:
+            times, lines = timeline
+            self._lyric_times = [float(t) for t in times]
+            self._lyric_lines = [str(line) for line in lines]
+        else:
+            self._lyric_times = []
+            self._lyric_lines = []
+        self._lyric_shown = None
+        a = self._last_activity
+        if a is not None and a.lyric and not self._lyric_times:
+            self._push_current()          # take the old lyric off the profile
+        else:
+            self._lyric_tick()
+
+    def _lyric_tick(self) -> None:
+        """Ask for a lyric write when the line about to be sung isn't on the
+        profile yet, or a gap starts while a lyric still is. "About to" is
+        LYRIC_LEAD_S ahead of the playhead, to cover Discord's delay."""
+        a = self._last_activity
+        if (a is None or a.paused or a.started_at is None or not self._connected
+                or not self._lyric_times or self._suppressed(a)):
             return
-        if lyric == self._last_activity.lyric:
+        i = self._lyric_index(self._last_position + LYRIC_LEAD_S * a.speed)
+        if i is None:
+            if a.lyric:
+                self._push_current(lyric=True)
             return
-        self._last_activity.lyric = lyric
-        self._push_current(min_interval=MIN_LYRIC_PUSH_INTERVAL_S)
+        shown = self._lyric_shown
+        if shown is not None and shown[0] <= i <= shown[1]:
+            return
+        self._push_current(lyric=True)
+
+    def _lyric_index(self, position: float) -> int | None:
+        """The line sung at ``position`` (song time), None in a gap."""
+        i = bisect_right(self._lyric_times, position) - 1
+        if i < 0 or not self._lyric_lines[i].strip():
+            return None
+        return i
+
+    def _compose_lyric(self, a: _Activity) -> tuple[str, tuple[int, int] | None]:
+        """The lyric text for a write going out now: the line about to be
+        sung, plus every following line that starts before the next lyric
+        write could. Discord allows a write every few seconds at best, so a
+        fast verse used to lose the lines that came and went in between;
+        now they ride along ("line one / line two"), a little early rather
+        than never. Stops at a gap and at the state field's length."""
+        if not self._lyric_times or a.paused or a.started_at is None:
+            return "", None
+        ahead = self._last_position + LYRIC_LEAD_S * a.speed
+        i = self._lyric_index(ahead)
+        if i is None:
+            return "", None
+        now = time.monotonic()
+        nxt = self._lyric_slot(after_write=True)
+        # A line rides along only if the next write would show it late:
+        # starting before that write's own lead point, with half the lead
+        # as slack (a line it would show 0.4 s ahead is fine to wait for).
+        limit = (ahead + min(LYRIC_REACH_S, max(0.0, nxt - now) * a.speed)
+                 - LYRIC_LEAD_S / 2)
+        parts = [self._lyric_lines[i].strip()]
+        j = i
+        room = STATE_MAX - 2                       # "♪ "
+        while j + 1 < len(self._lyric_times) and self._lyric_times[j + 1] < limit:
+            line = self._lyric_lines[j + 1].strip()
+            if not line:
+                break
+            if len(_LYRIC_JOIN.join(parts + [line])) > room:
+                break
+            parts.append(line)
+            j += 1
+        return _LYRIC_JOIN.join(parts), (i, j)
 
     def _current_speed(self) -> float:
         try:
@@ -362,27 +508,30 @@ class DiscordPresence(QObject):
 
     # ---------- presence push ----------
 
-    def _push_current(self, min_interval: float = MIN_PUSH_INTERVAL_S) -> None:
+    def _push_current(self, *, lyric: bool = False, settle: float = 0.0) -> None:
         """Request that Discord reflect the current ``_last_activity``.
 
-        Coalesced through a trailing-edge timer: if we pushed recently we arm
-        the timer to fire later and return, so a burst of state changes (skip,
-        duration frame, quick play/pause) collapses into a single send of the
-        *final* state. This is what makes pause/skip reliably stop the
-        presence — Discord drops writes past ~5/20s, so without the guard a
-        rapid clear could be the one that gets swallowed, leaving a stale
-        "playing" on the profile.
+        Coalesced through a trailing-edge timer: if the budget doesn't allow
+        a write now, the timer fires when it does and sends the state as it
+        is *then*, so a burst of state changes (skip, duration frame, quick
+        play/pause) collapses into one send of the final state. That's what
+        makes pause/skip reliably stop the presence: Discord drops writes
+        past 5 per 20 s, so without the guard a rapid clear could be the one
+        that gets swallowed, leaving a stale "playing" on the profile.
 
-        ``min_interval`` widens the spacing for lyric-driven pushes (see
-        MIN_LYRIC_PUSH_INTERVAL_S). The pending timer always keeps the
-        *earliest* requested deadline — an urgent pause/skip push shortens a
-        pending lyric wait, never the reverse — and the flush sends the
-        latest full state either way.
+        ``lyric`` writes get a smaller share of the budget (LYRIC_BUDGET)
+        and a longer spacing, so pause/skip always has a write in reserve.
+        The pending timer keeps the *earliest* requested deadline: an urgent
+        push shortens a pending lyric wait, never the reverse.
         """
         if not self._connected:
             return
-        elapsed = time.monotonic() - self._last_push_monotonic
-        delay_ms = int((min_interval - elapsed) * 1000)
+        if lyric:
+            target = self._lyric_slot()
+        else:
+            target = self._slot(PUSH_BUDGET, MIN_PUSH_INTERVAL_S)
+        target = max(target, time.monotonic() + settle)
+        delay_ms = int((target - time.monotonic()) * 1000)
         if delay_ms <= 0:
             self._flush()
             return
@@ -390,22 +539,75 @@ class DiscordPresence(QObject):
             return
         self._flush_timer.start(delay_ms)
 
+    def _slot(self, limit: int, gap: float, also: float | None = None) -> float:
+        """Earliest monotonic time a write may go out such that the last
+        PUSH_WINDOW_S holds fewer than ``limit`` writes and the previous
+        one is ``gap`` behind. ``also`` counts a hypothetical write at that
+        time (the one being composed)."""
+        now = time.monotonic()
+        while self._push_times and self._push_times[0] <= now - PUSH_WINDOW_S:
+            self._push_times.popleft()
+        recent = list(self._push_times)
+        if also is not None:
+            recent.append(also)
+        t = now
+        if recent:
+            t = max(t, recent[-1] + gap)
+        if len(recent) >= limit:
+            t = max(t, recent[-limit] + PUSH_WINDOW_S + 0.05)
+        return t
+
+    def _tokens(self, now: float) -> float:
+        return min(LYRIC_BURST, self._lyric_tokens
+                   + max(0.0, now - self._lyric_tokens_at) / LYRIC_REFILL_S)
+
+    def _spend(self, now: float, *, lyric: bool = False) -> None:
+        """Book a write that is going out now."""
+        self._push_times.append(now)
+        if lyric:
+            self._lyric_tokens = max(-1.0, self._tokens(now) - 1.0)
+            self._lyric_tokens_at = now
+
+    def _lyric_slot(self, *, after_write: bool = False) -> float:
+        """When the next lyric write may go out. ``after_write``: as if one
+        were going out right now (to see how far ahead it should reach)."""
+        now = time.monotonic()
+        tokens = self._tokens(now) - (1.0 if after_write else 0.0)
+        paced = now + max(0.0, 1.0 - tokens) * LYRIC_REFILL_S
+        window = self._slot(LYRIC_BUDGET, MIN_LYRIC_INTERVAL_S,
+                            also=now if after_write else None)
+        return max(paced, window)
+
+    def _suppressed(self, a: "_Activity | None") -> bool:
+        """Whether nothing should be on the profile right now."""
+        if a is None or self._hidden:
+            return True
+        if self._hide_local and a.source == "local":
+            return True
+        return a.paused and not self._show_paused
+
     def _flush(self) -> None:
         # Cancel any pending trailing fire — whether we were called by the
         # timer or directly, this send covers the latest state.
         self._flush_timer.stop()
         if not self._connected or self._client is None:
             return
-        self._last_push_monotonic = time.monotonic()
         a = self._last_activity
 
         # No track: nothing to show. Paused: hide the presence entirely by
         # default — most users don't want "paused tide" sitting on their
         # profile while they walked away — unless they opted into the
-        # "show paused" presence.
-        if a is None or (a.paused and not self._show_paused):
+        # "show paused" presence. Hidden (the privacy switch, or a local
+        # file with local sharing off): nothing either.
+        if self._suppressed(a):
+            if a is not None:
+                a.lyric = ""
+            self._lyric_shown = None
             self._clear()
             return
+        before = a.lyric
+        a.lyric, self._lyric_shown = self._compose_lyric(a)
+        self._spend(time.monotonic(), lyric=bool(a.lyric) and a.lyric != before)
 
         # Per-source label for large_text / small_text and the {source}
         # template placeholder. Some Discord apps have per-source asset keys
@@ -447,6 +649,7 @@ class DiscordPresence(QObject):
         ) or (a.title or "tide").strip()
         details = theming.styled_case(details)
 
+        artist_link = ""
         # State-line precedence: a live lyric takes over while one is under
         # the playhead (the ♪ prefix makes it read as a lyric rather than a
         # weird second title, and keeps one-word lines above Discord's 2-char
@@ -464,6 +667,8 @@ class DiscordPresence(QObject):
             if a.album:
                 state_parts.append(theming.styled_case(a.album))
             state_text = " · ".join(state_parts) or "—"
+            # Only this line is about the artist, so only it links there.
+            artist_link = a.artist_url
 
         # When started_at is set (audio actually started), include the unix-
         # second start + end timestamps so Discord renders the "0:34 / 3:42"
@@ -518,18 +723,108 @@ class DiscordPresence(QObject):
         if a.source:
             kwargs["small_image"] = a.source
 
+        # The member list reads "listening to <song>" instead of "listening
+        # to <app name>". Older pypresence without the field keeps the app.
+        if self._status_display == "song" and StatusDisplayType is not None:
+            kwargs["status_display_type"] = StatusDisplayType.DETAILS
+
+        if self._links and a.track_url:
+            kwargs["details_url"] = a.track_url
+            kwargs["large_url"] = a.album_url or a.track_url
+            if artist_link:
+                kwargs["state_url"] = artist_link
+            # Discord shows buttons to everyone but you, max 32 characters.
+            label = theming.styled_case(f"listen on {source_label_raw}")
+            kwargs["buttons"] = [{"label": label[:32], "url": a.track_url}]
+
+        if self._plain_only:
+            for key in _NEWER_FIELDS:
+                kwargs.pop(key, None)
         try:
-            self._client.update(**kwargs)
+            self._send(kwargs)
         except (PipeClosed, BrokenPipeError):
             self._disconnect()
             self._reconnect_timer.start()
         except Exception as exc:
+            if not self._plain_only and any(k in kwargs for k in _NEWER_FIELDS):
+                # An older Discord (or arRPC) refusing the newer fields
+                # must not take the whole presence down: drop them for the
+                # rest of the session and send the plain activity.
+                self._plain_only = True
+                for key in _NEWER_FIELDS:
+                    kwargs.pop(key, None)
+                try:
+                    self._send(kwargs)
+                    return
+                except Exception as exc2:
+                    exc = exc2
             print(f"tide: discord rpc update failed — {exc!r}")
 
+    def _send(self, kwargs: dict) -> None:
+        self._client.update(**kwargs)
+        self._showing = True
+
     def _clear(self) -> None:
-        if not self._connected or self._client is None:
+        if not self._connected or self._client is None or not self._showing:
             return
+        self._spend(time.monotonic())
         try:
             self._client.clear()
         except Exception:
             pass
+        self._showing = False
+
+
+def presence_options(s) -> dict:
+    """``set_options`` keyword arguments from a Settings object."""
+    return dict(
+        details_template=s.discord_details_template,
+        state_template=s.discord_state_template,
+        show_paused=s.discord_show_paused,
+        show_progress=s.discord_show_progress,
+        activity_type=s.discord_activity_type,
+        status_display=s.discord_status_display,
+        links=s.discord_links,
+        hidden=s.discord_hidden,
+        hide_local=s.discord_hide_local,
+    )
+
+
+def _https(url: str) -> str:
+    return url if url.startswith("https://") and len(url) <= 512 else ""
+
+
+def _first_id(value) -> str:
+    """The ``id`` of an artists list's first entry, or of an album dict."""
+    if isinstance(value, list) and value:
+        value = value[0]
+    if isinstance(value, dict):
+        return str(value.get("id") or "")
+    return ""
+
+
+def _links_for(track) -> dict[str, str]:
+    """Public pages for a track, its first artist and its album, as far as
+    its source has them. Local files and self-hosted servers have none."""
+    from urllib.parse import quote
+    source = getattr(track, "source", "") or ""
+    vid = str(getattr(track, "video_id", "") or "")
+    extras = getattr(track, "extras", None) or {}
+    artist_id = _first_id(extras.get("artists"))
+    album_id = _first_id(extras.get("album"))
+    out = {"track_url": "", "artist_url": "", "album_url": ""}
+    if source == "ytmusic" and vid:
+        out["track_url"] = f"https://music.youtube.com/watch?v={quote(vid)}"
+        if artist_id:
+            out["artist_url"] = f"https://music.youtube.com/channel/{quote(artist_id)}"
+        if album_id:
+            out["album_url"] = f"https://music.youtube.com/browse/{quote(album_id)}"
+    elif source == "spotify" and vid:
+        out["track_url"] = f"https://open.spotify.com/track/{quote(vid)}"
+        if artist_id:
+            out["artist_url"] = f"https://open.spotify.com/artist/{quote(artist_id)}"
+        if album_id:
+            out["album_url"] = f"https://open.spotify.com/album/{quote(album_id)}"
+    elif source in ("soundcloud", "bandcamp", "mixcloud"):
+        out["track_url"] = vid             # the permalink is the id
+    return {k: _https(v) for k, v in out.items()}

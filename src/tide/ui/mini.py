@@ -1237,6 +1237,7 @@ class MiniPlayer(QWidget):
     def _on_context_menu(self, pos) -> None:
         s = self._settings()
         menu = QMenu(self)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
 
         backdrop = menu.addMenu(theming.styled_case("backdrop"))
         current_style = s.mini_backdrop_style or "follow"

@@ -225,6 +225,7 @@ class HistoryView(QWidget):
         if not tr:
             return
         menu = QMenu(self.list)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
         a_play = QAction("play now", menu)
         a_add  = QAction("add to queue", menu)
         a_radio = QAction("start radio from here", menu)

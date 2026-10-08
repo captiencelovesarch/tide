@@ -188,9 +188,10 @@ class _Avatar(QLabel):
         clip = QPainterPath()
         clip.addEllipse(rect)
         p.setClipPath(clip)
-        p.drawPixmap(rect, QPixmap.fromImage(self._img).scaled(
-            self._px, self._px,
-            Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
+        pix = art_cache.cache().scaled(self._url, self._px, self._px,
+                                       self.devicePixelRatioF())
+        if pix is not None:
+            p.drawPixmap(rect, pix)
 
 
 class _CommentRow(QWidget):

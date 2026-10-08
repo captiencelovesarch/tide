@@ -11,7 +11,8 @@ LRClib as the community fallback), and lyrics_provider's on-disk cache
 means an open lyrics panel + this tracker cost one network fetch, not
 two.
 
-Emissions: ``lyric_changed(str | None)``. None means "no current line" —
+Emissions: ``timeline_changed`` with the whole timed sheet (presence
+schedules ahead from it), and ``lyric_changed(str | None)``. None means "no current line" —
 pre-first-line intro, instrumental gap (empty LRC line), untimed/missing
 lyrics, disabled, or no track — so consumers can fall back to whatever
 they normally display.
@@ -66,6 +67,10 @@ class LyricTracker(QObject):
     """Watches queue + playback position; emits the active timed line."""
 
     lyric_changed = Signal(object)   # str | None
+    # The whole timed sheet as (times, lines), or None when there is none
+    # (off, no track, untimed). Discord presence schedules from this, so it
+    # can push a line before it's sung and fold fast lines together.
+    timeline_changed = Signal(object)
 
     def __init__(self, api_obj, player: "Player", queue: "Queue",
                  parent: QObject | None = None) -> None:
@@ -97,6 +102,7 @@ class LyricTracker(QObject):
             self._times = []
             self._lines = []
             self._emit(None)
+            self.timeline_changed.emit(None)
             return
         # Turned on mid-listen: fetch for whatever is already playing.
         # The line itself lands on the next position tick after the
@@ -112,6 +118,7 @@ class LyricTracker(QObject):
         self._times = []
         self._lines = []
         self._emit(None)
+        self.timeline_changed.emit(None)
         if track is None:
             self._video_id = None
             return
@@ -171,6 +178,7 @@ class LyricTracker(QObject):
             return
         self._times = [float(t) for t, _line in result.timed_lines]
         self._lines = [line for _t, line in result.timed_lines]
+        self.timeline_changed.emit((list(self._times), list(self._lines)))
         # No immediate emit: mpv's position ticks are sub-second, so the
         # current line lands on the next tick (and while paused there's
         # nothing to show anyway — presence is hidden).

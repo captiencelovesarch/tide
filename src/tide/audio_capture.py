@@ -999,6 +999,10 @@ def _query_capture_latency(pid: int, stream_idx: int) -> float | None:
         return None
 
 
+# Consumers that only read the pulse, never the bands or the waveform.
+_PULSE_ONLY_CONSUMERS = frozenset({"ambient"})
+
+
 class AudioVisualizerFeed(QObject):
     bands_updated = Signal(object)         # numpy.ndarray (BANDS,)
     waveform_updated = Signal(object)      # numpy.ndarray (CHUNK,)
@@ -1034,6 +1038,11 @@ class AudioVisualizerFeed(QObject):
         # runs while at least one consumer holds it so neither tears it down
         # under the other.
         self._consumers: set[str] = set()
+        # Whether anyone draws the spectrum. The ambient pulse only needs
+        # the pulse signals, so while it holds the feed alone the band FFT
+        # and the band/waveform copies are skipped. Read by the worker, so
+        # it's a plain bool swapped whole.
+        self._spectrum: bool = False
         self._preferred_source: str | None = None
         self._atexit_registered = False
 
@@ -1052,6 +1061,7 @@ class AudioVisualizerFeed(QObject):
         the feed is live afterwards. ``source`` sets the preferred monitor
         (used only when the feed has to be (re)started)."""
         self._consumers.add(name)
+        self._spectrum = bool(self._consumers - _PULSE_ONLY_CONSUMERS)
         if source is not None:
             self._preferred_source = source
         if not self._running:
@@ -1061,6 +1071,7 @@ class AudioVisualizerFeed(QObject):
     def remove_consumer(self, name: str) -> None:
         """Drop a consumer; stop capture once nobody holds it."""
         self._consumers.discard(name)
+        self._spectrum = bool(self._consumers - _PULSE_ONLY_CONSUMERS)
         if not self._consumers and self._running:
             self.stop()
 
@@ -1072,6 +1083,7 @@ class AudioVisualizerFeed(QObject):
             holders = set(self._consumers)
             self.stop()
             self._consumers = holders
+            self._spectrum = bool(holders - _PULSE_ONLY_CONSUMERS)
             self.start(source=self._preferred_source)
 
     def _resolve_target(self) -> tuple[str | None, int | None]:
@@ -1160,6 +1172,7 @@ class AudioVisualizerFeed(QObject):
         self._prev_bands = None
         self._pulse_env = None
         self._consumers.clear()
+        self._spectrum = False
         if self._tracer is not None:
             self._tracer.close()
             self._tracer = None
@@ -1343,19 +1356,24 @@ class AudioVisualizerFeed(QObject):
                     )
                     del pending[:chunk_bytes]
                     analysis_started = time.monotonic()
-                    try:
-                        self._prev_bands = _compute_bands(samples, self._prev_bands)
-                    except Exception:
-                        self._pulse_env = None
-                        self._trace_reset()
-                        continue
+                    spectrum = self._spectrum
+                    if spectrum:
+                        try:
+                            self._prev_bands = _compute_bands(samples, self._prev_bands)
+                        except Exception:
+                            self._pulse_env = None
+                            self._trace_reset()
+                            continue
+                    else:
+                        self._prev_bands = None
                     # Re-check right before emitting: stop() may have been
                     # called (possibly at teardown) since this chunk began,
                     # and emitting from a deleted signal source raises.
                     if self._stop.is_set():
                         return
-                    self.bands_updated.emit(self._prev_bands.copy())
-                    self.waveform_updated.emit(samples.copy())
+                    if spectrum:
+                        self.bands_updated.emit(self._prev_bands.copy())
+                        self.waveform_updated.emit(samples.copy())
                     try:
                         self._pulse_env = _compute_pulse(samples, self._pulse_env)
                     except Exception:

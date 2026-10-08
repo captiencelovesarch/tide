@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import api, theming
-from . import art_cache
+from . import art_cache, legibility
 
 
 IsCurrentRole = Qt.UserRole + 100
@@ -176,6 +176,16 @@ class TrackRowDelegate(QStyledItemDelegate):
         show = show_thumbnails_for(theme)
         marker = str(theme.t("layout", "list_marker", "> ")) if theme else "> "
 
+        # A plain row is drawn straight over the backdrop, so its text
+        # reads what's behind it. Selected and hovered rows sit on their
+        # own fill, which the theme's inks were chosen for.
+        on_backdrop = not selected and not hovered
+
+        def pen(color: QColor, rect: QRect, flags, text: str) -> None:
+            if on_backdrop:
+                color = legibility.text_ink(painter, color, rect, flags, text)
+            painter.setPen(color)
+
         x = option.rect.left() + self.THUMB_MARGIN
         y = option.rect.top()
         h = option.rect.height()
@@ -183,16 +193,14 @@ class TrackRowDelegate(QStyledItemDelegate):
         if show:
             thumb_rect = QRect(x, y + (h - self.THUMB_SIZE) // 2, self.THUMB_SIZE, self.THUMB_SIZE)
             url = tr.thumbnail or ""
-            cached = art_cache.cache().get(url) if url else None
-            if cached is None and url and url not in self._requested_urls:
+            pix = art_cache.cache().scaled(
+                url, self.THUMB_SIZE, self.THUMB_SIZE,
+                painter.device().devicePixelRatioF()) if url else None
+            if pix is None and url and url not in self._requested_urls:
                 # Kick off the fetch once; subsequent paints will hit cache.
                 self._requested_urls.add(url)
                 art_cache.cache().request(url, None)
-            if cached is not None:
-                pix = QPixmap.fromImage(cached).scaled(
-                    self.THUMB_SIZE, self.THUMB_SIZE,
-                    Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
-                )
+            if pix is not None:
                 painter.drawPixmap(thumb_rect, pix)
             else:
                 # Placeholder: theme-colored solid + 1px border.
@@ -201,13 +209,12 @@ class TrackRowDelegate(QStyledItemDelegate):
                 painter.drawRect(thumb_rect.adjusted(0, 0, -1, -1))
             x = thumb_rect.right() + self.THUMB_MARGIN
         else:
-            painter.setPen(text_color if is_current else dim_color)
             cursor = marker if is_current else "  "
             cursor_w = QFontMetrics(option.font).horizontalAdvance(cursor)
-            painter.drawText(
-                QRect(x, y, cursor_w, h),
-                Qt.AlignVCenter | Qt.AlignLeft, cursor,
-            )
+            cursor_rect = QRect(x, y, cursor_w, h)
+            pen(text_color if is_current else dim_color, cursor_rect,
+                Qt.AlignVCenter | Qt.AlignLeft, cursor)
+            painter.drawText(cursor_rect, Qt.AlignVCenter | Qt.AlignLeft, cursor)
             x += cursor_w
 
         # text: "artist — title"
@@ -218,35 +225,32 @@ class TrackRowDelegate(QStyledItemDelegate):
             # title on top line, artist on second, like a music app
             fm = QFontMetrics(option.font)
             line_h = fm.height()
-            painter.setPen(text_color if not (is_current and not selected) else accent)
-            painter.drawText(
-                QRect(x, y + (h - 2 * line_h - 2) // 2, option.rect.right() - x - 60, line_h),
-                Qt.AlignVCenter | Qt.AlignLeft,
-                fm.elidedText(title, Qt.ElideRight, option.rect.right() - x - 60),
-            )
-            painter.setPen(dim_color)
-            painter.drawText(
-                QRect(x, y + (h - 2 * line_h - 2) // 2 + line_h + 2,
-                      option.rect.right() - x - 60, line_h),
-                Qt.AlignVCenter | Qt.AlignLeft,
-                fm.elidedText(artist, Qt.ElideRight, option.rect.right() - x - 60),
-            )
+            flags = Qt.AlignVCenter | Qt.AlignLeft
+            text_w = option.rect.right() - x - 60
+            title_rect = QRect(x, y + (h - 2 * line_h - 2) // 2, text_w, line_h)
+            title_text = fm.elidedText(title, Qt.ElideRight, text_w)
+            pen(text_color if not (is_current and not selected) else accent,
+                title_rect, flags, title_text)
+            painter.drawText(title_rect, flags, title_text)
+            artist_rect = QRect(x, y + (h - 2 * line_h - 2) // 2 + line_h + 2,
+                                text_w, line_h)
+            artist_text = fm.elidedText(artist, Qt.ElideRight, text_w)
+            pen(dim_color, artist_rect, flags, artist_text)
+            painter.drawText(artist_rect, flags, artist_text)
         else:
-            painter.setPen(accent if is_current and not selected else text_color)
             fm = QFontMetrics(option.font)
-            painter.drawText(
-                QRect(x, y, option.rect.right() - x - 60, h),
-                Qt.AlignVCenter | Qt.AlignLeft,
-                fm.elidedText(primary, Qt.ElideRight, option.rect.right() - x - 60),
-            )
+            line_rect = QRect(x, y, option.rect.right() - x - 60, h)
+            line_text = fm.elidedText(primary, Qt.ElideRight,
+                                      option.rect.right() - x - 60)
+            pen(accent if is_current and not selected else text_color,
+                line_rect, Qt.AlignVCenter | Qt.AlignLeft, line_text)
+            painter.drawText(line_rect, Qt.AlignVCenter | Qt.AlignLeft, line_text)
 
         # duration, right-aligned
         if tr.duration:
-            painter.setPen(dim_color)
-            painter.drawText(
-                QRect(option.rect.right() - 56, y, 50, h),
-                Qt.AlignVCenter | Qt.AlignRight, tr.duration,
-            )
+            dur_rect = QRect(option.rect.right() - 56, y, 50, h)
+            pen(dim_color, dur_rect, Qt.AlignVCenter | Qt.AlignRight, tr.duration)
+            painter.drawText(dur_rect, Qt.AlignVCenter | Qt.AlignRight, tr.duration)
 
         painter.restore()
 

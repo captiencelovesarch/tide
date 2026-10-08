@@ -41,7 +41,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QHBoxLayout, QWidget
 
-from .. import backdrops, theming
+from .. import backdrops, contrast, theming
 
 
 # Maps the corner_style setting to a pixel radius. Kept here so the dialog
@@ -65,6 +65,12 @@ def corner_radius(style: str) -> int:
 _TONE_FADE_MS = 1400.0
 
 _ANIM_INTERVAL_MS = 42          # idle drift stays inexpensive
+# The two gradient looks drift over 30-50 s periods through soft fields, so
+# a quarter of a pixel per frame at 24 fps; 15 fps reads the same. Every
+# frame repaints the whole window on top of the backdrop, so this is the
+# idle cost of the app.
+_GRADIENT_IDLE_MS = 66
+_GRADIENT_STYLES = frozenset({"band", "field"})
 _PULSE_INTERVAL_MS = 16         # transients need a display-rate cadence
 _PERIOD_FLOW_S = 43.0
 _PERIOD_FIELD_A_S = 29.0
@@ -119,6 +125,19 @@ _FX_STYLES = frozenset({
 _DROP_MAX = 8
 _DROP_LIFE_S = 3.4
 _DROP_TILT = 0.58
+
+# Text legibility (ui/legibility.py) reads the backdrop through a small
+# luminance grid: the last frame scaled to _INK_GRID on its long side, as
+# APCA screen luminance per cell. It eases toward each new frame over
+# _INK_EASE_S so text follows the drift of the scene but not the bass:
+# a kick that brightens the field for 100 ms must not strobe the text.
+_INK_GRID = 160
+_INK_EASE_S = 0.5
+# The grid is rebuilt at most this often. It eases over half a second
+# anyway, and between rebuilds every text run on screen can reuse its last
+# answer (legibility memoises on ink_version) instead of probing again.
+_INK_REBUILD_S = 0.1
+_INK_LUT = tuple(np.array(t, dtype=np.float32) for t in contrast.APCA_LUT)
 
 # set_style's whitelist, from the backdrop registry so pickers and the
 # renderer share one list. The assert makes a slug added to backdrops.py
@@ -322,6 +341,13 @@ class CentralBg(QWidget):
         self._label_img: QImage | None = None
         self._label_key: tuple | None = None
         self._buf: QImage | None = None
+        # The last rendered frame, reused for every paint until a tick (or
+        # a style/theme/size change) marks it stale. Without this, every
+        # child repaint (a progress tick, a hover, a text fade) re-rendered
+        # the whole backdrop under it.
+        self._frame: QImage | None = None
+        self._frame_size: tuple[int, int] = (0, 0)
+        self._frame_stale: bool = True
         # Liquid-cover state. The full-res art is cached whatever the current
         # style is (it arrives whenever the adaptive pipeline fetches it, and
         # holding a reference is free), so switching to liquid mid-song works.
@@ -348,6 +374,20 @@ class CentralBg(QWidget):
         self._fx_phase: float = 0.0
         self._fx_last: float | None = None
 
+        # Legibility probe state (ink_range): the frame last painted, a
+        # counter that moves on every paint, and the eased grid built from
+        # it on demand. The vinyl label is drawn over the field at window
+        # res, so its placement rides along for the grid to include.
+        self._ink_src: QImage | None = None
+        self._ink_frame: int = 0
+        self._ink_seen: int = -1
+        self._ink_grid: np.ndarray | None = None
+        self._ink_t: float | None = None
+        self._ink_version: int = 0
+        self._ink_spans: dict[tuple[int, int, int, int], tuple[float, float]] = {}
+        self._ink_label: tuple[float, float, float, float] | None = None
+        self._ink_ref: float = contrast.apca_y(self._bg)
+
         self._anim = QTimer(self)
         self._anim.setTimerType(Qt.TimerType.PreciseTimer)
         self._anim.setInterval(_ANIM_INTERVAL_MS)
@@ -362,26 +402,33 @@ class CentralBg(QWidget):
 
     # ---------- public API ----------
 
+    def _invalidate(self) -> None:
+        self._frame_stale = True
+        self.update()
+
     def set_enabled(self, on: bool) -> None:
         if on == self._enabled:
             return
         self._enabled = on
         self._sync_timer()
-        self.update()
+        self._invalidate()
 
     def set_radius(self, radius: int) -> None:
         r = max(0, int(radius))
         if r == self._radius:
             return
         self._radius = r
-        self.update()
+        self._invalidate()
 
     def set_style(self, style: str) -> None:
         new_style = style if style in _STYLES else "field"
         if new_style == self._style:
             return
         self._style = new_style
-        self.update()
+        if new_style != "vinyl":
+            self._groove_img = self._groove_key = None
+            self._label_img = self._label_key = None
+        self._invalidate()
 
     def set_art(self, image: QImage | None) -> None:
         """Feed the current track's full-res cover (or None when nothing is
@@ -401,7 +448,7 @@ class CentralBg(QWidget):
             self._liq_to = None
             self._liq_blend = 1.0
             if self._enabled and self._style == "liquid":
-                self.update()
+                self._invalidate()
             return
         if self._style != "liquid":
             # Not painting it — just remember the art and drop stale fields.
@@ -431,7 +478,7 @@ class CentralBg(QWidget):
         self._liq_to = None      # rebuilt from the new art at render size
         if self._enabled:
             self._sync_timer()
-            self.update()
+            self._invalidate()
 
     def set_motion(self, motion: str) -> None:
         new_motion = motion or "lite"
@@ -441,7 +488,7 @@ class CentralBg(QWidget):
         if new_motion == "off":
             self._snap_tones()
         self._sync_timer()
-        self.update()
+        self._invalidate()
 
     def set_speed(self, rate: float) -> None:
         """The song's playback speed. Every scene's clock runs at it, so a
@@ -503,9 +550,12 @@ class CentralBg(QWidget):
             or self._tone_blend < 1.0
             or self._liq_blend < 1.0
         )
-        interval = (_PULSE_INTERVAL_MS if max(self._pulse, self._pulse_peak,
-                                             self._pulse_shown) > 0.001
-                    else _ANIM_INTERVAL_MS)
+        if max(self._pulse, self._pulse_peak, self._pulse_shown) > 0.001:
+            interval = _PULSE_INTERVAL_MS
+        elif self._style in _GRADIENT_STYLES and self._tone_blend >= 1.0:
+            interval = _GRADIENT_IDLE_MS
+        else:
+            interval = _ANIM_INTERVAL_MS
         if self._anim.interval() != interval:
             self._anim.setInterval(interval)
         if active and not self._anim.isActive():
@@ -546,7 +596,13 @@ class CentralBg(QWidget):
                 1.0, self._liq_blend + dt * 1000.0 / _TONE_FADE_MS)
             changed = True
         if changed:
-            self.update()
+            handle = self.window().windowHandle()
+            if handle is not None and not handle.isExposed():
+                # Minimized or otherwise off screen: nothing would paint.
+                # The stale frame is rendered when an expose repaints us.
+                self._frame_stale = True
+            else:
+                self._invalidate()
         self._sync_timer()
 
     def _snap_tones(self) -> None:
@@ -565,6 +621,7 @@ class CentralBg(QWidget):
         # the theming manager re-emits theme_changed when that happens, so we
         # re-derive the tones with no additional wiring.
         self._bg = QColor(theme.token("bg", "#0b0b0b"))
+        self._ink_ref = contrast.apca_y(self._bg)
         surface = QColor(theme.token("bg_alt", self._bg.name()))
         if not surface.isValid():
             surface = QColor(self._bg)
@@ -617,7 +674,7 @@ class CentralBg(QWidget):
         if (new_a.rgb() == self._tone_ta.rgb()
                 and new_b.rgb() == self._tone_tb.rgb()
                 and new_c.rgb() == self._tone_tc.rgb()):
-            self.update()
+            self._invalidate()
             return
         self._tone_ta, self._tone_tb, self._tone_tc = new_a, new_b, new_c
         if self._motion == "off" or not self._enabled or not self.isVisible():
@@ -631,7 +688,7 @@ class CentralBg(QWidget):
             self._tone_fc = QColor(self._tone_c)
             self._tone_blend = 0.0
             self._sync_timer()
-        self.update()
+        self._invalidate()
 
     # ---------- liquid cover ----------
 
@@ -1534,6 +1591,7 @@ class CentralBg(QWidget):
             p.drawImage(0, 0, self._groove_layer(int(W), int(H), cx, cy,
                                                  label_r))
             lr = label_r * H
+            self._ink_label = (cx, cy, lr, spin)
             cover = self._label_cover(int(round(2 * lr)))
             if cover is not None:
                 p.save()
@@ -1653,14 +1711,119 @@ class CentralBg(QWidget):
                 p.setClipPath(path)
 
             if self._enabled:
-                img = self._render_buffer(max(1, rect.width()), max(1, rect.height()))
+                size = (max(1, rect.width()), max(1, rect.height()))
+                fresh = (self._frame_stale or self._frame is None
+                         or self._frame_size != size)
+                if fresh:
+                    self._frame = self._render_buffer(*size)
+                    self._frame_size = size
+                    self._frame_stale = False
+                img = self._frame
                 p.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 p.drawImage(rect, img)
+                self._ink_label = None
                 if self._vec is not None:
                     self._paint_vec(p, rect)
+                if fresh:
+                    self._ink_src = img
+                    self._ink_frame += 1
             elif self._bg.alpha() == 255:
+                self._ink_src = None
                 p.fillRect(rect, self._bg)
-            # else: translucent theme — the styled window is the base; paint
-            # nothing so its alpha shows through once, not twice.
+            else:
+                # Translucent theme: the styled window is the base; paint
+                # nothing so its alpha shows through once, not twice.
+                self._ink_src = None
         finally:
             p.end()
+
+    # ---------- legibility probe ----------
+
+    def ink_reference(self) -> float:
+        """APCA luminance of the theme's own bg: what every ink was designed
+        against, so how far a patch strays from it is what moves an ink."""
+        return self._ink_ref
+
+    def ink_version(self) -> int:
+        """Moves whenever ink_range answers may have changed. Asking brings
+        the grid up to date first, so a memo keyed on it is never stale."""
+        self._ink_luma()
+        return self._ink_version
+
+    def ink_range(self, rect) -> tuple[float, float] | None:
+        """Darkest and brightest luminance of the backdrop under ``rect``
+        (a QRect in this widget's coordinates), or None when there is no
+        backdrop to read: the fill is the theme's flat bg, which the token
+        pass in contrast.py already covers."""
+        grid = self._ink_luma()
+        if grid is None:
+            return None
+        gh, gw = grid.shape
+        W, H = max(1, self.width()), max(1, self.height())
+        x0 = max(0, min(gw - 1, int(rect.left() * gw / W)))
+        y0 = max(0, min(gh - 1, int(rect.top() * gh / H)))
+        x1 = max(x0 + 1, min(gw, math.ceil((rect.right() + 1) * gw / W)))
+        y1 = max(y0 + 1, min(gh, math.ceil((rect.bottom() + 1) * gh / H)))
+        key = (x0, y0, x1, y1)
+        span = self._ink_spans.get(key)
+        if span is None:
+            cell = grid[y0:y1, x0:x1]
+            span = (float(cell.min()), float(cell.max()))
+            self._ink_spans[key] = span
+        return span
+
+    def _ink_luma(self) -> np.ndarray | None:
+        """The eased luminance grid, rebuilt at most once per painted frame
+        and only when something asks (text paints right after us)."""
+        if not self._enabled or self._ink_src is None:
+            return None
+        if self._ink_grid is not None and (
+                self._ink_seen == self._ink_frame
+                or time.monotonic() - (self._ink_t or 0.0) < _INK_REBUILD_S):
+            return self._ink_grid
+        src = self._ink_src
+        sw, sh = max(1, src.width()), max(1, src.height())
+        if sw >= sh:
+            gw = min(sw, _INK_GRID)
+            gh = max(1, round(gw * sh / sw))
+        else:
+            gh = min(sh, _INK_GRID)
+            gw = max(1, round(gh * sw / sh))
+        # Opaque RGB at grid size. A translucent theme's frame is glass
+        # over the desktop; the theme bg under it is the best stand-in.
+        small = QImage(gw, gh, QImage.Format_RGB888)
+        small.fill(QColor(self._bg.red(), self._bg.green(), self._bg.blue()))
+        sp = QPainter(small)
+        sp.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        sp.drawImage(QRectF(0, 0, gw, gh), src)
+        if self._ink_label is not None and self._art is not None:
+            # The vinyl label: the cover, spinning, at grid scale.
+            cx, cy, lr, spin = self._ink_label
+            kx, ky = gw / max(1, self.width()), gh / max(1, self.height())
+            path = QPainterPath()
+            path.addEllipse(QPointF(cx * kx, cy * ky), lr * kx, lr * ky)
+            sp.setClipPath(path)
+            sp.translate(cx * kx, cy * ky)
+            sp.rotate(spin)
+            sp.drawImage(QRectF(-lr * kx, -lr * ky, 2 * lr * kx, 2 * lr * ky),
+                         self._art)
+        sp.end()
+        stride = small.bytesPerLine()
+        raw = bytes(small.constBits()[: stride * gh])
+        rgb = (np.frombuffer(raw, dtype=np.uint8)
+               .reshape(gh, stride)[:, : gw * 3].reshape(gh, gw, 3))
+        lr_, lg_, lb_ = _INK_LUT
+        y = lr_[rgb[..., 0]] + lg_[rgb[..., 1]] + lb_[rgb[..., 2]]
+
+        now = time.monotonic()
+        if (self._ink_grid is None or self._ink_t is None
+                or self._ink_grid.shape != y.shape):
+            self._ink_grid = y
+        else:
+            k = 1.0 - math.exp(-max(0.0, now - self._ink_t) / _INK_EASE_S)
+            self._ink_grid = self._ink_grid + (y - self._ink_grid) * k
+        self._ink_t = now
+        self._ink_seen = self._ink_frame
+        self._ink_version += 1
+        self._ink_spans.clear()
+        return self._ink_grid

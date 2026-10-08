@@ -28,7 +28,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QLabel, QWidget
 
 from .. import theming
-from . import motion, scale
+from . import legibility, motion, scale
 
 
 STYLES: tuple[str, ...] = ("scramble", "sweep", "rise", "off")
@@ -262,6 +262,9 @@ class RevealLabel(QLabel):
         theme = theming.manager().current_effective()
         fg = self.palette().color(QPalette.WindowText)
         accent = QColor(theme.token("accent", "#d4b95e")) if theme is not None else QColor("#d4b95e")
+        # Mid-transition the label paints itself, past the style proxy.
+        fg = legibility.ink(self, fg, self.contentsRect())
+        accent = legibility.ink(self, accent, self.contentsRect())
         p.setFont(self.font())
         self._reveal.paint(p, self.contentsRect(), self.text(), QFontMetrics(self.font()),
                            fg=fg, accent=accent, flags=self.alignment() | Qt.AlignVCenter)

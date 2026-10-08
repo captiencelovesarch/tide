@@ -160,7 +160,13 @@ def test_pulse_returns_to_idle_rate_and_hidden_backdrop_stops(backdrop):
     for _ in range(30):
         clock.now += 0.016
         widget._tick()
-    assert widget._anim.interval() == 42
+    # the gradient looks idle slower than the scene styles: their drift is
+    # sub-pixel per frame, and each frame repaints the whole window
+    assert widget._anim.interval() == central_bg._GRADIENT_IDLE_MS
+    widget.set_style("horizon")
+    clock.now += 0.016
+    widget._tick()
+    assert widget._anim.interval() == central_bg._ANIM_INTERVAL_MS == 42
     widget.set_motion("off")
     assert not widget._anim.isActive()
     widget.set_pulse(1.0)

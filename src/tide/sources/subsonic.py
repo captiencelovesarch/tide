@@ -555,7 +555,7 @@ class SubsonicSource(MusicSource):
     # ---------- radio ----------
 
     def get_radio(self, video_id: str, exclude: set[str] | None = None,
-                  depth: int = 0) -> list[Track]:
+                  depth: int = 0, mix: str = "balanced") -> list[Track]:
         """getSimilarSongs2 returns "more like this" for a given song.
         Falls through to getRandomSongs if the server doesn't implement
         the similar endpoint — better an honest fallback than dead air."""

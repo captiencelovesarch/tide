@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 from .. import backdrops, glyphs, theming
 from ..player import PlayState
 from ..queue import Role as QueueRole
-from . import art_cache, motion as motion_module, scale as _scale, text_fx
+from . import art_cache, legibility, motion as motion_module, scale as _scale, text_fx
 from .central_bg import CentralBg
 from .lyrics import LyricsView
 from .mini import _BACKDROP_CHOICES
@@ -158,9 +158,11 @@ class _FsQueueDelegate(QStyledItemDelegate):
         f.setBold(is_current)
         painter.save()
         painter.setFont(f)
-        painter.setPen(accent if is_current else (dim if past else fg))
         rect = option.rect.adjusted(_scale.px(6), 0, -_scale.px(6), 0)
         elided = QFontMetrics(f).elidedText(text, Qt.ElideRight, rect.width())
+        painter.setPen(legibility.text_ink(
+            painter, accent if is_current else (dim if past else fg), rect,
+            Qt.AlignVCenter | Qt.AlignLeft, elided))
         painter.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, elided)
         painter.restore()
 
@@ -1034,6 +1036,7 @@ class FullscreenPlayer(QWidget):
     def _on_context_menu(self, pos) -> None:
         s = self._settings()
         menu = QMenu(self)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
 
         backdrop = menu.addMenu(theming.styled_case("backdrop"))
         current_style = s.fullscreen_backdrop_style or "follow"

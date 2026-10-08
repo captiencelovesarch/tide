@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import tempfile
 import threading
 import time
@@ -229,6 +228,19 @@ _RADIO_MAX = 250
 # videoType values radio leaves out (see get_radio).
 _UGC = "MUSIC_VIDEO_TYPE_UGC"
 _RADIO_SKIP_TYPES = (_UGC, "MUSIC_VIDEO_TYPE_PODCAST_EPISODE")
+# The web player's queue has tuner chips under "Playing from <song> Mix"
+# (All, Familiar, Discover, ...). Each chip is its own radio playlist:
+# this prefix + the seed's videoId. "all" is the plain RDAMVM radio that
+# ytmusicapi builds by itself. Familiar draws on the whole account (likes,
+# web plays, tide's reported plays), which "all" alone barely does.
+_RADIO_TUNERS = {"familiar": "RDATiYv", "discover": "RDATiXv"}
+# Settings.radio_mix -> the tuners it reads, interleaved in this order.
+_RADIO_MIXES = {
+    "balanced": ("familiar", "all"),
+    "familiar": ("familiar",),
+    "discover": ("discover",),
+    "all": ("all",),
+}
 
 
 def _to_track(item: dict) -> Track | None:
@@ -257,6 +269,10 @@ def _to_track(item: dict) -> Track | None:
         source=SOURCE_SLUG,
         extras=item,
     )
+
+
+# The parts of a get_song payload _get_song_memo keeps.
+_SONG_MEMO_KEYS = ("videoDetails", "microformat", "playbackTracking")
 
 
 class YTMusicSource(MusicSource):
@@ -412,7 +428,10 @@ class YTMusicSource(MusicSource):
         parts = ["signed in (cookie import)"]
         if self._last_auth_ok is not None:
             parts.append(f"verified {_ago(time.time() - self._last_auth_ok)} ago")
-        from .. import auth
+        from .. import auth, yt_session
+        rotated = yt_session.rotated_at()
+        if rotated is not None:
+            parts.append(f"refreshed {_ago(max(0.0, time.time() - rotated))} ago")
         try:
             remaining = auth.seconds_until_expiry()
         except Exception:
@@ -807,10 +826,15 @@ class YTMusicSource(MusicSource):
         return lrc
 
     def get_radio(self, video_id: str, exclude: set[str] | None = None,
-                  depth: int = 0) -> list[Track]:
+                  depth: int = 0, mix: str = "balanced") -> list[Track]:
         """The seed's radio, read ``depth`` pages further down each time
         (ytmusicapi follows the continuations up to ``limit``), so a long
         session stays on the radio of the song the user picked.
+
+        ``mix`` picks the tuners (see _RADIO_MIXES). "balanced" alternates
+        Familiar and All, Familiar first, like the web player's queue
+        reads for a signed-in account. A tuner that fails or comes back
+        empty is skipped; if nothing is left, the plain radio fills in.
 
         Fan uploads and podcast episodes are dropped unless the seed is a
         fan upload itself: a radio seeded from a regular song otherwise
@@ -818,26 +842,72 @@ class YTMusicSource(MusicSource):
         podcast."""
         if not video_id:
             return []
+        limit = min(_RADIO_PAGE * (max(0, int(depth)) + 1), _RADIO_MAX)
+        tuners = _RADIO_MIXES.get(mix) or _RADIO_MIXES["balanced"]
+        pages = self._radio_pages(video_id, tuners, limit)
+        out = self._radio_tracks(video_id, pages, exclude)
+        if not out and "all" not in tuners:
+            pages = self._radio_pages(video_id, ("all",), limit)
+            out = self._radio_tracks(video_id, pages, exclude)
+        return out
+
+    def _radio_pages(self, video_id: str, tuners: tuple[str, ...],
+                     limit: int) -> list[list[dict]]:
+        """One raw track list per tuner, fetched side by side. Raises only
+        when every tuner failed, so one dead chip can't sink the refill."""
+        def fetch(tuner: str) -> list[dict]:
+            prefix = _RADIO_TUNERS.get(tuner)
+            kwargs = {"playlistId": prefix + video_id} if prefix else {}
+            res = self.yt.get_watch_playlist(videoId=video_id, radio=True,
+                                             limit=limit, **kwargs)
+            return res.get("tracks", []) or []
+
+        if len(tuners) == 1:
+            return [fetch(tuners[0])]
+        pool = ThreadPoolExecutor(max_workers=len(tuners),
+                                  thread_name_prefix="tide-radio")
+        try:
+            futures = [pool.submit(fetch, t) for t in tuners]
+        finally:
+            pool.shutdown(wait=True)
+        pages: list[list[dict]] = []
+        errors: list[BaseException] = []
+        for fut in futures:
+            exc = fut.exception()
+            if exc is None:
+                pages.append(fut.result())
+            else:
+                errors.append(exc)
+        if not pages and errors:
+            raise errors[0]
+        return pages
+
+    @staticmethod
+    def _radio_tracks(video_id: str, pages: list[list[dict]],
+                      exclude: set[str] | None) -> list[Track]:
+        """Round-robin the tuners' lists into one, dropping the seed,
+        ``exclude``, repeats across tuners, and the skipped videoTypes."""
         excluded = set(exclude or ())
         excluded.add(video_id)
-        limit = min(_RADIO_PAGE * (max(0, int(depth)) + 1), _RADIO_MAX)
-        res = self.yt.get_watch_playlist(videoId=video_id, radio=True,
-                                         limit=limit)
-        items = res.get("tracks", []) or []
-        seed_type = next((item.get("videoType") for item in items
+        seed_type = next((item.get("videoType") for page in pages
+                          for item in page
                           if item.get("videoId") == video_id), None)
         banned = set(_RADIO_SKIP_TYPES)
         if seed_type == _UGC:
             banned.discard(_UGC)
         out: list[Track] = []
-        for item in items:
-            if item.get("videoType") in banned:
-                continue
-            tr = _to_track(item)
-            if not tr or tr.video_id in excluded:
-                continue
-            excluded.add(tr.video_id)
-            out.append(tr)
+        for row in range(max((len(p) for p in pages), default=0)):
+            for page in pages:
+                if row >= len(page):
+                    continue
+                item = page[row]
+                if item.get("videoType") in banned:
+                    continue
+                tr = _to_track(item)
+                if not tr or tr.video_id in excluded:
+                    continue
+                excluded.add(tr.video_id)
+                out.append(tr)
         return out
 
     # ---------- v1.5 community / depth ----------
@@ -861,6 +931,10 @@ class YTMusicSource(MusicSource):
             return None
         if not isinstance(song, dict):
             return None
+        # Keep only what the callers read (insights, add_history_item): the
+        # full payload is mostly streamingData and player config, tens of
+        # KB of JSON per song that nobody here looks at again.
+        song = {k: song[k] for k in _SONG_MEMO_KEYS if k in song}
         with self._song_memo_lock:
             self._song_memo[video_id] = song
             while len(self._song_memo) > self._SONG_MEMO_CAP:
@@ -1488,16 +1562,13 @@ _AUTH_RETRY_SECS = 30 * 60
 # provided YouTube account cookies are no longer valid…").
 _JAR_ERROR_MARKERS = ("no longer valid", "401", "unauthorized")
 
-# Guards the cookie jar FILE, never a network call. YoutubeDL reads the jar
-# at construction and REWRITES it on close (save_cookies — this is how
-# rotated cookies persist), so two auth passes sharing one file race a
-# truncating write against a read and the loser sees a half-written jar.
-# The first fix held this lock across the whole extraction, which queued
-# every auth resolve behind the others: warm() fires five 500ms apart, each
-# pass takes ~4s, and a click on the fifth track waited ~19s (measured).
-# Now each pass runs on its own snapshot of the jar and only the copy in
-# and the atomic swap back out are serialized.
-_AUTH_JAR_LOCK = threading.Lock()
+# YoutubeDL reads its cookie file at construction and REWRITES it on close
+# (that's how rotated cookies persist), so passes never share one file:
+# each runs on its own snapshot of yt_session's live jar, and what it
+# rotated is merged back in. Holding one lock across whole extractions
+# queued every resolve behind the others (a click on the fifth warmed track
+# waited ~19 s, measured), so only the copy out and the merge back are
+# serialized, inside yt_session.
 
 
 def _looks_like_dead_jar(exc: Exception) -> bool:
@@ -1564,19 +1635,18 @@ def _extract_stream_url(url: str, opts: dict) -> tuple[str | None, dict]:
 def _extract_with_jar_snapshot(url: str, opts: dict) -> tuple[str | None, dict]:
     """Run an auth pass against a private copy of the cookie jar.
 
-    yt-dlp gets a snapshot it can read and rewrite freely; if it rotated
-    anything, the snapshot replaces the real jar with an atomic rename, so
-    a concurrent reader sees the old file or the new one, never half of
-    either. Two passes that both rotate: last one wins, and both results
-    are cookies YouTube just handed out.
+    yt-dlp gets a snapshot of the live jar it can read and rewrite freely;
+    if it rotated anything, the changed cookies merge back into the live
+    jar (which ytmusicapi shares). Two passes that both rotate: last one
+    wins, and both results are cookies YouTube just handed out.
     """
+    from .. import yt_session
     jar = opts["cookiefile"]
     fd, snap = tempfile.mkstemp(prefix=".yt_cookies.", suffix=".txt",
                                 dir=os.path.dirname(jar) or None)
     os.close(fd)
     try:
-        with _AUTH_JAR_LOCK:
-            shutil.copyfile(jar, snap)
+        yt_session.snapshot(snap)
         with open(snap, "rb") as fh:
             before = fh.read()
         try:
@@ -1586,8 +1656,7 @@ def _extract_with_jar_snapshot(url: str, opts: dict) -> tuple[str | None, dict]:
                 with open(snap, "rb") as fh:
                     rotated = fh.read() != before
                 if rotated:
-                    with _AUTH_JAR_LOCK:
-                        os.replace(snap, jar)
+                    yt_session.merge(snap)
             except OSError:
                 pass
     finally:

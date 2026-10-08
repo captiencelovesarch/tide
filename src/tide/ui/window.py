@@ -20,7 +20,6 @@ from PySide6.QtGui import (
     QKeySequence,
     QShortcut,
 )
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -35,7 +34,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
-    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +46,7 @@ from ..sources import StreamRef, registry as source_registry
 from ..queue import Queue, RepeatMode, Role
 from .album import AlbumView
 from .artist import ArtistView
+from . import legibility
 from .headings import Heading, line_heading
 from .history import HistoryView
 from .library import LibraryView
@@ -196,13 +195,14 @@ class _RadioWorker(QObject):
     failed = Signal(str, int)        # message, generation
 
     def __init__(self, api_obj: api.Api, video_id: str, exclude: list[str],
-                 depth: int = 0, gen: int = 0) -> None:
+                 depth: int = 0, gen: int = 0, mix: str = "balanced") -> None:
         super().__init__()
         self.api = api_obj
         self.video_id = video_id
         self.exclude = set(exclude)
         self.depth = depth
         self.gen = gen
+        self.mix = mix
 
     def run(self) -> None:
         try:
@@ -212,7 +212,7 @@ class _RadioWorker(QObject):
             except Exception:
                 pass
             tracks = self.api.get_radio(self.video_id, exclude=self.exclude,
-                                        depth=self.depth)
+                                        depth=self.depth, mix=self.mix)
             self.done.emit(tracks, self.gen)
         except Exception as exc:
             self.failed.emit(str(exc), self.gen)
@@ -518,7 +518,7 @@ class MainWindow(QMainWindow):
     def __init__(self, api_obj: api.Api, player: PlaybackRouter | Player) -> None:
         super().__init__()
         # Created first: everything below may call self.statusBar().
-        self._status = QStatusBar()
+        self._status = legibility.InkStatusBar()
         # No QSizeGrip: themes paint every bare QWidget with `background:
         # @bg`, so the grip rendered as a small opaque box floating on the
         # adaptive gradient in the bottom-right corner. It's redundant
@@ -629,7 +629,6 @@ class MainWindow(QMainWindow):
         self._session_save_timer.setInterval(2000)
         self._session_save_timer.timeout.connect(self._save_session_now)
 
-        self._net = QNetworkAccessManager(self)
         self._art_for_video_id: str | None = None
 
         self._theme = theming.manager().current()
@@ -2072,6 +2071,7 @@ class MainWindow(QMainWindow):
         if not tr:
             return
         menu = QMenu(self.results)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
         a_play = QAction("play now", menu)
         a_next = QAction("play next", menu)
         a_add  = QAction("add to queue", menu)
@@ -2121,6 +2121,7 @@ class MainWindow(QMainWindow):
         if not tr:
             return
         menu = QMenu(self.queue_view)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
         a_play = QAction("play now", menu)
         a_radio = QAction("start radio from here", menu)
         a_remove = QAction("remove", menu)
@@ -3213,8 +3214,10 @@ class MainWindow(QMainWindow):
             self.queue.disable_radio()
             return
         thread = QThread()
+        mix = getattr(getattr(self, "_settings", None), "radio_mix",
+                      "") or "balanced"
         worker = _RadioWorker(self.api, seed_video_id, list(exclude),
-                              depth, gen)
+                              depth, gen, mix)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.done.connect(self._on_radio_done)
@@ -3243,21 +3246,15 @@ class MainWindow(QMainWindow):
     def _fetch_art(self, track: api.Track) -> None:
         """Stale-tolerant art fetch.
 
-        We don't try to manage the lifecycle of in-flight QNetworkReplies —
-        they're owned by Qt and get deleted as soon as they finish. Instead
-        we track `_art_for_video_id` and discard any reply that doesn't match
-        the currently-playing track when it finishes.
+        We track `_art_for_video_id` and discard any delivery that doesn't
+        match the currently-playing track when it lands.
 
         We deliberately do NOT clear the existing art at the top: keeping
         the prior cover visible until the new one lands gives AlbumArt's
         crossfade something to fade from. Only when the new track has no
         thumbnail at all do we wipe to the empty state.
         """
-        from .art_cache import (
-            ART_TRANSFER_TIMEOUT_MS,
-            MAX_ART_BYTES,
-            _is_fetchable_art_url,
-        )
+        from .art_cache import _is_fetchable_art_url, cache as art_cache
 
         # Same guard as the shared art cache: a remote-supplied thumbnail
         # URL is untrusted, so reject non-http(s) (file:// / data:) before it
@@ -3267,36 +3264,19 @@ class MainWindow(QMainWindow):
             self._art_for_video_id = None
             return
         self._art_for_video_id = track.video_id
-
-        req = QNetworkRequest(QUrl(track.thumbnail))
-        req.setTransferTimeout(ART_TRANSFER_TIMEOUT_MS)
-        reply = self._net.get(req)
         target_video_id = track.video_id
 
-        def on_progress(received: int, _total: int) -> None:
-            if received > MAX_ART_BYTES:
-                reply.abort()
+        # Through the shared cache, which the adaptive palette reads the
+        # same cover from: one download and one decode per track instead
+        # of two, and a replay comes off disk.
+        def deliver(img) -> None:
+            if img is None or self._art_for_video_id != target_video_id:
+                return
+            self.art.setImage(img)
 
-        def on_finished():
-            try:
-                err = reply.error()
-            except RuntimeError:
-                return  # reply was already deleted
-            if err != QNetworkReply.NoError:
-                reply.deleteLater()
-                return
-            data = bytes(reply.readAll().data())
-            reply.deleteLater()
-            if self._art_for_video_id != target_video_id:
-                return
-            if len(data) > MAX_ART_BYTES:
-                return
-            img = QImage()
-            if img.loadFromData(data):
-                self.art.setImage(img)
-
-        reply.downloadProgress.connect(on_progress)
-        reply.finished.connect(on_finished)
+        img = art_cache().request(track.thumbnail, deliver)
+        if img is not None:
+            deliver(img)
 
     # ---------- player state ----------
 
@@ -5095,10 +5075,10 @@ class MainWindow(QMainWindow):
         text_fx.set_style(getattr(self._settings, "text_transition", "") or "scramble")
 
     def apply_app_icon_setting(self) -> None:
-        """Window + tray icon in the active theme's colours (or the classic
-        one). Runs on every theme_changed, which also fires per song for
-        the adaptive overrides; the base theme and the svg string compare
-        make those free."""
+        """Window icon in the active theme's colours (or the classic one),
+        then the tray's. Runs on every theme_changed, which also fires per
+        song for the adaptive overrides; the base theme and the svg string
+        compare make those free."""
         from PySide6.QtWidgets import QApplication
         from . import app_icon
         mode = getattr(getattr(self, "_settings", None), "app_icon", "") or "theme"
@@ -5106,15 +5086,30 @@ class MainWindow(QMainWindow):
         try:
             svg = app_icon.svg_for(theme)
         except Exception:
-            return
-        if svg == getattr(self, "_app_icon_svg", None):
-            return
-        self._app_icon_svg = svg
-        icon = app_icon.icon_for(theme)
-        QApplication.setWindowIcon(icon)
+            svg = None
+        if svg is not None and svg != getattr(self, "_app_icon_svg", None):
+            self._app_icon_svg = svg
+            QApplication.setWindowIcon(app_icon.icon_for(theme))
+        self.apply_tray_icon()
+
+    def apply_tray_icon(self) -> None:
+        """The tray's icon: the one-colour glyph in the panel's ink, or the
+        window icon. Also run when the system flips light/dark."""
+        from PySide6.QtWidgets import QApplication
+        from . import app_icon
         tray = getattr(self, "_tray", None)
-        if tray is not None:
-            tray.set_icon(icon)
+        if tray is None:
+            return
+        mode = getattr(getattr(self, "_settings", None), "tray_icon", "") or "mono"
+        if mode == "app":
+            key = ("app", getattr(self, "_app_icon_svg", None))
+        else:
+            key = ("mono", app_icon.tray_ink())
+        if key == getattr(self, "_tray_icon_key", None):
+            return
+        self._tray_icon_key = key
+        tray.set_icon(QApplication.windowIcon() if mode == "app"
+                      else app_icon.tray_icon(key[1]))
 
     def apply_art_transition_setting(self) -> None:
         from . import art_fx
@@ -5159,19 +5154,30 @@ class MainWindow(QMainWindow):
         s = self._settings
         discord = getattr(self, "_discord", None)
         if discord is not None:
-            discord.set_options(
-                details_template=s.discord_details_template,
-                state_template=s.discord_state_template,
-                show_paused=s.discord_show_paused,
-                show_progress=s.discord_show_progress,
-                activity_type=s.discord_activity_type,
-            )
+            from ..discord_rpc import presence_options
+            discord.set_options(**presence_options(s))
             discord.configure(s.discord_app_id, s.discord_enabled)
+        tray = getattr(self, "_tray", None)
+        if tray is not None and hasattr(tray, "sync_discord"):
+            tray.sync_discord()
         lyric_tracker = getattr(self, "_lyric_tracker", None)
         if lyric_tracker is not None:
             lyric_tracker.set_enabled(
                 s.discord_enabled and s.discord_lyrics_enabled
             )
+
+    def set_discord_hidden(self, hidden: bool) -> None:
+        """The tray's "hide from discord" switch: saved, then applied."""
+        s = getattr(self, "_settings", None)
+        if s is None or bool(s.discord_hidden) == bool(hidden):
+            return
+        s.discord_hidden = bool(hidden)
+        try:
+            from .. import settings as settings_module
+            settings_module.save_fields(s, "discord_hidden")
+        except Exception:
+            pass
+        self.apply_discord_setting()
 
     def apply_listenbrainz_setting(self) -> None:
         scrobbler = getattr(self, "_scrobbler", None)

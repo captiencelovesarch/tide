@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import theming
-from . import art_cache
+from . import art_cache, legibility
 from .flow import ResponsiveGrid
 
 
@@ -209,8 +209,11 @@ class Card(QWidget):
         else:
             clip.addRoundedRect(art_rect, radius, radius)
 
-        img = art_cache.cache().get(self._thumb_url or "")
-        if img is None:
+        # Scaled once at rest size: the hover lift redraws it a few percent
+        # larger every frame, which smooth pixmap drawing covers.
+        pix = art_cache.cache().scaled(
+            self._thumb_url or "", self.THUMB, self.THUMB, self.devicePixelRatioF())
+        if pix is None:
             if modern:
                 p.setPen(Qt.NoPen)
                 p.setBrush(_qcolor(theme, "surface_1", "#0dffffff"))
@@ -223,12 +226,9 @@ class Card(QWidget):
                 p.setPen(dim)
                 p.drawRect(thumb_rect.adjusted(0, 0, -1, -1))
         else:
-            side = max(1, int(round(art_rect.width())))
-            pix = QPixmap.fromImage(img).scaled(
-                side, side, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation,
-            )
             if self._circular or radius > 0 or t > 0.0:
                 p.setClipPath(clip)
+                p.setRenderHint(QPainter.SmoothPixmapTransform, t > 0.0)
                 p.drawPixmap(art_rect.toRect(), pix)
                 p.setClipping(False)
             else:
@@ -244,15 +244,16 @@ class Card(QWidget):
         title_rect = QRect(self.MARGIN, title_y, self.THUMB, fm.height())
         title = theming.styled_case(self._title, theme)
         title = fm.elidedText(title, Qt.ElideRight, self.THUMB)
-        p.setPen(fg)
-        p.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, title)
+        flags = Qt.AlignVCenter | Qt.AlignLeft
+        p.setPen(legibility.text_ink(p, fg, title_rect, flags, title))
+        p.drawText(title_rect, flags, title)
 
         # Subtitle (one line, elided, dim).
         sub_rect = QRect(self.MARGIN, title_y + fm.height(), self.THUMB, fm.height())
         sub = theming.styled_case(self._subtitle, theme)
         sub = fm.elidedText(sub, Qt.ElideRight, self.THUMB)
-        p.setPen(dim)
-        p.drawText(sub_rect, Qt.AlignVCenter | Qt.AlignLeft, sub)
+        p.setPen(legibility.text_ink(p, dim, sub_rect, flags, sub))
+        p.drawText(sub_rect, flags, sub)
 
 
 def _draw_play_badge(p: QPainter, art: QRectF, fill: QColor, ink: QColor,

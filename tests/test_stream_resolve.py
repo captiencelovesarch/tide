@@ -18,8 +18,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tide import auth, cache
+from tide import auth, cache, config, yt_session
 from tide.sources import ytmusic as ym
+
+
+def _sign_in(test: unittest.TestCase) -> Path:
+    """A fake saved session in the test sandbox, so the auth pass runs on
+    yt_session's live jar the way it does in the app. Returns the jar file."""
+    auth.save_browser_auth({"__Secure-3PAPISID": "x", "SID": "old"})
+    yt_session._jar = None
+    yt_session._seeded_from = None
+
+    def out() -> None:
+        auth.clear_saved_auth()
+        yt_session._jar = None
+        yt_session._seeded_from = None
+    test.addCleanup(out)
+    return Path(auth.yt_dlp_cookiefile())
 
 
 LIVE_URL = "https://rr1.example/videoplayback?ok=1"
@@ -66,13 +81,10 @@ def _fake_ydl(responses):
 class ResolveFallbackTest(unittest.TestCase):
     def setUp(self) -> None:
         ym._auth_pass_broken = None
-        self.jar = tempfile.NamedTemporaryFile(suffix=".txt")  # real mtime
-        self.enterContext(mock.patch.object(
-            auth, "yt_dlp_cookiefile", return_value=self.jar.name))
+        self.jar = _sign_in(self)
         self.enterContext(mock.patch.object(
             ym.cache, "get_stream_url", return_value=None))
         self.put = self.enterContext(mock.patch.object(ym.cache, "put_stream_url"))
-        self.addCleanup(self.jar.close)
 
     def _alive(self, url: str) -> bool:
         return url == LIVE_URL
@@ -226,12 +238,7 @@ class JarSnapshotTest(unittest.TestCase):
 
     def setUp(self) -> None:
         ym._auth_pass_broken = None
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.jar = Path(self.tmp.name) / "yt_cookies.txt"
-        self.jar.write_text("# Netscape HTTP Cookie File\nold\n")
-        self.enterContext(mock.patch.object(
-            auth, "yt_dlp_cookiefile", return_value=str(self.jar)))
+        self.jar = _sign_in(self)
         self.enterContext(mock.patch.object(
             ym.cache, "get_stream_url", return_value=None))
         self.enterContext(mock.patch.object(ym.cache, "put_stream_url"))
@@ -268,7 +275,7 @@ class JarSnapshotTest(unittest.TestCase):
                 t.join(5.0)
         self.assertEqual(results, [LIVE_URL, LIVE_URL])
 
-    def test_rotated_cookies_replace_the_jar(self) -> None:
+    def test_rotated_cookies_merge_into_the_live_jar(self) -> None:
         seen = []
 
         class RotatingYDL:
@@ -280,7 +287,9 @@ class JarSnapshotTest(unittest.TestCase):
                 return self
 
             def __exit__(self, *exc):
-                Path(self.path).write_text("# Netscape HTTP Cookie File\nnew\n")
+                # what yt-dlp's save does after YouTube rotated SID
+                text = Path(self.path).read_text().replace("\tSID\told", "\tSID\tnew")
+                Path(self.path).write_text(text)
                 return False
 
             def extract_info(self, url, download=False):
@@ -289,9 +298,11 @@ class JarSnapshotTest(unittest.TestCase):
         with mock.patch.object(ym.yt_dlp, "YoutubeDL", RotatingYDL):
             ym.resolve_stream_url("vid12")
         self.assertNotEqual(seen[0], str(self.jar))  # worked on a copy
-        self.assertIn("new", self.jar.read_text())
-        self.assertEqual(sorted(p.name for p in Path(self.tmp.name).iterdir()),
-                         ["yt_cookies.txt"])
+        live = {c.name: c.value for c in yt_session.jar()}
+        self.assertEqual(live["SID"], "new")          # ytmusicapi sees it
+        self.assertIn("\tSID\tnew", self.jar.read_text())   # and so will a restart
+        self.assertEqual([p.name for p in config.CONFIG_DIR.iterdir()
+                          if p.name.startswith(".yt_cookies.")], [])
 
     def test_untouched_jar_is_not_rewritten(self) -> None:
         fake, _ = _fake_ydl({"auth": LIVE_URL})

@@ -349,11 +349,13 @@ class MusicSource(ABC):
         raise NotSupportedError(f"{self.slug}: get_home")
 
     def get_radio(self, video_id: str, exclude: set[str] | None = None,
-                  depth: int = 0) -> list[Track]:
+                  depth: int = 0, mix: str = "balanced") -> list[Track]:
         """More tracks like ``video_id``. ``depth`` counts the refills
         already taken from this seed's radio; a source that can page its
         radio should read further down it rather than start over. Sources
-        that can't are free to ignore it."""
+        that can't are free to ignore it. ``mix`` is Settings.radio_mix
+        (balanced / familiar / discover / all); a source with one kind of
+        radio ignores it too."""
         raise NotSupportedError(f"{self.slug}: get_radio")
 
     def get_lyrics_for(self, video_id: str) -> str | None:

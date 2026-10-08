@@ -59,6 +59,8 @@ def _fill_backdrop(_p: QPainter, _rect: QRect, _color: QColor) -> None:
 # regardless of window size / desktop scaling, which is what made the
 # oscilloscope tank on a large / HiDPI window.
 _RENDER_CAP = 1280
+# How long the visualizer keeps its capture while hidden (see hideEvent).
+_RELEASE_HIDDEN_MS = 20_000
 
 # Repaint cap. The audio feed pushes ~43 frames/s; there's no need to repaint
 # faster than this, and coalescing bursts halves the paint load.
@@ -768,6 +770,7 @@ class VisualizerView(QWidget):
 
     def _build_cog_menu(self) -> QMenu:
         menu = QMenu(self)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
 
         # Renderer submenu
         rmenu = menu.addMenu("renderer")
@@ -868,9 +871,18 @@ class VisualizerView(QWidget):
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
-        # Don't tear down audio if the visualizer is just behind another view —
-        # keep capturing so revealing it is instant. Users who want it off use
-        # the [stop] button or the settings toggle.
+        # Don't tear down audio the moment the visualizer goes behind another
+        # view: flicking back to it stays instant. Left hidden for a while,
+        # it lets go, so leaving the page doesn't keep the spectrum FFT (and
+        # parec, when nothing else holds it) running for the whole session.
+        # showEvent picks capture back up.
+        QTimer.singleShot(_RELEASE_HIDDEN_MS, self, self._release_if_hidden)
+
+    def _release_if_hidden(self) -> None:
+        if self._capturing and not self.isVisible():
+            self._feed.remove_consumer("visualizer")
+            self._capturing = False
+            self._toggle_btn.setLabel("start")
 
     def teardown(self) -> None:
         self._feed.remove_consumer("visualizer")

@@ -4,13 +4,14 @@ Covers the queue side (refills stay on the picked song's radio and read
 further down it, the anchor only moves when that radio runs dry, shuffle
 refills by what's left to hear rather than row position, stale answers
 are dropped, same-song duplicates and disliked tracks stay out), the
-YouTube side (paging by depth, fan uploads and podcasts filtered unless
-the seed is one), and the window's listen threshold for the opt-in play
-report.
+YouTube side (paging by depth, the Familiar / All tuner mix and its
+fallbacks, fan uploads and podcasts filtered unless the seed is one), and
+the window's listen threshold for the opt-in play report.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
 import sys
+import threading
 import unittest
 
 from PySide6.QtWidgets import QApplication
@@ -147,13 +148,25 @@ class QueueRadioTest(unittest.TestCase):
 
 
 class _FakeYT:
-    def __init__(self, items: list[dict]) -> None:
-        self.items = items
+    """``items`` answers every call; ``by_list`` answers per playlistId
+    (None = the plain RDAMVM radio), and an Exception value raises."""
+
+    def __init__(self, items: list[dict] | None = None,
+                 by_list: dict | None = None) -> None:
+        self.items = items or []
+        self.by_list = by_list
         self.calls: list[dict] = []
+        self._lock = threading.Lock()
 
     def get_watch_playlist(self, **kwargs):
-        self.calls.append(kwargs)
-        return {"tracks": list(self.items)}
+        with self._lock:
+            self.calls.append(kwargs)
+        if self.by_list is None:
+            return {"tracks": list(self.items)}
+        got = self.by_list.get(kwargs.get("playlistId"), [])
+        if isinstance(got, Exception):
+            raise got
+        return {"tracks": list(got)}
 
 
 def _item(vid: str, vtype: str = "MUSIC_VIDEO_TYPE_ATV") -> dict:
@@ -161,21 +174,77 @@ def _item(vid: str, vtype: str = "MUSIC_VIDEO_TYPE_ATV") -> dict:
             "videoType": vtype, "length": "3:00"}
 
 
+FAMILIAR = "RDATiYvseed"
+DISCOVER = "RDATiXvseed"
+
+
 class YTRadioTest(unittest.TestCase):
-    def _src(self, items):
+    def _src(self, items=None, by_list=None):
         from tide.sources.ytmusic import YTMusicSource
         src = YTMusicSource.__new__(YTMusicSource)
-        src.yt = _FakeYT(items)
+        src.yt = _FakeYT(items, by_list)
         return src
 
     def test_depth_reads_further_down(self) -> None:
         src = self._src([_item("seed")])
-        src.get_radio("seed", depth=0)
-        src.get_radio("seed", depth=2)
-        src.get_radio("seed", depth=40)
+        src.get_radio("seed", depth=0, mix="all")
+        src.get_radio("seed", depth=2, mix="all")
+        src.get_radio("seed", depth=40, mix="all")
         limits = [c["limit"] for c in src.yt.calls]
         self.assertEqual(limits, [50, 150, 250])
         self.assertTrue(all(c["radio"] for c in src.yt.calls))
+
+    def test_every_tuner_pages_by_depth(self) -> None:
+        src = self._src([_item("seed")])
+        src.get_radio("seed", depth=1)
+        got = sorted((c.get("playlistId") or "", c["limit"])
+                     for c in src.yt.calls)
+        self.assertEqual(got, [("", 100), (FAMILIAR, 100)])
+        self.assertTrue(all(c["videoId"] == "seed" and c["radio"]
+                            for c in src.yt.calls))
+
+    def test_balanced_alternates_familiar_and_all(self) -> None:
+        src = self._src(by_list={
+            FAMILIAR: [_item("seed"), _item("f1"), _item("both"),
+                       _item("f3")],
+            None: [_item("seed"), _item("a1"), _item("a2"), _item("both"),
+                   _item("a4"), _item("a5")],
+        })
+        got = [t.video_id for t in src.get_radio("seed")]
+        self.assertEqual(got, ["f1", "a1", "both", "a2", "f3", "a4", "a5"])
+
+    def test_one_tuner_mix_reads_only_that_tuner(self) -> None:
+        src = self._src(by_list={DISCOVER: [_item("d1")],
+                                 None: [_item("a1")]})
+        got = [t.video_id for t in src.get_radio("seed", mix="discover")]
+        self.assertEqual(got, ["d1"])
+        self.assertEqual([c.get("playlistId") for c in src.yt.calls],
+                         [DISCOVER])
+
+    def test_an_empty_tuner_falls_back_to_plain_radio(self) -> None:
+        src = self._src(by_list={FAMILIAR: [_item("seed"), _item("gone")],
+                                 None: [_item("a1")]})
+        got = [t.video_id for t in src.get_radio(
+            "seed", exclude={"gone"}, mix="familiar")]
+        self.assertEqual(got, ["a1"])
+
+    def test_a_failed_tuner_does_not_sink_the_refill(self) -> None:
+        src = self._src(by_list={FAMILIAR: RuntimeError("chip gone"),
+                                 None: [_item("a1"), _item("a2")]})
+        got = [t.video_id for t in src.get_radio("seed")]
+        self.assertEqual(got, ["a1", "a2"])
+
+    def test_every_tuner_failing_is_a_failed_refill(self) -> None:
+        src = self._src(by_list={FAMILIAR: RuntimeError("401"),
+                                 None: RuntimeError("401")})
+        with self.assertRaises(RuntimeError):
+            src.get_radio("seed")
+
+    def test_an_unknown_mix_reads_as_balanced(self) -> None:
+        src = self._src([_item("seed")])
+        src.get_radio("seed", mix="nonsense")
+        self.assertEqual(sorted(c.get("playlistId") or "" for c in src.yt.calls),
+                         ["", FAMILIAR])
 
     def test_fan_uploads_and_podcasts_are_dropped(self) -> None:
         src = self._src([
@@ -196,6 +265,28 @@ class YTRadioTest(unittest.TestCase):
         ])
         got = [t.video_id for t in src.get_radio("seed")]
         self.assertEqual(got, ["fan"])
+
+
+class RadioWorkerTest(unittest.TestCase):
+    def test_the_worker_hands_the_mix_to_the_source(self) -> None:
+        from tide.ui import window as window_module
+
+        class _Api:
+            def get_radio(self, video_id, exclude=None, depth=0,
+                          mix="balanced"):
+                self.args = (video_id, depth, mix)
+                return []
+
+        real = window_module.history_module.read_recent
+        window_module.history_module.read_recent = lambda n: []
+        try:
+            api = _Api()
+            worker = window_module._RadioWorker(api, "seed", [], 2, 7,
+                                                "discover")
+            worker.run()
+        finally:
+            window_module.history_module.read_recent = real
+        self.assertEqual(api.args, ("seed", 2, "discover"))
 
 
 class ReportThresholdTest(unittest.TestCase):

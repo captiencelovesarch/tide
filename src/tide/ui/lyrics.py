@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import api, qthreads, theming
-from . import motion as motion_module, scale as _scale
+from . import legibility, motion as motion_module, scale as _scale
 from .headings import Heading, line_heading as _line_heading
 
 
@@ -121,7 +121,7 @@ class _LyricsWorker(QObject):
             self.failed.emit(self.track.video_id, str(exc))
 
 
-class _LineLabel(QLabel):
+class _LineLabel(legibility.InkLabel):
     def __init__(self, text: str, parent: QWidget | None = None) -> None:
         super().__init__(text, parent)
         self.setWordWrap(True)
@@ -132,6 +132,12 @@ class _LineLabel(QLabel):
         # PlainText so lines always display literally. (The karaoke path
         # builds its own escaped rich text separately.)
         self.setTextFormat(Qt.PlainText)
+
+
+def _set_line_sheet(lbl: QLabel, sheet: str) -> None:
+    if getattr(lbl, "_line_sheet", None) != sheet:
+        lbl._line_sheet = sheet
+        lbl.setStyleSheet(sheet)
 
 
 class _KaraokeWidget(QWidget):
@@ -150,9 +156,10 @@ class _KaraokeWidget(QWidget):
         self._active_idx: int = -1
         self._current_secs: float = 0.0
 
-        self.prev_label = QLabel(" ")
-        self.current_label = QLabel(" ")
-        self.next_label = QLabel(" ")
+        # InkLabel: rich, selectable text paints past the style proxy.
+        self.prev_label = legibility.InkLabel(" ")
+        self.current_label = legibility.InkLabel(" ")
+        self.next_label = legibility.InkLabel(" ")
 
         for lbl in (self.prev_label, self.current_label, self.next_label):
             lbl.setWordWrap(True)
@@ -272,6 +279,9 @@ class _KaraokeWidget(QWidget):
 
         theme = self._theme
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
+        # The sung word's colour is baked into the markup, out of the
+        # palette's reach, so it reads the backdrop here.
+        accent = legibility.ink(self.current_label, QColor(accent)).name()
         parts: list[str] = []
         for i, w in enumerate(words):
             esc = html.escape(w)
@@ -313,6 +323,7 @@ class LyricsView(QWidget):
         self._timed_lines: list[tuple[float, str]] = []
         self._line_widgets: list[_LineLabel] = []
         self._active_line_index: int = -1
+        self._lines_behind: bool = False
         self._karaoke_mode: bool = False
         # Line-advance motion (glide scroll + accent fade-in). One of
         # each at most; stopped whenever the line list is rebuilt.
@@ -351,7 +362,7 @@ class LyricsView(QWidget):
         toggles_row.addStretch(1)
 
         # Container we swap between the plain QLabel and the timed line list.
-        self._plain_label = QLabel("── no track ──")
+        self._plain_label = legibility.InkLabel("── no track ──")
         self._plain_label.setWordWrap(True)
         self._plain_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self._plain_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
@@ -443,10 +454,23 @@ class LyricsView(QWidget):
         if idx == self._active_line_index:
             return
         self._active_line_index = idx
-        if not self._karaoke_mode:
-            self._restyle_lines()
-            self._animate_active_line()
-            self._glide_to_active()
+        if self._karaoke_mode:
+            return
+        self._restyle_lines()
+        if not self.isVisible():
+            # Nobody is looking: skip the colour fade (a stylesheet per
+            # frame) and the scroll glide; showEvent parks the list.
+            self._lines_behind = True
+            return
+        self._animate_active_line()
+        self._glide_to_active()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._lines_behind:
+            self._lines_behind = False
+            if not self._karaoke_mode and self._line_widgets:
+                self._glide_to_active()
 
     # ---------- async result handling ----------
 
@@ -530,7 +554,7 @@ class LyricsView(QWidget):
 
         def _apply(c: QColor, lbl=lbl, pt=pt) -> None:
             try:
-                lbl.setStyleSheet(
+                _set_line_sheet(lbl,
                     f"color: {c.name()}; background: transparent; "
                     f"font-weight: 700; font-size: {pt}pt; padding: 4px 0;"
                 )
@@ -587,19 +611,22 @@ class LyricsView(QWidget):
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
         active_pt = type_pt("active", self._font_scale)
         rest_pt = type_pt("line", self._font_scale)
+        # Only the lines whose sheet actually changes are touched: each
+        # setStyleSheet is a repolish, and a song has dozens of lines of
+        # which two change state per step.
         for i, lbl in enumerate(self._line_widgets):
             if i == self._active_line_index:
-                lbl.setStyleSheet(
+                _set_line_sheet(lbl,
                     f"color: {accent}; background: transparent; "
                     f"font-weight: 700; font-size: {active_pt}pt; padding: 4px 0;"
                 )
             elif i < self._active_line_index:
-                lbl.setStyleSheet(
+                _set_line_sheet(lbl,
                     f"color: {dim}; background: transparent; "
                     f"font-size: {rest_pt}pt; padding: 2px 0;"
                 )
             else:
-                lbl.setStyleSheet(
+                _set_line_sheet(lbl,
                     f"color: {fg}; background: transparent; "
                     f"font-size: {rest_pt}pt; padding: 2px 0;"
                 )

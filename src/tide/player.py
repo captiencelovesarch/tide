@@ -71,7 +71,10 @@ class Player(QObject):
         # within that window costs nothing; `demuxer_readahead_secs=10`
         # makes the demuxer pull aggressively rather than the default 1s
         # trickle; `demuxer_max_bytes` is bumped to 150MB so high-bitrate
-        # FLACs / long mixes don't churn the cache.
+        # FLACs / long mixes don't churn the cache. The back buffer (mpv
+        # keeps everything already played, 50MB by default) is capped
+        # low: a backward seek past it re-reads, which is rare and cheap
+        # next to holding a whole hour-long mix in memory.
         self._mpv = mpv.MPV(
             ytdl=False,
             video=False,
@@ -83,6 +86,7 @@ class Player(QObject):
             cache_secs="20",
             demuxer_readahead_secs="10",
             demuxer_max_bytes=str(150 * 1024 * 1024),
+            demuxer_max_back_bytes=str(12 * 1024 * 1024),
             audio_buffer="0.1",
             audio_client_name="tide",
         )

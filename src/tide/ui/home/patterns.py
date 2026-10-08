@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from ... import theming
-from .. import art_cache
+from .. import art_cache, legibility
 from ..card import Card, ShelfRow
 from ..flow import FlowLayout, ResponsiveGrid
 from ..widgets import BracketButton
@@ -159,25 +159,30 @@ class CompactTrackRow(QWidget):
         # Rank + trend prefix (charts).
         if self._rank:
             rank_w = fm.horizontalAdvance("00") + 6
-            p.setPen(dim)
-            p.drawText(QRect(0, 0, rank_w, self.height()),
-                       Qt.AlignVCenter | Qt.AlignRight, str(self._rank))
+            rank_rect = QRect(0, 0, rank_w, self.height())
+            rank = str(self._rank)
+            p.setPen(legibility.text_ink(
+                p, dim, rank_rect, Qt.AlignVCenter | Qt.AlignRight, rank))
+            p.drawText(rank_rect, Qt.AlignVCenter | Qt.AlignRight, rank)
             glyph, color = {
                 "up": ("↑", accent),
                 "down": ("↓", dim),
                 "new": ("•", accent),
             }.get(self._trend, ("—", dim))
-            p.setPen(color)
-            p.drawText(QRect(rank_w + 2, 0, 12, self.height()),
-                       Qt.AlignVCenter | Qt.AlignLeft, glyph)
+            trend_rect = QRect(rank_w + 2, 0, 12, self.height())
+            p.setPen(legibility.text_ink(
+                p, color, trend_rect, Qt.AlignVCenter | Qt.AlignLeft, glyph))
+            p.drawText(trend_rect, Qt.AlignVCenter | Qt.AlignLeft, glyph)
             x = rank_w + 16
 
         thumb_y = (self.height() - self._thumb_px) // 2
         thumb_rect = QRect(x, thumb_y, self._thumb_px, self._thumb_px)
-        img = art_cache.cache().get(self._thumb_url) if self._thumb_url else None
+        pix = art_cache.cache().scaled(
+            self._thumb_url, self._thumb_px, self._thumb_px,
+            self.devicePixelRatioF()) if self._thumb_url else None
         clip = QPainterPath()
         clip.addRoundedRect(QRectF(thumb_rect), radius, radius)
-        if img is None:
+        if pix is None:
             if modern:
                 p.setPen(Qt.NoPen)
                 p.setBrush(_qcolor(theme, "surface_1", "#0dffffff"))
@@ -190,9 +195,6 @@ class CompactTrackRow(QWidget):
                 p.setPen(dim)
                 p.drawRect(thumb_rect.adjusted(0, 0, -1, -1))
         else:
-            pix = QPixmap.fromImage(img).scaled(
-                self._thumb_px, self._thumb_px,
-                Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             if radius > 0:
                 p.setClipPath(clip)
                 p.drawPixmap(thumb_rect, pix)
@@ -230,12 +232,13 @@ class CompactTrackRow(QWidget):
                             Qt.ElideRight, text_w)
         line_h = fm.height()
         top = (self.height() - 2 * line_h) // 2
-        p.setPen(fg)
-        p.drawText(QRect(text_x, top, text_w, line_h),
-                   Qt.AlignVCenter | Qt.AlignLeft, title)
-        p.setPen(dim)
-        p.drawText(QRect(text_x, top + line_h, text_w, line_h),
-                   Qt.AlignVCenter | Qt.AlignLeft, sub)
+        flags = Qt.AlignVCenter | Qt.AlignLeft
+        title_rect = QRect(text_x, top, text_w, line_h)
+        sub_rect = QRect(text_x, top + line_h, text_w, line_h)
+        p.setPen(legibility.text_ink(p, fg, title_rect, flags, title))
+        p.drawText(title_rect, flags, title)
+        p.setPen(legibility.text_ink(p, dim, sub_rect, flags, sub))
+        p.drawText(sub_rect, flags, sub)
 
 
 # ---------- patterns ----------
@@ -466,17 +469,20 @@ class _WeekChart(QWidget):
             x = i * (bar + gap)
             h = max(_scale.px(2), round(chart_h * m / peak)) if m > 0 \
                 else _scale.px(2)
-            col = QColor(accent if i == 6 else dim)
+            bar_rect = QRectF(x, chart_h - h, bar, h)
+            col = legibility.ink(self, QColor(accent if i == 6 else dim),
+                                 bar_rect.toAlignedRect())
             if m <= 0:
                 col.setAlpha(90)
             p.setPen(Qt.NoPen)
             p.setBrush(col)
-            p.drawRoundedRect(QRectF(x, chart_h - h, bar, h), radius, radius)
-            p.setPen(fg if i == 6 else dim)
-            p.drawText(QRect(x - gap // 2, chart_h + _scale.px(4),
-                             bar + gap, label_h),
-                       Qt.AlignHCenter | Qt.AlignTop,
-                       theming.styled_case(self._days[i], theme))
+            p.drawRoundedRect(bar_rect, radius, radius)
+            day_rect = QRect(x - gap // 2, chart_h + _scale.px(4),
+                             bar + gap, label_h)
+            day = theming.styled_case(self._days[i], theme)
+            p.setPen(legibility.text_ink(p, fg if i == 6 else dim, day_rect,
+                                         Qt.AlignHCenter | Qt.AlignTop, day))
+            p.drawText(day_rect, Qt.AlignHCenter | Qt.AlignTop, day)
         p.end()
 
 
@@ -517,9 +523,11 @@ class _RepeatRow(QWidget):
         row.addWidget(self._art, alignment=Qt.AlignVCenter)
         row.addLayout(text)
         row.addStretch(1)
-        self._art_img = None
+        # The cover is re-read from art_cache on a theme change rather than
+        # held here: a full-size decode per tile adds up across a shelf.
+        self._art_src = track.thumbnail or ""
         self._set_texts()
-        url = track.thumbnail or ""
+        url = self._art_src
         if url:
             img = art_cache.cache().request(url, self._on_art)
             if img is not None:
@@ -539,7 +547,6 @@ class _RepeatRow(QWidget):
         if img is None or img.isNull():
             return
         try:
-            self._art_img = img
             size = self._art.width()
             pix = QPixmap.fromImage(img).scaled(
                 size, size, Qt.KeepAspectRatioByExpanding,
@@ -566,8 +573,9 @@ class _RepeatRow(QWidget):
         px = _scale.px(self.ART)
         self._art.setFixedSize(px, px)
         self._set_texts()
-        if self._art_img is not None:
-            self._on_art(self._art_img)
+        img = art_cache.cache().get(self._art_src) if self._art_src else None
+        if img is not None:
+            self._on_art(img)
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.LeftButton:
@@ -665,7 +673,7 @@ class Hero(QWidget):
         modern = getattr(self._theme, "aesthetic", "") == "modern"
         self._modern = modern
         self._greeting = greeting
-        self._art_img = None
+        self._art_url = ""
         self._texts: list[tuple[QLabel, str]] = []   # (label, raw) to re-case
 
         title = QLabel(theming.styled_case(greeting))
@@ -803,14 +811,14 @@ class Hero(QWidget):
         if art is not None:
             self._art_px = _scale.px(self.ART_MODERN if modern else self.ART)
             art.setFixedSize(self._art_px, self._art_px)
-            if self._art_img is not None:
-                self._set_art(self._art_img)
+            img = art_cache.cache().get(self._art_url) if self._art_url else None
+            if img is not None:
+                self._set_art(img)
         self.update()
 
     def _set_art(self, img) -> None:
         if self._art is None:
             return
-        self._art_img = img
         pix = QPixmap.fromImage(img).scaled(
             self._art_px, self._art_px,
             Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)

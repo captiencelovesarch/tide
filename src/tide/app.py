@@ -2,18 +2,42 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import locale
 import sys
 
 # mpv requires LC_NUMERIC=C; set it before anything else can touch locale.
 locale.setlocale(locale.LC_NUMERIC, "C")
 
+
+def _tune_malloc():
+    """glibc gives every thread that allocates its own malloc arena and
+    never hands a fragmented one back. tide runs ~30 threads (Qt's pool,
+    mpv, workers, capture), which left a couple hundred MB of mostly free
+    arena resident. Two arenas, set before any thread starts, plus a
+    periodic malloc_trim (see run) keep RSS near what is actually live.
+    Returns libc for the trim, or None off glibc (musl has no mallopt)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.mallopt(-8, 2)              # M_ARENA_MAX
+        libc.malloc_trim.argtypes = [ctypes.c_size_t]
+    except (OSError, AttributeError):
+        return None
+    return libc
+
+
+_LIBC = _tune_malloc()
+# How often freed heap pages are returned to the system.
+_TRIM_INTERVAL_MS = 90_000
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
 
 from . import audio_fx, auth, auth_spotify, cache, config, qthreads, session as session_module, settings as settings_module, theming, ui_sounds as ui_sounds_module
 from .api import Api
-from .discord_rpc import DiscordPresence
+from .discord_rpc import DiscordPresence, presence_options
 from .mpris import MprisService
 from .playback import MpvBackend, PlaybackRouter
 from .playback.librespot_backend import LibrespotBackend
@@ -363,6 +387,11 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     app = QApplication.instance() or QApplication(sys.argv)
+    if _LIBC is not None:
+        trim = QTimer(app)
+        trim.setInterval(_TRIM_INTERVAL_MS)
+        trim.timeout.connect(lambda: _LIBC.malloc_trim(0))
+        trim.start()
     # Pin the widget style: tide is styled entirely by theme QSS, and the
     # platform style underneath is not inert — KDE's Breeze plugin makes
     # QObject::connect calls during every full-app repolish, which deadlocks
@@ -370,7 +399,10 @@ def run(argv: list[str] | None = None) -> int:
     # neutral built-in, and it renders the themes identically on every desktop.
     fusion = QStyleFactory.create("Fusion")
     if fusion is not None:
-        app.setStyle(fusion)
+        # Behind a thin proxy whose only job is to let plain-text labels
+        # read the backdrop behind them (ui/legibility.py).
+        from .ui import legibility
+        legibility.install(app, fusion)
     app.setApplicationName("tide")
     app.setOrganizationName("tide")
     # Wayland matches a window to its icon by this name, and the flatpak
@@ -608,19 +640,14 @@ def run(argv: list[str] | None = None) -> int:
     if QSystemTrayIcon.isSystemTrayAvailable():
         from .ui.tray import TideTray
         window._tray = TideTray(window, player, window.queue, parent=window)
+        window.apply_tray_icon()
     else:
         window._tray = None
 
     # Discord rich presence — opt-in, configured via settings dialog.
     discord = DiscordPresence(player, window.queue)
     discord.start_wire()
-    discord.set_options(
-        details_template=user_settings.discord_details_template,
-        state_template=user_settings.discord_state_template,
-        show_paused=user_settings.discord_show_paused,
-        show_progress=user_settings.discord_show_progress,
-        activity_type=user_settings.discord_activity_type,
-    )
+    discord.set_options(**presence_options(user_settings))
     discord.configure(user_settings.discord_app_id, user_settings.discord_enabled)
 
     # Live-lyric feed for the presence state line. Headless (not the lyrics
@@ -629,7 +656,7 @@ def run(argv: list[str] | None = None) -> int:
     from .lyric_tracker import LyricTracker
     lyric_tracker = LyricTracker(api_obj, player, window.queue)
     lyric_tracker.start_wire()
-    lyric_tracker.lyric_changed.connect(discord.set_lyric)
+    lyric_tracker.timeline_changed.connect(discord.set_lyric_timeline)
     lyric_tracker.set_enabled(
         user_settings.discord_enabled and user_settings.discord_lyrics_enabled
     )
@@ -695,17 +722,28 @@ def run(argv: list[str] | None = None) -> int:
     # raises the "session expired → [sign in]" toast within seconds of
     # launch. Network blips raise non-auth errors and are ignored — never
     # sign anyone out over a dead wifi link.
+    #
+    # Before probing, freshen the session if it's due (tide was closed past
+    # a rotation): the stale pair would fail the probe for nothing. Then the
+    # keeper takes over rotation for as long as tide runs.
+    from . import yt_session
     if yt is not None and reg.is_enabled("ytmusic"):
         from PySide6.QtCore import QRunnable, QThreadPool
 
         class _YtAuthProbe(QRunnable):
             def run(self_inner) -> None:
                 try:
+                    yt_session.rotate()
+                except Exception:
+                    pass
+                try:
                     yt_source.probe_auth()
                 except Exception:
                     pass
 
         QThreadPool.globalInstance().start(_YtAuthProbe())
+    yt_session.start_keeper()
+    app.aboutToQuit.connect(yt_session.stop_keeper)
 
     # Once-a-day update check.
     from PySide6.QtGui import QDesktopServices

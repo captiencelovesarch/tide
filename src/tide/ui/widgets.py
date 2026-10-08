@@ -16,7 +16,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QLabel, QPushButton, QSizePolicy, QWidget
 
 from .. import theming
-from . import marquee
+from . import legibility, marquee
 from .marquee import Marquee
 
 
@@ -119,6 +119,11 @@ class BracketButton(QPushButton):
         self._prefer_text = False
         # Collapsed rail: icon only, label in the tooltip.
         self._label_hidden = False
+        # The SVG in the icon slot as (svg, theme ink, px), and the ink it
+        # is actually drawn in right now: legibility can move the latter
+        # when the backdrop behind the button would swallow the icon.
+        self._icon_spec: tuple[str, str, int] | None = None
+        self._icon_shown: str = ""
         self.setFlat(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
@@ -247,6 +252,7 @@ class BracketButton(QPushButton):
         if glyph is not None:
             self._svg_text = None
             super().setIcon(QIcon())
+            self._icon_spec = None
         self._update_text()
 
     def setSvgIcon(self, svg_text: str | None) -> None:
@@ -258,6 +264,7 @@ class BracketButton(QPushButton):
             self._icon = None
         else:
             super().setIcon(QIcon())
+            self._icon_spec = None
         self._update_text()
 
     def _modern(self) -> bool:
@@ -338,6 +345,11 @@ class BracketButton(QPushButton):
                 px = _scale.px(16)
             except Exception:
                 px = 16
+        self._icon_spec = (svg_text, ink, px)
+        self._set_svg_pixmaps(svg_text, ink, px)
+        self.setIconSize(QSize(px, px))
+
+    def _set_svg_pixmaps(self, svg_text: str, ink: str, px: int) -> None:
         pix = self._render_svg(svg_text, ink, px)
         if pix is None:
             return
@@ -347,7 +359,43 @@ class BracketButton(QPushButton):
             if dim is not None:
                 icon.addPixmap(dim, QIcon.Disabled)
         super().setIcon(icon)
-        self.setIconSize(QSize(px, px))
+        self._icon_shown = ink
+
+    def _sync_icon_ink(self) -> None:
+        """Redraw the SVG in an ink that reads on the backdrop behind the
+        button, or back in the theme's ink once it reads again. Runs from
+        paintEvent; the swap repaints once more and then settles."""
+        spec = self._icon_spec
+        if spec is None or not self._svg_live():
+            return
+        svg_text, base, px = spec
+        want = base
+        # modern's hover and press faces are translucent; brutalist fills
+        # them, so the icon goes back to the ink drawn for the fill.
+        on_fill = self._primary or (
+            not self._modern() and (self.isDown() or self.underMouse()))
+        if not on_fill and legibility.active():
+            r = self.rect()
+            if self.text():
+                # Icon then label: probe the leading square.
+                r = QRect(r.left(), r.top(), min(r.width(), r.height()), r.height())
+            want = legibility.ink(self, QColor(base), r).name()
+        shown = self._icon_shown
+        if want == shown:
+            return
+        if want != base and shown != base and legibility.near(
+                QColor(want), QColor(shown), 4):
+            # Both moved: skip re-rendering for drift the eye can't see.
+            return
+        self._set_svg_pixmaps(svg_text, want, px)
+
+    def _svg_live(self) -> bool:
+        """Whether the native icon slot currently holds the spec'd SVG."""
+        return bool(self._svg_text) or self._modern_icon
+
+    def paintEvent(self, event) -> None:
+        self._sync_icon_ink()
+        super().paintEvent(event)
 
     def _apply_theme(self, theme) -> None:
         self._theme = theme
@@ -368,6 +416,7 @@ class BracketButton(QPushButton):
             # Back from modern: drop the icon it put here (an explicit nav
             # SVG survives — re-rendered just below) and its tooltip.
             super().setIcon(QIcon())
+            self._icon_spec = None
             self._modern_icon = False
             if self._auto_tooltip:
                 self.setToolTip("")
@@ -490,6 +539,7 @@ class BracketButton(QPushButton):
             self._modern_icon = not self._svg_text
         else:
             super().setIcon(QIcon())
+            self._icon_spec = None
             self._modern_icon = False
 
         if text_hidden and self._label_hidden and self._icon and svg is None:
@@ -565,8 +615,17 @@ class MonoProgress(QWidget):
         self.update()
 
     def setPosition(self, seconds: float) -> None:
+        # Position ticks arrive many times a second; repaint only when the
+        # filled cell count moves.
+        before = self._painted()
         self._position = max(0.0, min(seconds, self._duration or seconds))
-        self.update()
+        if self._painted() != before:
+            self.update()
+
+    def _painted(self) -> int:
+        if self._duration <= 0:
+            return -1
+        return max(0, min(self.CELLS, round(self._position / self._duration * self.CELLS)))
 
     def reset(self) -> None:
         self._position = 0.0
@@ -592,9 +651,10 @@ class MonoProgress(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing, True)
         theme = self._theme
-        fg = _color(theme, "fg", "#e6e6e6")
-        dim = _color(theme, "dim", "#6f6f6f")
-        accent = _color(theme, "accent", "#d4b95e")
+        # One text bar: its inks read the patch behind the whole widget.
+        fg, dim, accent = (legibility.ink(self, _color(theme, k, d))
+                           for k, d in (("fg", "#e6e6e6"), ("dim", "#6f6f6f"),
+                                        ("accent", "#d4b95e")))
 
         p.setFont(self.font())
         rect = self.rect()
@@ -715,9 +775,9 @@ class MonoVolume(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing, True)
         theme = self._theme
-        fg = _color(theme, "fg", "#e6e6e6")
-        dim = _color(theme, "dim", "#6f6f6f")
-        accent = _color(theme, "accent", "#d4b95e")
+        fg, dim, accent = (legibility.ink(self, _color(theme, k, d))
+                           for k, d in (("fg", "#e6e6e6"), ("dim", "#6f6f6f"),
+                                        ("accent", "#d4b95e")))
         p.setFont(self.font())
         rect = self.rect()
         fm = QFontMetrics(self.font())
@@ -989,6 +1049,7 @@ class NowPlayingLabel(QWidget):
                     scroll: bool = False) -> None:
         """Draw one line, through its transition when one is running."""
         self._painted[field] = text
+        color = legibility.text_ink(p, color, rect, flags, text)
         reveal = self._reveal.get(field)
         if reveal is not None and reveal.active():
             accent = _color(self._theme, "accent", "#d4b95e")
@@ -1161,8 +1222,9 @@ class NowPlayingLabel(QWidget):
         fm = QFontMetrics(self.font())
 
         if not self._title and not self._status:
-            p.setPen(dim)
-            p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, theming.styled_case("nothing playing", self._theme))
+            idle = theming.styled_case("nothing playing", self._theme)
+            p.setPen(legibility.text_ink(p, dim, rect, Qt.AlignVCenter | Qt.AlignLeft, idle))
+            p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, idle)
             return
 
         line1_rect = QRect(rect.x(), rect.y(), rect.width(), fm.height())

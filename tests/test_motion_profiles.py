@@ -666,7 +666,12 @@ class LyricsGatingTest(_MotionState):
         view = LyricsView(mock.Mock())
         try:
             view._show_timed([(0.0, "line one"), (4.0, "line two")])
+            # hidden, a line advance restyles but doesn't animate
             view.update_position(0.5)
+            self.assertNotIn("color/lyric_active",
+                             getattr(view, "_motion_anims", {}))
+            view.show()
+            view.update_position(4.5)
             table = getattr(view, "_motion_anims", {})
             self.assertIn("color/lyric_active", table)
             anim = table["color/lyric_active"]

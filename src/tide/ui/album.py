@@ -331,6 +331,7 @@ class AlbumView(QWidget):
         if not tr:
             return
         menu = QMenu(self.tracks)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
         a_play = QAction("play now", menu)
         a_next = QAction("play next", menu)
         a_add = QAction("add to queue", menu)

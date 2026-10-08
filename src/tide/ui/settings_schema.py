@@ -351,8 +351,20 @@ REGISTRY: tuple[OptionDesc, ...] = (
             ("classic", "classic · the launcher's icon"),
         ),
         live="apply_app_icon_setting",
-        tooltip="the window and tray icon. the launcher keeps the classic "
-                "one, it's read before tide starts.",
+        tooltip="the window icon, and the tray's when tray icon is set to "
+                "the app icon. the launcher keeps the classic one, it's "
+                "read before tide starts.",
+    ),
+    OptionDesc(
+        key="tray_icon", label="tray icon", kind="choice",
+        tab="appearance", section="chrome",
+        choices=(
+            ("mono", "one colour, like the rest of the tray"),
+            ("app", "the app icon"),
+        ),
+        live="apply_app_icon_setting",
+        tooltip="one colour is white on a dark panel and black on a light "
+                "one, going by your system's light or dark setting.",
     ),
     OptionDesc(
         key="csd_titlebar",
@@ -420,9 +432,9 @@ REGISTRY: tuple[OptionDesc, ...] = (
         key="adaptive_text_contrast", label="keep text readable over the backdrop",
         kind="bool", tab="appearance", section="backdrop",
         per_preset=True, live="apply_text_contrast_setting",
-        tooltip="nudges text and dim text until they clear a contrast "
-                "floor against whatever sits behind them. a colour you "
-                "picked yourself in the theme editor is left alone.",
+        tooltip="each line of text checks the backdrop right behind it "
+                "and shifts lighter or darker where it would be hard to "
+                "read. text that already reads keeps the theme's colour.",
     ),
     # ---- appearance · motion & sound ----
     OptionDesc(
@@ -476,6 +488,19 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices=((0, "off"), (2, "top 2"), (3, "top 3"), (5, "top 5")),
         tooltip="how many top search hits to resolve in the background. "
                 "read per-search — no restart needed.",
+    ),
+    # ---- playback · radio ----
+    OptionDesc(
+        key="radio_mix", label="radio mix", kind="choice",
+        tab="playback", section="radio",
+        choices=(
+            ("balanced", "balanced · songs you know + new finds"),
+            ("familiar", "familiar · mostly songs you know"),
+            ("discover", "discover · mostly new to you"),
+            ("all", "all · youtube's plain radio"),
+        ),
+        tooltip="youtube music only. a radio that's already playing "
+                "switches on its next refill.",
     ),
     # ---- playback · speed ----
     OptionDesc(
@@ -543,7 +568,8 @@ REGISTRY: tuple[OptionDesc, ...] = (
         kind="bool", tab="integrations", section="discord rich presence",
         live="apply_discord_setting",
         tooltip="the current synced line replaces artist · album on your "
-                "profile. everyone can see it, and lyrics can be "
+                "profile. fast lines show two at a time so none get "
+                "skipped. everyone can see it, and lyrics can be "
                 "explicit.",
     ),
     OptionDesc(
@@ -567,6 +593,37 @@ REGISTRY: tuple[OptionDesc, ...] = (
             ("watching", "watching …"),
         ),
         live="apply_discord_setting",
+    ),
+    OptionDesc(
+        key="discord_status_display", label="member list shows", kind="choice",
+        tab="integrations", section="discord rich presence",
+        choices=(
+            ("song", "the song"),
+            ("app", "the app name"),
+        ),
+        live="apply_discord_setting",
+        tooltip="what people see next to your name in a server: "
+                "\"listening to <song>\" or \"listening to <your app's name>\".",
+    ),
+    OptionDesc(
+        key="discord_links", label="link the song and add a listen button",
+        kind="bool", tab="integrations", section="discord rich presence",
+        live="apply_discord_setting",
+        tooltip="title, artist and cover open the track on its service. "
+                "the button shows for everyone else, not on your own "
+                "profile. local files never get links.",
+    ),
+    OptionDesc(
+        key="discord_hide_local", label="don't share local files",
+        kind="bool", tab="integrations", section="discord rich presence",
+        live="apply_discord_setting",
+    ),
+    OptionDesc(
+        key="discord_hidden", label="hide from discord for now",
+        kind="bool", tab="integrations", section="discord rich presence",
+        live="apply_discord_setting",
+        tooltip="clears your presence until you switch it back. the tray "
+                "menu has the same switch.",
     ),
     OptionDesc(
         key="discord_details_template", label="line 1", kind="str",

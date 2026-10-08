@@ -9,7 +9,7 @@ through the tray menu (or File menu equivalent) actually exits the app.
 from __future__ import annotations
 
 from PySide6.QtCore import QObject, Qt
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QAction, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 
@@ -33,6 +33,10 @@ class TideTray(QObject):
         from ..player import PlayState
         queue.current_changed.connect(self._on_current_changed)
         player.state_changed.connect(self._on_state_changed)
+        # The one-colour icon is white or dark by the system's light/dark
+        # setting; redraw it when that flips.
+        QGuiApplication.styleHints().colorSchemeChanged.connect(
+            self._on_color_scheme)
 
     # ---------- icon ----------
 
@@ -46,6 +50,11 @@ class TideTray(QObject):
 
     def set_icon(self, icon: QIcon) -> None:
         self._tray.setIcon(icon)
+
+    def _on_color_scheme(self, _scheme=None) -> None:
+        apply = getattr(self.window, "apply_tray_icon", None)
+        if apply is not None:
+            apply()
 
     # ---------- menu ----------
 
@@ -70,10 +79,33 @@ class TideTray(QObject):
         self.show_action.triggered.connect(self._toggle_window)
         self._menu.addAction(self.show_action)
 
+        # Only there while discord presence is on (see sync_discord).
+        self.discord_action = QAction("hide from discord", self._menu)
+        self.discord_action.setCheckable(True)
+        self.discord_action.toggled.connect(self._on_discord_toggled)
+        self._menu.addAction(self.discord_action)
+        self.sync_discord()
+
         self._menu.addSeparator()
         quit_action = QAction("quit tide", self._menu)
         quit_action.triggered.connect(self._real_quit)
         self._menu.addAction(quit_action)
+
+    def sync_discord(self) -> None:
+        """Match the "hide from discord" item to the saved settings."""
+        s = getattr(self.window, "_settings", None)
+        on = bool(s is not None and s.discord_enabled)
+        self.discord_action.setVisible(on)
+        hidden = bool(s is not None and s.discord_hidden)
+        if self.discord_action.isChecked() != hidden:
+            self.discord_action.blockSignals(True)
+            self.discord_action.setChecked(hidden)
+            self.discord_action.blockSignals(False)
+
+    def _on_discord_toggled(self, hidden: bool) -> None:
+        setter = getattr(self.window, "set_discord_hidden", None)
+        if setter is not None:
+            setter(hidden)
 
     # ---------- activation ----------
 

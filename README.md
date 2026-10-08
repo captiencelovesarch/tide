@@ -83,7 +83,7 @@ the fx rack (`Ctrl+8`) has a 10-band EQ, a real reverb (room, hall, plate, cathe
 
 adaptive accent and the living backdrop are modern's defaults and opt-in anywhere: the theme accent drifts toward the current cover's dominant color and the whole window (titlebar included) glows with it, swelling on bass. the bass pulse learns each track: the first listen is live detection, and tide records what the detector heard. from the next play on, the recording is replayed against the player clock, so the pulse lands on the beat instead of a frame after it. the live detector stays underneath — it covers whatever the recording doesn't, and takes back over if the audio stops matching what was recorded.
 
-system stuff: MPRIS2 so media keys and the KDE/GNOME panel work, tray with hide-on-close, optional discord rich presence with a live-lyric mode, optional listenbrainz scrobbling, and a daily update check against github releases.
+system stuff: MPRIS2 so media keys and the KDE/GNOME panel work, tray with hide-on-close, optional discord rich presence (your server's member list shows the song, links back to it, a live-lyric mode, a tray switch to hide it), optional listenbrainz scrobbling, and a daily update check against github releases.
 
 <img src="assets/screenshots/lyrics-synced.png" alt="synced lyrics" width="780" />
 
@@ -121,7 +121,7 @@ the manifest lives in [`flatpak/`](flatpak/) with notes on building it yourself.
 
 running from a checkout on anything else: it is plain python + PySide6 + mpv, so `PYTHONPATH=src python -m tide` after installing the deps from the tech list below will probably run. the visualizer wants `parec` from pipewire-pulse. no promises.
 
-signing in: google blocks OAuth for the youtube music endpoints, so cookies are the only path that works. tide reads them out of your own browser (chromium, chrome, brave, vivaldi, edge, opera, whale or firefox, flatpak and snap installs included) through yt-dlp's cookie loader, with your wallet key. when the session dies, and it will die whenever google feels like it, tide notices, says so, and offers a one-click refresh that re-imports from your still-signed-in browser. sessions imported before v1.2.7 just re-import once.
+signing in: google blocks OAuth for the youtube music endpoints, so cookies are the only path that works. tide reads them out of your own browser (chromium, chrome, brave, vivaldi, edge, opera, whale or firefox, flatpak and snap installs included) through yt-dlp's cookie loader, with your wallet key. after that tide keeps the session going on its own: it saves the cookies youtube sends back and refreshes the short-lived ones every ten minutes (a call to accounts.youtube.com, the same one your browser makes), so it doesn't go stale while tide is open. if google does end the session, tide notices, says so, and offers a one-click refresh that re-imports from your still-signed-in browser. sessions imported before v1.2.7 just re-import once.
 
 ## keys
 
@@ -151,6 +151,7 @@ right-click a track row for play now / play next / add to queue / start radio.
 |---|---|
 | `~/.config/tide/settings.toml` | all settings. written by the app, not by you |
 | `~/.config/tide/browser.json` | imported cookies, 0600 |
+| `~/.config/tide/yt_cookies.txt` | the live youtube music session, 0600 |
 | `~/.config/tide/themes/`, `layouts/` | your own themes and layouts — the theme editor saves here too |
 | `~/.cache/tide/` | stream urls, art, lyrics, history, session |
 

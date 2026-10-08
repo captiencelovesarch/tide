@@ -37,6 +37,15 @@ class Settings:
     discord_show_progress: bool = True
     # Presence verb: "listening" | "playing" | "watching".
     discord_activity_type: str = "listening"
+    # What the member list shows after the verb: "song" (line 1) | "app".
+    discord_status_display: str = "song"
+    # Link title / artist / cover to the track's page, with a listen button.
+    discord_links: bool = True
+    # The tray's "hide from discord" switch. Kept across restarts, so a
+    # hidden presence doesn't come back on its own.
+    discord_hidden: bool = False
+    # Never share a local file.
+    discord_hide_local: bool = False
     volume: int = 80
     sleep_preset_minutes: int = 30
     mini_mode_default: bool = False
@@ -125,6 +134,10 @@ class Settings:
     # Window + tray icon: "theme" draws it in the active theme's colours
     # (see ui/app_icon.py), "classic" keeps the launcher's night-blue one.
     app_icon: str = "theme"
+    # Tray icon: "mono" is a one-colour glyph (white on a dark panel, dark
+    # on a light one, from the system's light/dark setting), "app" is the
+    # window icon.
+    tray_icon: str = "mono"
     # Font-family override. Empty = use the active theme's typography.family.
     # When set, the theming manager pushes this family on every theme apply.
     font_family_override: str = ""
@@ -190,6 +203,11 @@ class Settings:
     # how many top search results to warm in the background (0 = off).
     prefetch_hover: bool = True
     prefetch_warm_results: int = 3
+    # What radio refills read (sources.ytmusic._RADIO_MIXES):
+    # "balanced" alternates YouTube's Familiar and All tuners, "familiar"
+    # / "discover" read one tuner, "all" is the plain radio tide used to
+    # play. Read at refill time.
+    radio_mix: str = "balanced"
     # v1.5 — report plays back to the active source's own history (YouTube
     # Music: the same videostats ping the web player sends), so the
     # account's recommendations learn from what plays in tide. Privacy

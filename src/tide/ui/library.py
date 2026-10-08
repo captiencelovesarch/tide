@@ -442,6 +442,7 @@ class LibraryView(QWidget):
         if not tr:
             return
         menu = QMenu(self.songs_list)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
         a_play = QAction("play now", menu)
         a_next = QAction("play next", menu)
         a_add = QAction("add to queue", menu)
@@ -604,6 +605,7 @@ class LibraryView(QWidget):
         if not tr:
             return
         menu = QMenu(self.tracks_list)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
         a_play = QAction("play now", menu)
         a_next = QAction("play next", menu)
         a_add  = QAction("add to queue", menu)

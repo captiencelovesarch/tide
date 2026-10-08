@@ -25,7 +25,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
@@ -33,6 +33,12 @@ from .. import config
 
 
 MEM_LRU_LIMIT = 256
+# The LRU above holds decoded covers at source size (544 px from YT, 640
+# from Spotify: over a megabyte each), so it is also capped by bytes. Rows
+# and cards never read these directly; they go through ``scaled``, whose
+# display-size pixmaps get a budget of their own.
+MEM_BYTES_LIMIT = 48 * 1024 * 1024
+PIX_BYTES_LIMIT = 24 * 1024 * 1024
 
 # Thumbnail URLs come straight from third-party server JSON (Subsonic
 # coverArt, Bandcamp/SoundCloud/YT thumbnails), so a malicious or MITM'd
@@ -79,6 +85,10 @@ class _ArtCache(QObject):
         self._net = QNetworkAccessManager(self)
         # url -> QImage
         self._mem: "OrderedDict[str, QImage]" = OrderedDict()
+        self._mem_bytes = 0
+        # (url, w, h, dpr%) -> display-size pixmap, see scaled()
+        self._pix: "OrderedDict[tuple, QPixmap]" = OrderedDict()
+        self._pix_bytes = 0
         # url -> list of one-shot callbacks queued before the image arrives
         self._waiting: dict[str, list[Callable[[QImage | None], None]]] = {}
         # currently in-flight QNetworkReplies, keyed by url (for dedup)
@@ -95,6 +105,38 @@ class _ArtCache(QObject):
             self._touch(url)
             return img
         return self._maybe_load_disk(url)
+
+    def scaled(self, url: str, w: int, h: int, dpr: float = 1.0) -> QPixmap | None:
+        """``url``'s art as ``QPixmap.scaled(w, h, KeepAspectRatioByExpanding,
+        SmoothTransformation)`` at device pixel ratio ``dpr``, or None when
+        it isn't cached yet. Painters call this every frame, so the scaled
+        result is kept: scaling a full cover per paint was most of what a
+        repaint of a list cost. A cover only on disk is decoded for this one
+        size and not put in the full-size LRU."""
+        if not url or w <= 0 or h <= 0:
+            return None
+        key = (url, w, h, int(round(dpr * 100)))
+        pix = self._pix.get(key)
+        if pix is not None:
+            self._pix.move_to_end(key)
+            return pix
+        img = self._mem.get(url)
+        if img is not None:
+            self._touch(url)
+        else:
+            img = self._read_disk(url)
+            if img is None:
+                return None
+        pix = QPixmap.fromImage(img).scaled(
+            max(1, round(w * dpr)), max(1, round(h * dpr)),
+            Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        pix.setDevicePixelRatio(dpr)
+        self._pix[key] = pix
+        self._pix_bytes += _pix_bytes(pix)
+        while self._pix_bytes > PIX_BYTES_LIMIT and len(self._pix) > 1:
+            _, old = self._pix.popitem(last=False)
+            self._pix_bytes -= _pix_bytes(old)
+        return pix
 
     def request(self, url: str, callback: Callable[[QImage | None], None] | None = None) -> QImage | None:
         """Get-or-fetch. Returns image immediately if cached, else None and
@@ -130,12 +172,17 @@ class _ArtCache(QObject):
             pass
 
     def _store(self, url: str, img: QImage) -> None:
+        old = self._mem.pop(url, None)
+        if old is not None:
+            self._mem_bytes -= old.sizeInBytes()
         self._mem[url] = img
-        self._touch(url)
-        while len(self._mem) > MEM_LRU_LIMIT:
-            self._mem.popitem(last=False)
+        self._mem_bytes += img.sizeInBytes()
+        while len(self._mem) > 1 and (len(self._mem) > MEM_LRU_LIMIT
+                                      or self._mem_bytes > MEM_BYTES_LIMIT):
+            _, gone = self._mem.popitem(last=False)
+            self._mem_bytes -= gone.sizeInBytes()
 
-    def _maybe_load_disk(self, url: str) -> QImage | None:
+    def _read_disk(self, url: str) -> QImage | None:
         path = _disk_path(url)
         if not path.is_file():
             return None
@@ -144,7 +191,11 @@ class _ArtCache(QObject):
         except OSError:
             return None
         img = QImage()
-        if not img.loadFromData(data):
+        return img if img.loadFromData(data) else None
+
+    def _maybe_load_disk(self, url: str) -> QImage | None:
+        img = self._read_disk(url)
+        if img is None:
             return None
         self._store(url, img)
         return img
@@ -230,6 +281,10 @@ class _ArtCache(QObject):
                 cb(img)
             except Exception:
                 pass
+
+
+def _pix_bytes(pix: QPixmap) -> int:
+    return pix.width() * pix.height() * 4
 
 
 _instance: _ArtCache | None = None

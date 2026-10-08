@@ -10,17 +10,20 @@ that matches it. ``CLASSIC`` is the hand-tuned palette the launcher icon
 (assets/icon*.png, assets/icon.svg) is rendered from; after changing the
 drawing, re-render those with tools/render_icons.py.
 
-The window and tray icon follow the active theme when the
-``app_icon`` setting says so. The launcher's icon is the installed one
-and stays classic: it's read by the desktop before tide runs.
+The window icon follows the active theme when the ``app_icon`` setting
+says so. The launcher's icon is the installed one and stays classic: it's
+read by the desktop before tide runs. The tray has a cut of its own (see
+``tray_icon``): one flat colour, like every other icon in a panel tray.
 
 Qt's SVG renderer (the one KDE draws icons with too) ignores clipPath
 and masks, so every shape here stays inside the tile on its own.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPixmap
+from PySide6.QtCore import QByteArray, QRectF, Qt
+from PySide6.QtGui import (
+    QColor, QGuiApplication, QIcon, QImage, QPainter, QPainterPath, QPixmap,
+)
 
 ICON_SIZES = (16, 22, 24, 32, 48, 64, 128, 256)
 
@@ -222,4 +225,80 @@ def icon_for(theme) -> QIcon:
     icon = QIcon()
     for size in ICON_SIZES:
         icon.addPixmap(QPixmap.fromImage(render(svg, size)))
+    return icon
+
+
+# ---------- the tray cut ----------
+#
+# Panel trays are one flat colour: white on a dark panel, near-black on a
+# light one. The full-colour tile stood out in a row of them, so the tray
+# gets the same moon over its reflection as a flat glyph. It's drawn per
+# size straight onto the pixel grid instead of from SVG: at 16-22 px the
+# reflection bars of a scaled drawing land between pixels and smear.
+
+TRAY_SIZES = (16, 22, 24, 32, 44, 48, 64)
+
+# Breeze's text colours, which is what the panel's own icons are drawn in.
+TRAY_INK_ON_DARK = "#fcfcfc"
+TRAY_INK_ON_LIGHT = "#232629"
+
+# Reflection bar widths as a share of the icon, top bar first.
+_TRAY_BARS = (0.86, 0.58, 0.30)
+
+
+def tray_ink(scheme=None) -> str:
+    """The glyph's colour for the system's light or dark setting. Unknown
+    (no platform theme says) counts as dark: most panels are."""
+    if scheme is None:
+        scheme = QGuiApplication.styleHints().colorScheme()
+    return TRAY_INK_ON_LIGHT if scheme == Qt.ColorScheme.Light else TRAY_INK_ON_DARK
+
+
+def tray_image(size: int, ink: str) -> QImage:
+    """The tray glyph at ``size`` px: a crescent over three bars, each
+    bar a whole number of pixels tall and centred on the grid."""
+    S = int(size)
+    img = QImage(S, S, QImage.Format_ARGB32_Premultiplied)
+    img.fill(Qt.transparent)
+    col = QColor(ink)
+    p = QPainter(img)
+    try:
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        bar_h = max(1, round(S / 11))
+        bar_gap = max(1, round(S / 16)) if S >= 20 else 1
+        margin = max(0, round(S / 24))
+        bars_top = S - margin - (3 * bar_h + 2 * bar_gap)
+        y = bars_top
+        for share in _TRAY_BARS:
+            w = max(2, round(S * share))
+            if (S - w) % 2:
+                w -= 1                      # whole pixels either side
+            r = bar_h / 2 if bar_h >= 2 else 0.0
+            p.drawRoundedRect(QRectF((S - w) / 2, y, w, bar_h), r, r)
+            y += bar_h + bar_gap
+        # The moon fills what's left above, the same crescent as the tile:
+        # a circle with one 0.865 its size cut out up and to the right.
+        gap = max(1, round(S / 16))
+        d = min(bars_top - gap - margin, S * 0.6)
+        r = d / 2
+        cx, cy = S / 2 - r * 0.05, bars_top - gap - r
+        moon = QPainterPath()
+        moon.addEllipse(QRectF(cx - r, cy - r, d, d))
+        ri = r * 0.865
+        bite = QPainterPath()
+        bite.addEllipse(QRectF(cx + r * 0.486 - ri, cy - r * 0.378 - ri,
+                               2 * ri, 2 * ri))
+        p.drawPath(moon.subtracted(bite))
+    finally:
+        p.end()
+    return img
+
+
+def tray_icon(ink: str | None = None) -> QIcon:
+    ink = ink or tray_ink()
+    icon = QIcon()
+    for size in TRAY_SIZES:
+        icon.addPixmap(QPixmap.fromImage(tray_image(size, ink)))
     return icon

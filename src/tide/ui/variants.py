@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import glyphs, theming
+from . import legibility
 from . import marquee
 from . import scale
 from .spring_slider import SpringSlider
@@ -101,8 +102,17 @@ class BarProgress(QWidget):
         self.update()
 
     def setPosition(self, seconds: float) -> None:
+        # Position ticks arrive many times a second; repaint only when the
+        # fill's end pixel moves.
+        before = self._painted()
         self._position = max(0.0, min(seconds, self._duration or seconds))
-        self.update()
+        if self._painted() != before:
+            self.update()
+
+    def _painted(self) -> int:
+        if self._duration <= 0:
+            return -1
+        return int(self._position / self._duration * self.width())
 
     def reset(self) -> None:
         self._position = 0.0
@@ -162,8 +172,17 @@ class ThinProgress(QWidget):
         self.update()
 
     def setPosition(self, seconds: float) -> None:
+        # Position ticks arrive many times a second; repaint only when the
+        # handle's pixel moves.
+        before = self._painted()
         self._position = max(0.0, min(seconds, self._duration or seconds))
-        self.update()
+        if self._painted() != before:
+            self.update()
+
+    def _painted(self) -> int:
+        if self._duration <= 0:
+            return -1
+        return int(self._position / self._duration * self.width())
 
     def reset(self) -> None:
         self._position = 0.0
@@ -226,8 +245,17 @@ class DottedProgress(QWidget):
         self.update()
 
     def setPosition(self, seconds: float) -> None:
+        # Position ticks arrive many times a second; repaint only when the
+        # lit dot moves.
+        before = self._painted()
         self._position = max(0.0, min(seconds, self._duration or seconds))
-        self.update()
+        if self._painted() != before:
+            self.update()
+
+    def _painted(self) -> int:
+        if self._duration <= 0:
+            return -1
+        return int(self._position / self._duration * (self.CELLS - 1))
 
     def reset(self) -> None:
         self._position = 0.0
@@ -244,8 +272,8 @@ class DottedProgress(QWidget):
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing, True)
-        accent = _qcolor(self._theme, "accent", "#d4b95e")
-        dim = _qcolor(self._theme, "dim", "#666")
+        accent = legibility.ink(self, _qcolor(self._theme, "accent", "#d4b95e"))
+        dim = legibility.ink(self, _qcolor(self._theme, "dim", "#666"))
         p.setFont(self.font())
         fm = QFontMetrics(self.font())
         cell_w = max(1, self.width() // self.CELLS)
