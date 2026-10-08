@@ -73,6 +73,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.2.0" date="2026-10-07">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.2.0</url>
+      <description>
+        <p>the youtube music session stays signed in: tide refreshes it on google's schedule instead of re-reading your browser. a lot less memory and cpu. text over the backdrop stays readable on any cover. discord lyrics no longer skip lines, your member list shows the song with links to it, and the tray can hide you from discord.</p>
+      </description>
+    </release>
     <release version="2.1.2" date="2026-09-28">
       <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.1.2</url>
       <description>

@@ -4,17 +4,21 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
-## [Unreleased]
+## [2.2.0] — 2026-10-07 — stays signed in, lighter, better discord
+
+### Added
+- **discord shows the song.** the member list says "listening to <song>" instead of your app's name (settings → integrations → discord → member list shows). the title, artist and cover link to the track, and there's a "listen on youtube music" button for everyone looking at your profile. local files never get links.
+- **hide from discord.** a switch in the tray menu (and in settings) clears your presence until you turn it back, and stays that way across restarts. there's also an option to never share local files.
 
 ### Changed
 - **text you can't read on the backdrop changes colour.** each line of text now checks the part of the backdrop right behind it. on a patch where it would be hard to read (dim grey on a bright red cover was the bad one), it fades lighter or darker until it reads (at once with motion off), and text everywhere else keeps the theme's colours. labels, track rows, cards, the strip, the status line and the rail and strip icons all do it, in the main window, the mini and fullscreen. it's the "keep text readable over the backdrop" setting, which already only fixed text against the theme's flat background.
 - **the tray icon is one colour.** it was the full colour tile, which stood out in a tray where every other icon is flat white. now it's the moon and its reflection in white on a dark panel, or dark on a light one, following your system's light or dark setting. settings → appearance → chrome → tray icon brings the app icon back.
 - **tide is lighter.** it was holding a couple hundred full size covers in memory to draw 40 pixel thumbnails, and redrawing the whole backdrop every time anything on top of it changed. covers are now kept small and scaled once, the backdrop draws one frame per tick and reuses it, text over the backdrop stops re-checking its colour every frame, progress bars and lyrics only redraw when something visibly moves, and freed memory goes back to the system. the gradient backdrops also idle at a calmer frame rate while nothing is playing.
+- **radio plays more of what you like.** youtube's radio has tuners (all, familiar, discover and a few more), and tide only ever asked for all, which leans hard on songs you've never heard. radio now alternates familiar and all. settings → playback → radio → radio mix has balanced (the new default), familiar, discover, and all (the old radio).
+
+### Fixed
 - **the youtube music session stays signed in.** google swaps part of the session for a new one every ten minutes or so and drops the old part soon after. tide never kept the new parts, so its copy went stale within about an hour and tide had to read your browser again. now it keeps every cookie youtube sends back, in one place for browsing and playback, and refreshes the session on google's schedule while it's open (a call to accounts.youtube.com, the same one your browser makes). importing from your browser is only needed to sign in, or if google really signs you out.
 - **discord lyrics stop skipping lines.** discord only takes a presence update every few seconds, so a line sung between two updates never showed. now each update carries the line about to be sung plus any that would come and go before the next update ("line one / line two"), sent a little ahead so it lands on time, and track changes and pauses still get through right away.
-- **discord shows the song.** the member list says "listening to <song>" instead of your app's name (settings → integrations → discord → member list shows). the title, artist and cover link to the track, and there's a "listen on youtube music" button for everyone looking at your profile. local files never get links.
-- **hide from discord.** a switch in the tray menu (and in settings) clears your presence until you turn it back, and stays that way across restarts. there's also an option to never share local files.
-- **radio plays more of what you like.** youtube's radio has tuners (all, familiar, discover and a few more), and tide only ever asked for all, which leans hard on songs you've never heard. radio now alternates familiar and all. settings → playback → radio → radio mix has balanced (the new default), familiar, discover, and all (the old radio).
 
 ## [2.1.2] — 2026-09-28 — new icon, better radio
 
