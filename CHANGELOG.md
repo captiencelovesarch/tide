@@ -4,7 +4,7 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
-## [Unreleased]
+## [2.3.0] — 2026-10-16 — the remaster
 
 ### Added
 - **the visualizer, remastered.** the tab draws the song now, not just the last 23 ms of it. up to **four tiles** share it (one, two side by side or stacked, one big + two, or a 2×2 grid), and each slot shows whatever you pick: the live **spectrum**, **mirror** or **scope**, the **beat deck**, the **lyrics**, the **loudness river**, a **spectrogram**, the **art halo**, the **beat tapper**, or a classic renderer. hover a tile and hit [edit] (or right-click it) to change it or turn its knobs. the default is the spectrum over the deck.

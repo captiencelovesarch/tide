@@ -73,6 +73,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.3.0" date="2026-10-16">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.3.0</url>
+      <description>
+        <p>the visualizer, remastered: up to four tiles (spectrum, beat deck, lyrics, loudness river, spectrogram, art halo and more) that hit on the kick. a player bar you can rearrange, with a speed bubble and a waveform seek bar. word-by-word karaoke with real word timing where it exists. a home that uses a wide window. and the backdrop pulse lands on the drum: fewer missed kicks, no pulse where there are no drums.</p>
+      </description>
+    </release>
     <release version="2.2.0" date="2026-10-07">
       <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.2.0</url>
       <description>
