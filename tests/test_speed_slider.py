@@ -1,7 +1,6 @@
 """Phase 3 E1 — the speed control's modern face + backend honesty + the
-spring volume variant. Modern builds SpringSpeedPopover, anything else
-the untouched bracket SpeedPopover; a flip swaps the face on the NEXT
-open. The slider maps to speed_changed live, quantized to the 0.05
+spring volume variant. Since 2.3 every personality opens the one speed
+bubble (ui/speed_bubble.py), which restyles itself on a flip. The slider maps to speed_changed live, quantized to the 0.05
 grid, and the button→popover sync never yanks an in-progress drag.
 Backend honesty: supports_speed defaults True, LibrespotBackend says
 False, the router follows the active backend, and the window greys the
@@ -28,9 +27,8 @@ from tide.ui.speed import (
     _TIP_NORMAL,
     _TIP_UNSUPPORTED,
     SpeedButton,
-    SpeedPopover,
-    SpringSpeedPopover,
 )
+from tide.ui.speed_bubble import SpeedBubble
 from tide.ui.variants import (
     VOLUME_VARIANTS,
     MonoVolume,
@@ -149,44 +147,35 @@ class _HostCase(unittest.TestCase):
 
 
 class FacePickTests(_HostCase):
-    def test_modern_preset_builds_the_spring_face(self) -> None:
-        pop = self._open()
-        self.assertIsInstance(pop, SpringSpeedPopover)
-        self.assertNotIsInstance(pop, SpeedPopover)
+    """2.3: one bubble for every personality (and for no settings at
+    all) — the face is the theme's aesthetic, read at paint time."""
 
-    def test_brutalist_preset_keeps_the_bracket_face(self) -> None:
-        self.host._settings.preset = "brutalist"
-        pop = self._open()
-        self.assertIsInstance(pop, SpeedPopover)
-        self.assertNotIsInstance(pop, SpringSpeedPopover)
+    def test_every_preset_builds_the_bubble(self) -> None:
+        for preset in ("modern", "brutalist", ""):
+            with self.subTest(preset=preset):
+                self.host._settings.preset = preset
+                self.assertIsInstance(self._open(), SpeedBubble)
+                self.btn._popover.hide()
 
-    def test_no_preset_defaults_to_bracket(self) -> None:
-        self.host._settings.preset = ""
-        self.assertIsInstance(self._open(), SpeedPopover)
-
-    def test_no_settings_defaults_to_bracket(self) -> None:
+    def test_no_settings_still_builds_the_bubble(self) -> None:
         del self.host._settings
-        self.assertIsInstance(self._open(), SpeedPopover)
+        self.assertIsInstance(self._open(), SpeedBubble)
 
-    def test_orphan_button_defaults_to_bracket(self) -> None:
-        # window() is the button itself → no _settings anywhere.
+    def test_orphan_button_builds_the_bubble(self) -> None:
         loner = SpeedButton()
         try:
             loner._open_popover()
-            self.assertIsInstance(loner._popover, SpeedPopover)
+            self.assertIsInstance(loner._popover, SpeedBubble)
             loner._popover.hide()
         finally:
             loner.deleteLater()
 
-    def test_flip_swaps_face_on_next_open(self) -> None:
+    def test_flip_keeps_the_same_bubble(self) -> None:
         self.host._settings.preset = "brutalist"
         first = self._open()
-        self.assertIsInstance(first, SpeedPopover)
         first.hide()
         self.host._settings.preset = "modern"
-        second = self._open()
-        self.assertIsInstance(second, SpringSpeedPopover)
-        self.assertIsNot(second, first)
+        self.assertIs(self._open(), first)
 
     def test_same_face_reopen_reuses_the_popover(self) -> None:
         first = self._open()

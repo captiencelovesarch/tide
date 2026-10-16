@@ -908,6 +908,12 @@ def run(argv: list[str] | None = None) -> int:
         pass
     discord.shutdown()
     mpris.stop()
+    try:
+        from . import lyric_timing
+        if lyric_timing._service is not None:
+            lyric_timing._service.close()
+    except Exception:
+        pass
     # Wind down every other retained worker thread (search, radio, lyrics,
     # library/album/artist loads, sign-in flows). Destroying a QThread whose
     # OS thread is still running is a Qt fatal abort, so none of them may

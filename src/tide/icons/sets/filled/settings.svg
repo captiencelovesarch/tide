@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.3" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <path fill="currentColor" fill-rule="evenodd" stroke="none" d="M12 5.4a6.6 6.6 0 1 0 0 13.2a6.6 6.6 0 1 0 0-13.2z M12 9.6a2.4 2.4 0 1 0 0 4.8a2.4 2.4 0 1 0 0-4.8z"/>
+  <g stroke-width="3"><path d="M18 12h2.6"/>
+  <path d="M16.24 16.24l1.8 1.8"/>
+  <path d="M12 18v2.6"/>
+  <path d="M7.76 16.24l-1.8 1.8"/>
+  <path d="M6 12H3.4"/>
+  <path d="M7.76 7.76 5.96 5.96"/>
+  <path d="M12 6V3.4"/>
+  <path d="M16.24 7.76l1.8-1.8"/>
+  </g>
+</svg>

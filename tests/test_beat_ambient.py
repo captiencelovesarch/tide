@@ -140,3 +140,14 @@ def test_shutdown_closes_the_service(h):
     h.start()
     h.controller.shutdown()
     assert h.beats.closed
+
+
+def test_a_late_delivered_clock_report_does_not_drag_the_pulse_late(h):
+    # the gui thread was busy painting: the report that says 0.20 reached it
+    # 30 ms late. the beat at 0.30 must still peak at wall 0.30.
+    h.start()
+    h.beats.updated.emit(KEY, beat_map(0.3))
+    h.position(0.10, 0.10)
+    h.position(0.23, 0.20)
+    h.render(0.30)
+    assert h.samples[-1][1] == pytest.approx(1.0, abs=0.02)

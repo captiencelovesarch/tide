@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QSizePolicy,
+    QSpacerItem,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -878,6 +879,11 @@ class MainWindow(QMainWindow):
         self.library_view.status_message.connect(self._set_status)
 
         # ----- lyrics view -----
+        # Word timing for every lyrics surface (2.3): reads the settings and,
+        # for precise timing, the stream that's playing (lyric_timing).
+        from .. import lyric_timing
+        lyric_timing.service().set_settings_provider(lambda: self._settings)
+        lyric_timing.service().set_stream_provider(self._stream_ref_for)
         self.lyrics_view = LyricsView(self.api)
         # "mute lyrics" instrumental-swap. The view emits when the user
         # toggles the button; MainWindow owns the player + source
@@ -885,6 +891,7 @@ class MainWindow(QMainWindow):
         self.lyrics_view.toggle_instrumental_requested.connect(
             self._on_instrumental_swap_requested
         )
+        self.lyrics_view.list_sweep_toggled.connect(self._on_lyrics_list_sweep)
         # Swap state — remembers what to switch back to + the position
         # at the moment of swap so toggling off resumes mid-song.
         self._instrumental_swap_thread: QThread | None = None
@@ -969,6 +976,14 @@ class MainWindow(QMainWindow):
         # ----- visualizer view -----
         self.visualizer_view = VisualizerView()
         self.visualizer_view.status_message.connect(self._set_status)
+        # the deck reads the beat clock off the ambient controller, which
+        # app.py attaches after the window is built: hand over a provider.
+        self.visualizer_view.attach(
+            player=self.player, queue=self.queue,
+            settings=lambda: getattr(self, "_settings", None),
+            ambient=lambda: getattr(self, "_ambient", None),
+            api=lambda: getattr(self, "api", None),
+        )
 
         # ----- source panel -----
         from .source_panel import SourcePanel
@@ -1111,6 +1126,10 @@ class MainWindow(QMainWindow):
             self._shortcut_tip("repeat: off / all / one", "repeat"))
 
         self.progress = make_progress(self._slot_progress)
+        # 2.3 waveform seek bar: rides whichever progress variant is up,
+        # fed the beat map the ambient controller already decodes.
+        from .waveform_seek import WaveformSeek
+        self._waveform = WaveformSeek(self._waveform_map, self)
         self.progress.seek_requested.connect(self.player.seek)
 
         self.volume = make_volume(self._slot_volume)
@@ -1153,6 +1172,16 @@ class MainWindow(QMainWindow):
         self.time_label.setProperty("class", "dim")
         self.time_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
         self.time_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._time_pd = (0.0, 0.0)
+
+        # 2.3: readouts wear the "numbers" typography role, and the bar's
+        # shape comes from Settings.bar_layout (ui/bar_config.py). The
+        # settings object isn't attached yet — defaults until
+        # apply_preset_visuals pushes the saved one.
+        from . import bar_config, typefaces
+        typefaces.tag(self.time_label, "numbers")
+        typefaces.tag(self.speed_btn, "numbers")
+        self._bar_cfg = bar_config.normalize({})
 
         strip_layout = self._build_classic_strip_layout()
         strip = QFrame()
@@ -1160,6 +1189,12 @@ class MainWindow(QMainWindow):
         strip.setLayout(strip_layout)
         strip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.strip = strip
+        # Long-press (or right-click) on empty bar space → the bar's
+        # customizer, right there.
+        from .bar_customizer import LongPress
+        self._bar_press = LongPress(strip, extra=(self.time_label, self.up_next))
+        self._bar_press.triggered.connect(self.open_bar_customizer)
+        self._apply_bar_extras()
 
         # ----- assemble -----
         root = QVBoxLayout()
@@ -1857,6 +1892,11 @@ class MainWindow(QMainWindow):
         col = getattr(self, "_strip_right_col", None)
         if col is None or col.indexOf(self.up_next) < 0:
             return
+        mode = (getattr(self, "_bar_cfg", None) or {}).get("next", "auto")
+        if mode == "above":
+            modern = False
+        elif mode == "below":
+            modern = True
         want = 1 if modern else 0
         if col.indexOf(self.up_next) == want:
             return
@@ -2353,6 +2393,7 @@ class MainWindow(QMainWindow):
                     pass
         self._current = track
         self.now_label.setTrackAnimated(track.artists, track.title, track.album)
+        self.now_label.setSource(_SOURCE_NAMES.get(track.source, track.source))
         self.now_label.setStatus("loading")
         # Stale numbers from the previous track must not ride into this one;
         # fresh ones arrive via _on_insights_ready after audio starts.
@@ -2360,7 +2401,9 @@ class MainWindow(QMainWindow):
         self._play_started_fired_for = None
         self._report_pending_for = None
         self.progress.reset()
-        self.time_label.setText("0:00 / 0:00")
+        self._waveform.track_changed()
+        self._waveform.set_duration(float(getattr(track, "duration_seconds", 0) or 0))
+        self._update_time_label(0.0, 0.0)
         style = getattr(self._settings, "loading_indicator_style", "blocks") \
             if hasattr(self, "_settings") and self._settings is not None else "blocks"
         self._loading.set_style(style)
@@ -2440,6 +2483,14 @@ class MainWindow(QMainWindow):
             # code effectively raced here. A second failure surfaces through
             # _on_resolve_failed as before.
             self._spawn_resolve_worker(self._current)
+
+    def _stream_ref_for(self, track) -> StreamRef | None:
+        """The playing StreamRef if ``track`` is what's playing. Called
+        from the word-timing worker thread: reads only, never touches Qt."""
+        cur = self._current
+        if cur is None or track is None or getattr(track, "video_id", None) != cur.video_id:
+            return None
+        return self.current_stream_ref()
 
     def current_stream_ref(self) -> StreamRef | None:
         """The StreamRef playing now, or None until the current track has
@@ -2589,19 +2640,16 @@ class MainWindow(QMainWindow):
         if not self._current or self._current.video_id != video_id:
             return
         from ..sources.base import human_count
-        parts: list[str] = []
         views = human_count(getattr(insights, "views", 0))
         likes = human_count(getattr(insights, "likes", 0))
-        if views:
-            parts.append(f"{views} plays")
-        if likes:
-            parts.append(f"{likes} likes")
-        # A lone year with no counts reads like a typo — only append it to
-        # something.
-        year = getattr(insights, "year", "")
-        if parts and year:
-            parts.append(year)
-        self.now_label.setInsights(" · ".join(parts))
+        # Structured, so the bar's info lines can pick them one by one;
+        # the label composes the joined form (a lone year with no counts
+        # still stays out of it — it reads like a typo).
+        self.now_label.setInsightParts({
+            "plays": f"{views} plays" if views else "",
+            "likes": f"{likes} likes" if likes else "",
+            "year": str(getattr(insights, "year", "") or ""),
+        })
 
     # ---------- v1.5 add-to-playlist ----------
 
@@ -3187,6 +3235,9 @@ class MainWindow(QMainWindow):
             tr = self.queue.current
         else:
             tr = self.queue.peek_next() if self.queue.current_index >= 0 else None
+        if (getattr(self, "_bar_cfg", None) or {}).get("next") == "off":
+            self.up_next.setVisible(False)
+            return
         if tr is not None:
             artist = theming.styled_case(tr.artists or "")
             title = theming.styled_case(tr.title or "")
@@ -3295,6 +3346,7 @@ class MainWindow(QMainWindow):
         # ignores seek() in LOADING because there's no demuxer yet, so
         # we wait for PLAYING.
         self._maybe_apply_pending_seek(s)
+        self._waveform.set_playing(s == PlayState.PLAYING)
         if s == PlayState.PLAYING:
             self.play_btn.setLabel("pause")
             # ▮▮ not ⏸ — the baseline war story lives in glyphs.py now.
@@ -3347,6 +3399,7 @@ class MainWindow(QMainWindow):
     def _on_position(self, secs: float) -> None:
         self._last_position = secs
         self.progress.setPosition(secs)
+        self._waveform.set_position(secs)
         self._update_time_label(secs, self.player.duration)
         # Throttle the heavier side-effects: lyrics line lookup + session
         # dirty marking don't need to run at mpv's ~60Hz position rate.
@@ -3408,10 +3461,14 @@ class MainWindow(QMainWindow):
 
     def _on_duration(self, secs: float) -> None:
         self.progress.setDuration(secs)
+        self._waveform.set_duration(secs)
         self._update_time_label(0.0, secs)
 
     def _update_time_label(self, pos: float, dur: float) -> None:
-        self.time_label.setText(f"{_mmss(pos)} / {_mmss(dur)}")
+        self._time_pd = (pos, dur)
+        mode = (getattr(self, "_bar_cfg", None) or {}).get("time", "both")
+        from .bar_config import format_time
+        self.time_label.setText(format_time(mode, pos, dur, _mmss))
 
     def _on_track_ended(self) -> None:
         from .sleep_timer import SleepMode
@@ -3721,6 +3778,7 @@ class MainWindow(QMainWindow):
         text_fx.set_style(getattr(s, "text_transition", "") or "scramble")
         art_fx.set_style(getattr(s, "art_transition", "") or "flip")
         lyrics.set_size(getattr(s, "lyrics_size", "") or "large")
+        self.apply_lyrics_timing_setting()
         self.apply_app_icon_setting()
         # Thumbnails are preset-owned (brutalist keeps them ON).
         from .track_row import set_thumbnail_override
@@ -3736,6 +3794,14 @@ class MainWindow(QMainWindow):
         # can't leak into modern.
         glyphs.set_overrides(dict(s.glyph_overrides or {}))
         self.refresh_glyphs()
+        # 2.3: the bar's shape (presets.push_chrome_state already swapped
+        # the type / icon / glyph registries; the rail re-push above ran
+        # in the restored icon set).
+        self.apply_bar_layout_setting()
+        from . import typefaces
+        for w in (getattr(self, "time_label", None), getattr(self, "speed_btn", None)):
+            if w is not None:
+                typefaces.retint(w)
 
     def _apply_sound_pack(self) -> None:
         """Point the UI-sound player at the active personality's pack.
@@ -4284,22 +4350,190 @@ class MainWindow(QMainWindow):
 
     # ---------- strip layout builders ----------
 
+    # ---------- 2.3 bar customization ----------
+
+    def _bar_widget(self, item: str):
+        """The live widget behind a bar_config item id."""
+        return getattr(self, {
+            "shuffle": "shuffle_btn", "prev": "prev_btn", "play": "play_btn",
+            "next": "next_btn", "repeat": "repeat_btn", "like": "like_btn",
+            "fx": "audio_fx_btn", "speed": "speed_btn", "sleep": "sleep_btn",
+            "fullscreen": "fullscreen_btn", "volume": "volume",
+        }.get(item, ""), None)
+
+    def _bar_rows(self) -> tuple[list, list]:
+        """(left cluster, right cluster) widgets in the configured order.
+        Hidden controls stay IN the rows (a layout skips hidden widgets)
+        so a show/hide never needs a rebuild."""
+        from . import bar_config
+        order = list(getattr(self, "_bar_cfg", None) and self._bar_cfg["order"]
+                     or bar_config.DEFAULT_ORDER)
+        gap = order.index(bar_config.GAP)
+        left = [self._bar_widget(i) for i in order[:gap]]
+        right = [self._bar_widget(i) for i in order[gap + 1:]]
+        return ([w for w in left if w is not None],
+                [w for w in right if w is not None])
+
+    def _strip_mode(self) -> str:
+        return "compact" if getattr(self, "_layout_mode", "classic") == "compact" \
+            else "classic"
+
+    def _apply_bar_extras(self) -> None:
+        """Push the bar config onto the live widgets: visibility, size
+        steps, art size, time readout, info lines, "next:" placement,
+        density. Idempotent; runs after every rebuild / slot swap."""
+        from . import bar_config
+        cfg = getattr(self, "_bar_cfg", None)
+        if cfg is None or getattr(self, "strip", None) is None:
+            return
+        hidden = set(cfg["hidden"])
+        for item in bar_config.ITEMS:
+            w = self._bar_widget(item)
+            if w is None:
+                continue
+            try:
+                w.setVisible(item not in hidden)
+                self._size_bar_widget(w, bar_config.SIZE_FACTORS[
+                    cfg["sizes"].get(item, "m")])
+            except RuntimeError:
+                pass
+        art_px = bar_config.ART_SIZES.get(cfg["art"], 96)
+        try:
+            self.art.setVisible(art_px > 0)
+            if art_px > 0 and hasattr(self.art, "set_base_size"):
+                self.art.set_base_size(art_px)
+        except RuntimeError:
+            pass
+        self.time_label.setVisible(cfg["time"] != "off")
+        wf = getattr(self, "_waveform", None)
+        if wf is not None:
+            if wf._progress is not self.progress:
+                wf.attach(self.progress)
+            wf.set_mode(cfg["waveform"])
+            room = getattr(self, "_waveform_room", None)
+            if room is not None:
+                from . import scale as _scale
+                from .waveform_seek import ROOM_PX
+                want = _scale.px(ROOM_PX) if cfg["waveform"] != "off" else 0
+                if room.sizeHint().height() != want:
+                    room.changeSize(0, want, QSizePolicy.Minimum, QSizePolicy.Fixed)
+                    for lay_ in (getattr(self, "_strip_right_col", None),
+                                 self.strip.layout()):
+                        if lay_ is not None:
+                            lay_.invalidate()
+            ambient = getattr(self, "_ambient", None)
+            if ambient is not None and hasattr(ambient, "set_watching"):
+                # hold the beat map even with the backdrop pulse off
+                ambient.set_watching("waveform", cfg["waveform"] != "off")
+        self._update_time_label(*getattr(self, "_time_pd", (0.0, 0.0)))
+        try:
+            self.now_label.set_line_fields(cfg["line1"], cfg["line2"])
+        except (RuntimeError, AttributeError):
+            pass
+        lay = self.strip.layout()
+        if self._strip_mode() == "classic" and lay is not None:
+            mh, mv, gap = bar_config.DENSITIES[cfg["density"]]
+            lay.setContentsMargins(mh, mv, mh, mv)
+            col = getattr(self, "_strip_right_col", None)
+            if col is not None:
+                col.setSpacing(gap)
+        self._place_up_next(getattr(self._theme, "aesthetic", "") == "modern")
+        if hasattr(self, "queue"):
+            self._refresh_up_next()
+
+    def _waveform_map(self):
+        """The current track's beat map (partial while it decodes)."""
+        ambient = getattr(self, "_ambient", None)
+        if ambient is None or not hasattr(ambient, "beat_clock"):
+            return None
+        clock = ambient.beat_clock()
+        return clock.beat_map if clock is not None else None
+
+    def _size_bar_widget(self, w, factor: float) -> None:
+        if hasattr(w, "setSizeFactor"):
+            w.setSizeFactor(factor)
+            return
+        # Volume faces: scale the width they were built at (remembered
+        # on first sight, so M always returns to exactly that).
+        base = getattr(w, "_bar_base", None)
+        if base is None:
+            base = (w.minimumWidth(), w.minimumWidth() == w.maximumWidth())
+            w._bar_base = base
+        width, fixed = base
+        if width <= 0:
+            width = max(0, w.sizeHint().width())
+        if width <= 0:
+            return
+        target = max(24, int(round(width * factor)))
+        if fixed:
+            w.setFixedWidth(target)
+        else:
+            w.setMinimumWidth(target)
+
+    def apply_bar_layout_setting(self) -> None:
+        """Settings.bar_layout → the strip (one rebuild)."""
+        from . import bar_config
+        s = getattr(self, "_settings", None)
+        self._bar_cfg = bar_config.normalize(
+            getattr(s, "bar_layout", None) if s is not None else None)
+        self._rebuild_strip(self._strip_mode())
+
+    def set_bar_layout(self, cfg, *, persist: bool = True) -> None:
+        """The customizer popover's live path: adopt, rebuild, save the
+        one field (save_fields — never clobbers a concurrent saver).
+        A default bar persists as ``{}``."""
+        from . import bar_config
+        cfg = bar_config.normalize(cfg)
+        order_changed = cfg["order"] != self._bar_cfg["order"]
+        self._bar_cfg = cfg
+        if order_changed:
+            self._rebuild_strip(self._strip_mode())
+        else:
+            self._apply_bar_extras()
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        s.bar_layout = {} if bar_config.is_default(cfg) else cfg
+        if persist:
+            try:
+                from .. import settings as settings_module
+                settings_module.save_fields(s, "bar_layout")
+            except Exception:
+                pass
+
+    def open_bar_customizer(self, global_pos=None) -> None:
+        """The bar's customizer popover, anchored over the bar where the
+        long-press landed. Deferred: reached from a timer inside a mouse
+        sequence (the PySide6 + py3.14 popup-in-handler crash class)."""
+        QTimer.singleShot(0, lambda: self._open_bar_customizer_now(global_pos))
+
+    def _open_bar_customizer_now(self, global_pos=None) -> None:
+        from .bar_customizer import BarCustomizerPopover
+        old = getattr(self, "_bar_popover", None)
+        if old is not None:
+            try:
+                old.close()
+                old.deleteLater()
+            except RuntimeError:
+                pass
+        pop = BarCustomizerPopover(
+            self._bar_cfg, self.now_label.VARIANT
+            if hasattr(self.now_label, "VARIANT") else "stacked", self)
+        pop.changed.connect(self.set_bar_layout)
+        pop.open_settings_requested.connect(self.open_settings)
+        self._bar_popover = pop
+        pop.show_over(self.strip, global_pos)
+
     def _build_classic_strip_layout(self) -> QHBoxLayout:
         controls_row = QHBoxLayout()
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(2)
-        controls_row.addWidget(self.shuffle_btn)
-        controls_row.addWidget(self.prev_btn)
-        controls_row.addWidget(self.play_btn)
-        controls_row.addWidget(self.next_btn)
-        controls_row.addWidget(self.repeat_btn)
-        controls_row.addWidget(self.like_btn)
+        left, right = self._bar_rows()
+        for w in left:
+            controls_row.addWidget(w)
         controls_row.addStretch(1)
-        controls_row.addWidget(self.audio_fx_btn)
-        controls_row.addWidget(self.speed_btn)
-        controls_row.addWidget(self.sleep_btn)
-        controls_row.addWidget(self.fullscreen_btn)
-        controls_row.addWidget(self.volume)
+        for w in right:
+            controls_row.addWidget(w)
 
         progress_row = QHBoxLayout()
         progress_row.setContentsMargins(0, 0, 0, 0)
@@ -4320,6 +4554,10 @@ class MainWindow(QMainWindow):
         else:
             right_col.addWidget(self.up_next)
             right_col.addWidget(self.now_label, stretch=1)
+        # Room for the waveform that stands on the progress bar (sized by
+        # _apply_bar_extras: zero when the waveform is set to never).
+        self._waveform_room = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        right_col.addSpacerItem(self._waveform_room)
         right_col.addLayout(progress_row)
         right_col.addLayout(controls_row)
         self._strip_right_col = right_col
@@ -4345,26 +4583,21 @@ class MainWindow(QMainWindow):
         progress_row.addWidget(self.progress, stretch=1)
         progress_row.addWidget(self.time_label)
 
+        # The bar config's two clusters become the two centred rows.
+        left, right = self._bar_rows()
         controls_row = QHBoxLayout()
         controls_row.setContentsMargins(0, 0, 0, 0)
         controls_row.setSpacing(4)
         controls_row.addStretch(1)
-        controls_row.addWidget(self.shuffle_btn)
-        controls_row.addWidget(self.prev_btn)
-        controls_row.addWidget(self.play_btn)
-        controls_row.addWidget(self.next_btn)
-        controls_row.addWidget(self.repeat_btn)
-        controls_row.addWidget(self.like_btn)
+        for w in left:
+            controls_row.addWidget(w)
         controls_row.addStretch(1)
 
         volume_row = QHBoxLayout()
         volume_row.setContentsMargins(0, 0, 0, 0)
         volume_row.addStretch(1)
-        volume_row.addWidget(self.audio_fx_btn)
-        volume_row.addWidget(self.speed_btn)
-        volume_row.addWidget(self.sleep_btn)
-        volume_row.addWidget(self.fullscreen_btn)
-        volume_row.addWidget(self.volume)
+        for w in right:
+            volume_row.addWidget(w)
         volume_row.addStretch(1)
 
         strip_layout = QVBoxLayout()
@@ -4374,6 +4607,8 @@ class MainWindow(QMainWindow):
         strip_layout.addLayout(art_row)
         strip_layout.addWidget(self.up_next, alignment=Qt.AlignHCenter)
         strip_layout.addWidget(self.now_label, alignment=Qt.AlignHCenter)
+        self._waveform_room = QSpacerItem(0, 0, QSizePolicy.Minimum, QSizePolicy.Fixed)
+        strip_layout.addSpacerItem(self._waveform_room)
         strip_layout.addLayout(progress_row)
         strip_layout.addLayout(controls_row)
         strip_layout.addLayout(volume_row)
@@ -4433,6 +4668,8 @@ class MainWindow(QMainWindow):
                 w.show()
             except RuntimeError:
                 pass
+        # ...then hide what the bar config hides (and re-size, re-place).
+        self._apply_bar_extras()
 
     # ---------- layout ----------
 
@@ -4544,6 +4781,8 @@ class MainWindow(QMainWindow):
                       if settings is not None else None)
         self.resize(*self._sane_size(remembered, layout.window_default))
         self._layout_slug = layout.slug
+        # Swapped slot widgets come in at default size / visibility.
+        self._apply_bar_extras()
 
         self.statusBar().showMessage(
             theming.styled_case(f"layout · {layout.name}")
@@ -4643,6 +4882,14 @@ class MainWindow(QMainWindow):
         new = make_now_label(slug)
         if self._current is not None:
             new.setTrack(self._current.artists, self._current.title, self._current.album)
+        old = self.now_label
+        parts = dict(getattr(old, "_insight_parts", {}) or {})
+        if parts:
+            new.setInsightParts(parts)
+        elif getattr(old, "_insights", ""):
+            new.setInsights(old._insights)
+        if getattr(old, "_source", ""):
+            new.setSource(old._source)
         self._replace_in_layout(self.now_label, new)
         self.now_label = new
 
@@ -4917,6 +5164,8 @@ class MainWindow(QMainWindow):
     #     the scaletempo chain the current speed rides on (pitch→speed).
     LIVE_APPLY_ORDER: tuple[str, ...] = (
         "apply_ui_scale_setting",
+        # roles before the bundle: its one restyle then carries the rules
+        "apply_font_roles_setting",
         "apply_theme_bundle_setting",
         "apply_app_icon_setting",
         "apply_layout_setting",
@@ -4926,10 +5175,14 @@ class MainWindow(QMainWindow):
         "apply_corner_setting",
         "apply_csd_setting",
         "apply_nav_icons_setting",
+        "apply_icon_set_setting",
+        "apply_glyph_pack_setting",
+        "apply_bar_layout_setting",
         "apply_motion_setting",
         "apply_text_transition_setting",
         "apply_art_transition_setting",
         "apply_lyrics_size_setting",
+        "apply_lyrics_timing_setting",
         "apply_loading_setting",
         "apply_ui_sounds_setting",
         "apply_mini_setting",
@@ -4938,6 +5191,7 @@ class MainWindow(QMainWindow):
         "apply_discord_setting",
         "apply_listenbrainz_setting",
         "apply_audio_device_setting",
+        "apply_visualizer_setting",
         "apply_pitch_setting",
     )
 
@@ -4980,6 +5234,40 @@ class MainWindow(QMainWindow):
             current_theme = theming.manager().current()
             if current_theme is not None:
                 theming.manager().apply(current_theme.slug)
+
+    def apply_font_roles_setting(self) -> None:
+        """Typography roles (ui/typefaces.py): install, then one restyle
+        of the current theme — its sheet carries the role rules and
+        theme_changed repaints every painted title / readout."""
+        from . import typefaces
+        if typefaces.set_roles(getattr(self._settings, "font_roles", None) or {}):
+            self._restyle_for_type()
+
+    def _restyle_for_type(self) -> None:
+        from . import typefaces
+        current = theming.manager().current()
+        if current is not None:
+            theming.manager().apply(current.slug)
+        for w in (getattr(self, "time_label", None), getattr(self, "speed_btn", None)):
+            if w is not None:
+                typefaces.retint(w)
+
+    def apply_icon_set_setting(self) -> None:
+        """modern's icon set: every BracketButton re-resolves its SVG on
+        theme_changed, the rail's explicit SVGs are re-pushed."""
+        from . import icon_sets
+        if icon_sets.set_active(getattr(self._settings, "icon_set", "") or "regular"):
+            self.apply_nav_icons(self._settings.nav_icon_set or "off")
+            theming.manager().theme_changed.emit(theming.manager().current_effective())
+
+    def apply_glyph_pack_setting(self) -> None:
+        """brutalist's glyph pack: swap the registry's pack, repaint."""
+        try:
+            glyphs.set_pack(getattr(self._settings, "glyph_pack", "") or "default")
+        except KeyError:
+            glyphs.set_pack("default")
+        self.refresh_glyphs()
+        theming.manager().theme_changed.emit(theming.manager().current_effective())
 
     def apply_theme_bundle_setting(self) -> None:
         """Theme + font family + font size + text case in ONE
@@ -5119,6 +5407,28 @@ class MainWindow(QMainWindow):
         from . import lyrics
         lyrics.set_size(getattr(self._settings, "lyrics_size", "") or "large")
 
+    def _on_lyrics_list_sweep(self, on: bool) -> None:
+        """The lyrics tab's [sweep words] checkbox: persist + apply."""
+        from . import lyrics
+        s = getattr(self, "_settings", None)
+        if s is not None:
+            s.lyrics_list_sweep = bool(on)
+            try:
+                from .. import settings as settings_module
+                settings_module.save_fields(s, "lyrics_list_sweep")
+            except Exception:
+                pass
+        lyrics.set_list_sweep(bool(on))
+
+    def apply_lyrics_timing_setting(self) -> None:
+        from . import karaoke_line, lyrics
+        s = self._settings
+        karaoke_line.set_style(getattr(s, "lyrics_sweep", "") or "sweep")
+        lyrics.set_list_sweep(bool(getattr(s, "lyrics_list_sweep", True)))
+        lyrics.set_offset_ms(getattr(s, "lyrics_offset_ms", 0) or 0)
+        # sources / netease / precise feed the sheet: ask again
+        lyrics.refresh_timing()
+
     def apply_loading_setting(self) -> None:
         if hasattr(self, "_loading"):
             self._loading.set_style(self._settings.loading_indicator_style)
@@ -5194,6 +5504,14 @@ class MainWindow(QMainWindow):
             self.visualizer_view._set_audio_source(
                 self._settings.audio_device or None
             )
+        except Exception:
+            pass
+
+    def apply_visualizer_setting(self) -> None:
+        """Scene / look / deck / flash / bars / fps / caption for the
+        visualizer tab. Repaints in place; capture is untouched."""
+        try:
+            self.visualizer_view.apply_settings(self._settings)
         except Exception:
             pass
 
@@ -5413,6 +5731,13 @@ class MainWindow(QMainWindow):
 def _mmss(seconds: float) -> str:
     s = int(max(0, seconds))
     return f"{s // 60}:{s % 60:02d}"
+
+
+# The bar's "source" info field: what each source slug reads as.
+_SOURCE_NAMES: dict[str, str] = {
+    "ytmusic": "youtube music",
+    "local": "local files",
+}
 
 
 # Module-level views of the live-apply chain (tests + tools import these;

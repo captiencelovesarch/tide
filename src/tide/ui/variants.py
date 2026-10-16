@@ -31,6 +31,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QConicalGradient,
     QFont,
@@ -141,7 +142,9 @@ class BarProgress(QWidget):
             frac = self._position / self._duration
             fw = int(frac * self.width())
             if fw > 0:
-                p.setBrush(accent)
+                # The fill's head feathers into the track — no hard
+                # accent/track edge at the playhead (2.3).
+                p.setBrush(_feathered_brush(accent, dim, fw))
                 p.drawRoundedRect(QRect(0, 0, fw, self.height()), radius, radius)
 
 
@@ -209,8 +212,8 @@ class ThinProgress(QWidget):
             return
         frac = self._position / self._duration
         x = int(frac * self.width())
-        # filled portion in accent
-        p.setPen(QPen(accent, 1.6))
+        # filled portion in accent, its head feathered into the line (2.3)
+        p.setPen(QPen(_feathered_brush(accent, dim, x), 1.6))
         p.drawLine(0, cy, x, cy)
         # handle
         p.setPen(Qt.NoPen)
@@ -291,6 +294,23 @@ class DottedProgress(QWidget):
             p.drawText(QRect(x - fm.horizontalAdvance(ch) // 2, 0,
                              fm.horizontalAdvance(ch), self.height()),
                        Qt.AlignVCenter | Qt.AlignLeft, ch)
+
+
+def _feathered_brush(played: QColor, unplayed: QColor, head_x: float):
+    """A horizontal gradient: ``played`` up to the fill's last stretch,
+    then easing into ``unplayed`` at ``head_x``."""
+    from .waveform_seek import FEATHER_PX
+    band = float(scale.px(FEATHER_PX))
+    start = max(0.0, head_x - band)
+    grad = QLinearGradient(QPointF(start, 0), QPointF(max(start + 1.0, head_x), 0))
+    grad.setColorAt(0.0, played)
+    mid = QColor(played)
+    mid.setRedF((played.redF() + unplayed.redF()) / 2)
+    mid.setGreenF((played.greenF() + unplayed.greenF()) / 2)
+    mid.setBlueF((played.blueF() + unplayed.blueF()) / 2)
+    grad.setColorAt(0.7, mid)
+    grad.setColorAt(1.0, unplayed)
+    return QBrush(grad)
 
 
 def make_progress(slug: str) -> QWidget:
@@ -820,6 +840,8 @@ def make_controls(slug: str) -> ControlsBundle:
 class InlineNowLabel(NowPlayingLabel):
     """Single-line 'artist — title' rendering."""
 
+    VARIANT = "inline"
+
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing, True)
@@ -832,12 +854,17 @@ class InlineNowLabel(NowPlayingLabel):
             p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft,
                        theming.styled_case("nothing playing", self._theme))
             return
-        primary = theming.styled_case(self._primary_text(), self._theme)
-        self._paint_line(p, rect, primary, fm, "primary", color=fg, scroll=True)
+        primary, _ = self._lines()
+        font = self._role_font("title")
+        p.setFont(font)
+        self._paint_line(p, rect, primary, QFontMetrics(font), "primary",
+                         color=fg, scroll=True)
 
 
 class CenteredNowLabel(NowPlayingLabel):
     """Stacked but center-aligned. Good for compact / walkman layouts."""
+
+    VARIANT = "centered"
 
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
@@ -851,19 +878,17 @@ class CenteredNowLabel(NowPlayingLabel):
             p.drawText(rect, Qt.AlignCenter,
                        theming.styled_case("nothing playing", self._theme))
             return
-        line1 = theming.styled_case(self._title or self._artist, self._theme)
-        line1_rect = QRect(rect.x(), rect.y(), rect.width(), fm.height())
-        self._paint_line(p, line1_rect, line1, fm, "primary", color=fg, scroll=True,
+        # line1 (default title) · line2 (default artist · album)
+        line1, line2 = self._lines()
+        title_font = self._role_font("title")
+        tfm = QFontMetrics(title_font)
+        line1_rect = QRect(rect.x(), rect.y(), rect.width(), tfm.height())
+        p.setFont(title_font)
+        self._paint_line(p, line1_rect, line1, tfm, "primary", color=fg, scroll=True,
                          flags=Qt.AlignHCenter | Qt.AlignVCenter)
-        # line2: artist · album
-        parts = []
-        if self._artist:
-            parts.append(theming.styled_case(self._artist, self._theme))
-        if self._album:
-            parts.append(theming.styled_case(self._album, self._theme))
-        line2 = "  ·  ".join(parts)
+        p.setFont(self.font())
         if line2:
-            line2_rect = QRect(rect.x(), rect.y() + fm.height() + 2,
+            line2_rect = QRect(rect.x(), rect.y() + tfm.height() + 2,
                                rect.width(), fm.height())
             self._paint_line(p, line2_rect, line2, fm, "secondary", color=dim,
                              flags=Qt.AlignHCenter | Qt.AlignVCenter)
@@ -878,6 +903,8 @@ class HeadlineNowLabel(NowPlayingLabel):
     The title scrolls when it overruns the strip, like the others.
     """
 
+    VARIANT = "headline"
+
     def _title_font(self) -> QFont:
         from .. import material
         f = QFont(self.font())
@@ -885,7 +912,7 @@ class HeadlineNowLabel(NowPlayingLabel):
         # carries the ui scale and any user size override.
         f.setPointSizeF(max(1.0, self.font().pointSizeF() * material.TITLE_SCALE))
         f.setWeight(QFont.Weight.Medium)
-        return f
+        return self._role_font("title", f)
 
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
@@ -902,15 +929,9 @@ class HeadlineNowLabel(NowPlayingLabel):
 
         title_font = self._title_font()
         title_fm = QFontMetrics(title_font)
-        headline = theming.styled_case(self._title or self._artist, self._theme)
-
-        byline_parts: list[str] = []
-        if self._title and self._artist:
-            byline_parts.append(theming.styled_case(self._artist, self._theme))
-        for extra in (self._album, self._insights, self._status):
-            if extra:
-                byline_parts.append(theming.styled_case(extra, self._theme))
-        byline = "  ·  ".join(byline_parts)
+        # headline (default title) · byline (default artist · album ·
+        # numbers · status) — the bar's to choose since 2.3.
+        headline, byline = self._lines()
 
         block_h = title_fm.height() + (2 + body_fm.height() if byline else 0)
         top = rect.y() + max(0, (rect.height() - block_h) // 2)

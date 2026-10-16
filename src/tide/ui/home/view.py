@@ -19,6 +19,11 @@ Every stratum is isolated: a parser break or dead network in one block
 renders as absence, never as a broken page. Blocks are built one per
 event-loop turn so a 10-block page doesn't jank the paint thread.
 
+The strata live in fixed slots (2.3): hero, then the source's shelves,
+then the extras. The extras' workers read a disk cache and answer in
+milliseconds while ``get_home`` is a network round trip, so blocks
+appended in arrival order put the generic charts above quick picks.
+
 Settings → appearance → "home layout" = "shelves" restores the v1.4 look
 exactly (plain shelf rows, no hero, no extras).
 
@@ -172,6 +177,29 @@ def week_summary(entries, now: float | None = None) -> dict | None:
             "streak": streak, "repeat": repeat, "new": new}
 
 
+_RECENT_MAX = 24
+
+
+def recently_played(entries, limit: int = _RECENT_MAX) -> list:
+    """The hero's recently-played strip: Tracks from the history (newest
+    first), one per cover, so an album played through shows once. The
+    keep-listening track (entries[0]) and its cover are left out, since
+    the hero already shows them."""
+    out: list = []
+    seen: set[str] = set()
+    for i, e in enumerate(entries):
+        thumb = e.thumbnail or ""
+        if not e.video_id or not thumb or thumb in seen:
+            continue
+        seen.add(thumb)
+        if i == 0:
+            continue
+        out.append(e.to_track())
+        if len(out) >= limit:
+            break
+    return out
+
+
 # ---------- workers ----------
 
 
@@ -246,13 +274,14 @@ class _MoodWorker(QObject):
 # ---------- pattern picker ----------
 
 # Extras render in this order no matter which worker answers first.
+# top songs and the charts artists share one band (patterns.ChartsBand),
+# side by side when the page is wide enough.
 _EXTRA_WEIGHTS = {
-    "top_songs": 0,
-    "charts_artists": 1,
-    "new_releases": 2,
-    "new_videos": 3,
-    "charts_playlists": 4,
-    "moods": 5,
+    "charts": 0,
+    "new_releases": 1,
+    "new_videos": 2,
+    "charts_playlists": 3,
+    "moods": 4,
 }
 
 
@@ -297,7 +326,9 @@ class HomeView(QWidget):
         self._loaded = False
         self._mode = "home"                   # "home" | "mood"
         self._pending_builds: list = []
-        self._extras_present: list[int] = []  # weights already inserted
+        # weight -> the widgets that extra put in the extras slot
+        self._extras_present: dict[int, list[QWidget]] = {}
+        self._charts_band = None
         self._build_ui()
 
     # ---------- layout ----------
@@ -323,7 +354,7 @@ class HomeView(QWidget):
         self._content_col = QVBoxLayout(self._content)
         self._content_col.setContentsMargins(0, 0, 0, 0)
         self._content_col.setSpacing(12)
-        self._content_col.addStretch(1)
+        self._make_slots()
 
         scroll = QScrollArea()
         scroll.setWidget(self._content)
@@ -337,9 +368,27 @@ class HomeView(QWidget):
         root.addLayout(top)
         root.addWidget(scroll, stretch=1)
 
+    def _make_slots(self) -> None:
+        """[hero] · shelves · extras · stretch. The hero goes in at the
+        top when built; shelves and extras each own a column, so a block
+        lands in its stratum whenever its worker answers."""
+        def slot() -> tuple[QWidget, QVBoxLayout]:
+            w = QWidget()
+            col = QVBoxLayout(w)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.setSpacing(12)
+            w.hide()            # an empty slot must not add page spacing
+            return w, col
+        self._shelves_slot, self._shelves_col = slot()
+        self._extras_slot, self._extras_col = slot()
+        self._content_col.addWidget(self._shelves_slot)
+        self._content_col.addWidget(self._extras_slot)
+        self._content_col.addStretch(1)
+
     def _clear_content(self) -> None:
         self._pending_builds.clear()
         self._extras_present.clear()
+        self._charts_band = None
         while self._content_col.count():
             it = self._content_col.takeAt(0)
             w = it.widget()
@@ -348,14 +397,12 @@ class HomeView(QWidget):
             lay = it.layout()
             if lay is not None:
                 lay.deleteLater()
-        self._content_col.addStretch(1)
-
-    def _insert_at(self, index: int, w: QWidget) -> None:
-        self._content_col.insertWidget(
-            min(index, self._content_col.count() - 1), w)
+        self._make_slots()
 
     def _append(self, w: QWidget) -> None:
-        self._content_col.insertWidget(self._content_col.count() - 1, w)
+        """Into the shelves stratum (shelf blocks, notes, the mood grid)."""
+        self._shelves_col.addWidget(w)
+        self._shelves_slot.show()
 
     # ---------- public ----------
 
@@ -411,11 +458,13 @@ class HomeView(QWidget):
     def _build_hero(self) -> None:
         last_track = None
         week = None
+        played: list = []
         try:
             recent = history_module.read_recent(_WEEK_HISTORY_LINES)
             if recent:
                 last_track = recent[0].to_track()
                 week = week_summary(recent)
+                played = recently_played(recent)
         except Exception:
             pass
         can_resume = False
@@ -429,13 +478,13 @@ class HomeView(QWidget):
             greeting, _weekly_stats(), last_track,
             can_resume=can_resume,
             show_likes=(getattr(self.api, "slug", "") == "ytmusic"),
-            week=week,
+            week=week, recent=played,
         )
         hero.resume_clicked.connect(self.resume_requested.emit)
         hero.track_clicked.connect(lambda tr: self.play_now_requested.emit(tr, True))
         hero.radio_clicked.connect(self.radio_requested.emit)
         hero.likes_clicked.connect(self.likes_shuffle_requested.emit)
-        self._append(hero)
+        self._content_col.insertWidget(0, hero)
 
     # ---------- shelves ----------
 
@@ -527,25 +576,24 @@ class HomeView(QWidget):
 
     # ---------- extras ----------
 
-    def _extra_anchor(self, weight: int) -> int:
-        """Index where an extra block belongs: after the stretch-less tail
-        of shelves, ordered by weight among extras already present."""
-        before = sum(1 for w in self._extras_present if w < weight)
-        # Each extra is [heading + body] = 2 widgets; the stretch is last.
-        base = self._content_col.count() - 1
-        # Walk back over extras that should come after this one.
-        after = len(self._extras_present) - before
-        return base - after * 2
-
-    def _add_extra(self, weight: int, title: str, body: QWidget) -> None:
+    def _add_extra(self, weight: int, title: str | None, body: QWidget) -> None:
+        """Put an extra in the extras slot, ordered by weight among the
+        extras already there. ``title`` None = the body carries its own
+        headings (the charts band)."""
         if self._mode != "home":
             return
-        idx = self._extra_anchor(weight)
-        label = Heading(title)
-        label.setProperty("class", "dim")
-        self._insert_at(idx, label)
-        self._insert_at(idx + 1, body)
-        self._extras_present.append(weight)
+        widgets: list[QWidget] = []
+        if title is not None:
+            label = Heading(title)
+            label.setProperty("class", "dim")
+            widgets.append(label)
+        widgets.append(body)
+        idx = sum(len(ws) for w, ws in self._extras_present.items()
+                  if w < weight)
+        for i, w in enumerate(widgets):
+            self._extras_col.insertWidget(idx + i, w)
+        self._extras_present.setdefault(weight, []).extend(widgets)
+        self._extras_slot.show()
 
     def _on_explore(self, gen: int, data: dict) -> None:
         if gen != self._gen or self._mode != "home":
@@ -582,15 +630,22 @@ class HomeView(QWidget):
         return
 
     def _build_ranked(self, title: str, slot: str, entries: list) -> None:
+        """A ranked list into the charts band: top songs on the left,
+        the charts artists on the right, whichever lands first."""
+        if self._mode != "home":
+            return
         w = patterns.RankedList(entries)
         w.item_activated.connect(self._dispatch_item)
-        self._add_extra(_EXTRA_WEIGHTS[slot], title, w)
+        if self._charts_band is None:
+            self._charts_band = patterns.ChartsBand()
+            self._add_extra(_EXTRA_WEIGHTS["charts"], None, self._charts_band)
+        self._charts_band.set_list(slot, title, w)
 
     def _build_release_mosaic(self, releases: list) -> None:
         from ...sources.base import ShelfItem
         items = [ShelfItem(kind="album", title=r.title, subtitle=r.artists,
                            thumbnail=r.thumbnail, album=r)
-                 for r in releases[:9]]
+                 for r in releases[:1 + patterns.Mosaic.MAX_REST]]
         w = patterns.Mosaic(items, seed=self._daily_seed() // 3)
         w.item_activated.connect(self._dispatch_item)
         self._add_extra(_EXTRA_WEIGHTS["new_releases"], "new releases", w)

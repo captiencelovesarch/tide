@@ -56,6 +56,10 @@ _WIDGET_ATTRS: dict[str, str] = {
     "layout": "layout_picker",
     "corner_style": "corner_picker",
     "nav_icon_set": "nav_icons_picker",
+    "icon_set": "icon_set_picker",
+    "glyph_pack": "glyph_pack_picker",
+    "bar_layout": "bar_editor",
+    "font_roles": "type_roles_editor",
     "csd_titlebar": "csd_toggle",
     "app_icon": "app_icon_picker",
     "tray_icon": "tray_icon_picker",
@@ -71,8 +75,36 @@ _WIDGET_ATTRS: dict[str, str] = {
     "text_transition": "text_transition_picker",
     "art_transition": "art_transition_picker",
     "lyrics_size": "lyrics_size_picker",
+    "lyrics_sweep": "lyrics_sweep_picker",
+    "lyrics_list_sweep": "lyrics_list_sweep_toggle",
+    "lyrics_word_timing": "lyrics_word_timing_picker",
+    "lyrics_netease": "lyrics_netease_toggle",
+    "lyrics_precise": "lyrics_precise_editor",
+    "lyrics_offset_ms": "lyrics_offset_spin",
     "ui_sounds_enabled": "ui_sounds_toggle",
     "audio_device": "audio_device_picker",
+    "visualizer_layout": "vis_layout_picker",
+    "visualizer_tile_1": "vis_tile1_picker",
+    "visualizer_tile_2": "vis_tile2_picker",
+    "visualizer_tile_3": "vis_tile3_picker",
+    "visualizer_tile_4": "vis_tile4_picker",
+    "visualizer_classic": "vis_classic_picker",
+    "visualizer_look": "vis_look_picker",
+    "visualizer_flash": "vis_flash_picker",
+    "visualizer_trails": "vis_trails_toggle",
+    "visualizer_ripple": "vis_ripple_toggle",
+    "visualizer_deck_span": "vis_span_picker",
+    "visualizer_bars": "vis_bars_picker",
+    "visualizer_caption": "vis_caption_toggle",
+    "visualizer_fps": "vis_fps_picker",
+    "visualizer_river_view": "vis_river_view_picker",
+    "visualizer_spectrogram_history": "vis_spectro_history_picker",
+    "visualizer_spectrogram_contrast": "vis_spectro_contrast_picker",
+    "visualizer_halo_spokes": "vis_halo_spokes_picker",
+    "visualizer_halo_punch": "vis_halo_punch_picker",
+    "visualizer_tapper_target": "vis_tapper_target_picker",
+    "visualizer_tapper_window": "vis_tapper_window_picker",
+    "visualizer_tapper_offset": "vis_tapper_offset_picker",
     "prefetch_hover": "prefetch_hover_toggle",
     "prefetch_warm_results": "prefetch_warm_picker",
     "radio_mix": "radio_mix_picker",
@@ -112,6 +144,9 @@ _WIDGET_ATTRS: dict[str, str] = {
 _INT_SPECS: dict[str, dict] = {
     "font_size_override_pt": {
         "min": 0, "max": 24, "suffix": " pt", "special": "theme default",
+    },
+    "lyrics_offset_ms": {
+        "min": -2000, "max": 2000, "suffix": " ms",
     },
 }
 
@@ -155,8 +190,36 @@ _CHANGE_HOOKS: dict[str, str] = {
 }
 
 # kind == "custom" widget builders: key → callable(dialog) -> QWidget.
-# Empty today (the font picker is its own first-class kind).
-CUSTOM_BUILDERS: dict[str, object] = {}
+# The widget speaks a small contract (2.3): ``value()`` returns the
+# storage form, ``set_value(raw)`` loads one, ``normalize(raw)`` maps a
+# stored value to the storage form, and a ``changed`` signal fires on
+# user edits. Lazy imports keep this module's import light.
+def _bar_editor(dialog):
+    from .bar_customizer import make_settings_editor
+    return make_settings_editor(dialog)
+
+
+def _type_roles(dialog):
+    from .appearance_pickers import build_type_roles_editor
+    return build_type_roles_editor(dialog)
+
+
+def _icon_sets(dialog):
+    from .appearance_pickers import build_icon_set_picker
+    return build_icon_set_picker(dialog)
+
+
+def _precise_timing(dialog):
+    from .lyric_timing_editor import PreciseTimingEditor
+    return PreciseTimingEditor(dialog)
+
+
+CUSTOM_BUILDERS: dict[str, object] = {
+    "lyrics_precise": _precise_timing,
+    "bar_layout": _bar_editor,
+    "font_roles": _type_roles,
+    "icon_set": _icon_sets,
+}
 
 
 def _dim(label: QLabel) -> QLabel:
@@ -349,6 +412,9 @@ class SettingsDialog(QDialog):
                 raise KeyError(
                     f"{desc.key}: custom kind with no registered builder")
             w = builder(self)
+            sig = getattr(w, "changed", None)
+            if sig is not None:
+                sig.connect(lambda *_a, k=desc.key: self._on_option_changed(k))
         else:
             raise ValueError(f"{desc.key}: unknown kind {kind!r}")
         if desc.tooltip:
@@ -439,6 +505,16 @@ class SettingsDialog(QDialog):
                 lambda: QDesktopServices.openUrl(
                     QUrl("https://listenbrainz.org/profile/")))
             extras.append(self.lb_help)
+        elif desc.key == "font_family_override":
+            # 2.3: the live browser — search, each face in itself, a sample.
+            self.font_browse_btn = QPushButton("browse  →")
+            self.font_browse_btn.setFlat(True)
+            self.font_browse_btn.setToolTip(
+                "search every font, each drawn in its own face, with a "
+                "sample line")
+            self.font_browse_btn.clicked.connect(
+                lambda: QTimer.singleShot(0, self._open_font_browser))
+            extras.append(self.font_browse_btn)
         marker: QLabel | None = None
         if desc.per_preset:
             marker = QLabel("·per personality·")
@@ -459,6 +535,15 @@ class SettingsDialog(QDialog):
         if marker is not None:
             row.addWidget(marker)
         return box
+
+    def _open_font_browser(self) -> None:
+        from .appearance_pickers import FontBrowser
+        desc = self._by_key["font_family_override"]
+        current = str(self._read_value(desc) or "")
+        browser = FontBrowser(current, parent=self)
+        browser.picked.connect(lambda fam: self._set_widget_value(desc, fam))
+        self._font_browser = browser
+        browser.show_under(self.font_browse_btn)
 
     def _build_font_picker(self, desc: settings_schema.OptionDesc) -> QComboBox:
         """The v1 full-family font picker: every system family in its
@@ -841,6 +926,8 @@ class SettingsDialog(QDialog):
                 w.setCurrentIndex(idx)
             else:
                 w.setCurrentText(str(value or ""))
+        elif desc.kind == "custom" and hasattr(w, "set_value"):
+            w.set_value(value)
 
     def _about_items(self) -> list:
         from .. import __version__
@@ -924,7 +1011,8 @@ class SettingsDialog(QDialog):
             else:
                 # Custom family not in the list — show it as free text.
                 w.setCurrentText(value)
-        # custom widgets own their own populate
+        elif desc.kind == "custom" and hasattr(w, "set_value"):
+            w.set_value(raw)
 
     def _normalize(self, desc: settings_schema.OptionDesc, raw) -> object:
         """The opening value through the same lens _read_value uses, so
@@ -935,6 +1023,10 @@ class SettingsDialog(QDialog):
             return int(raw or 0)
         if desc.kind in ("str", "font"):
             return str(raw or "").strip()
+        if desc.kind == "custom":
+            w = self._widgets.get(desc.key)
+            if w is not None and hasattr(w, "normalize"):
+                return w.normalize(raw)
         return raw
 
     def _read_value(self, desc: settings_schema.OptionDesc):
@@ -958,6 +1050,8 @@ class SettingsDialog(QDialog):
             row_label = w.itemText(w.currentIndex()).strip()
             value = data if text == row_label else text
             return value or ""
+        if desc.kind == "custom" and hasattr(w, "value"):
+            return w.value()
         return self._originals.get(desc.key)   # custom: widget owns state
 
     def widget_for(self, key: str) -> QWidget | None:

@@ -114,6 +114,11 @@ STASH_FIELDS: tuple[str, ...] = (
     "show_thumbnails",
     # glyphs flip (chrome is personality); keymap stays global (muscle memory)
     "glyph_overrides",
+    # 2.3: the bar, the type roles and the icons are chrome too
+    "bar_layout",
+    "font_roles",
+    "icon_set",
+    "glyph_pack",
 )
 
 
@@ -202,6 +207,20 @@ def restore(settings: Settings, preset_id: str) -> None:
     settings.preset = preset_id
 
 
+def push_chrome_state(settings: Settings) -> None:
+    """The process-wide registries a personality's 2.3 chrome lives in:
+    typography roles, modern's icon set, brutalist's glyph pack. Pure
+    module state — no restyle, no repaint (callers own those)."""
+    from . import glyphs
+    from .ui import icon_sets, typefaces
+    typefaces.set_roles(getattr(settings, "font_roles", None) or {})
+    icon_sets.set_active(getattr(settings, "icon_set", "") or "regular")
+    try:
+        glyphs.set_pack(getattr(settings, "glyph_pack", "") or "default")
+    except KeyError:
+        glyphs.set_pack("default")
+
+
 def apply_preset(settings: Settings, preset_id: str, window=None,
                  persist: bool = True) -> None:
     """Flip the active personality: stash the outgoing, restore the
@@ -219,6 +238,9 @@ def apply_preset(settings: Settings, preset_id: str, window=None,
     else:
         stash(settings)
 
+    # 2.3 chrome state (type roles, icon set, glyph pack) BEFORE the
+    # restyle below, so its stylesheet already carries the role rules
+    push_chrome_state(settings)
     # one restyle for slug+font+size+case instead of four
     from . import theming
     theming.manager().apply_bundle(

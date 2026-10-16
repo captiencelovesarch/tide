@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest import mock
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QMouseEvent, QColor
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QWidget
@@ -32,8 +32,24 @@ class PanelTest(unittest.TestCase):
         self.assertEqual((c.red(), c.green(), c.blue(), c.alpha()), (128, 128, 128, 255))
         self.assertEqual(material.composite("#123456", "not a colour").name(), "#123456")
 
+    def test_speed_bubble_paints_an_opaque_panel(self) -> None:
+        # the 2.3 speed bubble replaced the spring speed popover
+        from tide.ui.speed_bubble import SpeedBubble
+        theming.manager().apply("blackwater")           # bg #000: the hardest ground
+        bub = SpeedBubble()
+        self.addCleanup(bub.deleteLater)
+        bub.setGeometry(100, 100, 260, 200)
+        bub._panel = QRectF(10, 10, 240, 120)
+        bub._stem = QRectF(100, 140, 60, 30)
+        bub.show()
+        QTest.qWait(30)
+        img = bub.grab().toImage()
+        px = img.pixelColor(130, 70)                    # the middle of the panel
+        self.assertEqual(px.alpha(), 255)
+        self.assertGreater(px.lightnessF(), 0.02, "panel must lift off pure black")
+        bub.hide()
+
     def test_spring_popovers_paint_opaque_panels(self) -> None:
-        from tide.ui.speed import SpringSpeedPopover
         from tide.ui.audio_fx_popover import SpringAudioFxPopover
         theming.manager().apply("blackwater")           # bg #000: the hardest ground
         host = QWidget()
@@ -41,7 +57,7 @@ class PanelTest(unittest.TestCase):
         self.addCleanup(host.deleteLater)
         fill, _line = material.panel_colors(theming.manager().current())
         self.assertGreater(fill.lightnessF(), 0.02, "panel must lift off pure black")
-        for cls in (SpringSpeedPopover, SpringAudioFxPopover):
+        for cls in (SpringAudioFxPopover,):
             with self.subTest(popover=cls.__name__):
                 pop = cls(host)
                 self.addCleanup(pop.deleteLater)

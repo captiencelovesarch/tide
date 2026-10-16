@@ -79,6 +79,10 @@ class SpringSlider(QWidget):
         self._settle = None                 # in-flight QVariantAnimation
         self._settle_token: object = object()
         self._wheel_accum = 0
+        # 2.3 options for hosts that draw their own readout (the speed
+        # bubble): no floating value bubble, and a square brutalist face.
+        self._value_bubble = True
+        self._square = False
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setCursor(Qt.PointingHandCursor)
@@ -127,6 +131,18 @@ class SpringSlider(QWidget):
             self._cancel_settle()
             self._display = q
             self.update()
+
+    def set_value_bubble(self, on: bool) -> None:
+        """Off: the host shows the value itself; the slider sits centred
+        in a compact height and never floats its own readout."""
+        self._value_bubble = bool(on)
+        self.updateGeometry()
+        self.update()
+
+    def set_square(self, on: bool) -> None:
+        """Square groove, square detents, square handle — brutalist."""
+        self._square = bool(on)
+        self.update()
 
     def set_formatter(self, fn: Callable[[float], str]) -> None:
         self._formatter = fn
@@ -304,6 +320,8 @@ class SpringSlider(QWidget):
         our own sizeHint. A host that pins us shorter (the 26px volume
         seat) pushes the groove low and gets no bubble (_bubble_rect)."""
         hr = float(self._handle_r())
+        if not self._value_bubble:
+            return self.height() / 2.0
         roomy = float(self._bubble_h() + self._bubble_gap()) + hr
         cramped = max(hr, float(self.height()) - hr - float(scale.px(2)))
         return min(roomy, cramped)
@@ -359,6 +377,8 @@ class SpringSlider(QWidget):
     def _bubble_rect(self, text: str) -> QRectF | None:
         """Bubble rect, or None when too short to float it clear of the
         handle and ticks (the 26px volume seat relies on this)."""
+        if not self._value_bubble:
+            return None
         fm = QFontMetrics(self.font())
         bw = float(fm.horizontalAdvance(text) + scale.px(10))
         bh = float(self._bubble_h())
@@ -383,7 +403,7 @@ class SpringSlider(QWidget):
             fg = dim
 
         g = self._groove_rect()
-        radius = g.height() / 2.0
+        radius = 0.0 if self._square else g.height() / 2.0
         hx = self._x_for_value(self._display)
         hy = g.center().y()
         hr = float(self._handle_r())
@@ -421,14 +441,20 @@ class SpringSlider(QWidget):
             ink.setAlpha(DETENT_DOT_ALPHA_ON if on_it else DETENT_DOT_ALPHA)
             p.setPen(Qt.NoPen)
             p.setBrush(ink)
-            p.drawEllipse(QPointF(dx, hy), dot_r, dot_r)
+            if self._square:
+                p.drawRect(QRectF(dx - dot_r, hy - dot_r, 2 * dot_r, 2 * dot_r))
+            else:
+                p.drawEllipse(QPointF(dx, hy), dot_r, dot_r)
 
         # handle — fg disc with a bg ring. fg, not accent: the disc sits on
         # the accent fill for most of its travel and an accent-on-accent
         # disc is only its ring.
         p.setPen(QPen(bg_alt, max(1.0, float(scale.px(2)))))
         p.setBrush(fg)
-        p.drawEllipse(QPointF(hx, hy), hr, hr)
+        if self._square:
+            p.drawRect(QRectF(hx - hr * 0.8, hy - hr, hr * 1.6, 2 * hr))
+        else:
+            p.drawEllipse(QPointF(hx, hy), hr, hr)
 
         if (self._drag or self._settle is not None) and self.isEnabled():
             text = self._bubble_text()
@@ -458,6 +484,8 @@ class SpringSlider(QWidget):
         self.update()
 
     def _preferred_h(self) -> int:
+        if not self._value_bubble:
+            return 2 * self._handle_r() + scale.px(6)
         # Tall enough for the bubble to clear the disc and tick band —
         # _bubble_rect drops the bubble entirely rather than overlap.
         return max(

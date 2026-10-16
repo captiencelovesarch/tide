@@ -124,6 +124,9 @@ class BracketButton(QPushButton):
         # when the backdrop behind the button would swallow the icon.
         self._icon_spec: tuple[str, str, int] | None = None
         self._icon_shown: str = ""
+        # The bar's per-control size step (2.3, ui/bar_config.py): scales
+        # the icon, the text and the play circle. 1.0 = as designed.
+        self._size_factor = 1.0
         self.setFlat(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
@@ -267,6 +270,48 @@ class BracketButton(QPushButton):
             self._icon_spec = None
         self._update_text()
 
+    def setSizeFactor(self, factor: float) -> None:
+        """Scale the whole control (the bar's S / M / L). Re-runs the
+        theme pass so every face — inline brutalist sheets, the modern
+        base sheet, the variants' own sheets — picks it up."""
+        factor = max(0.5, min(2.0, float(factor)))
+        if abs(factor - self._size_factor) < 1e-6:
+            return
+        self._size_factor = factor
+        self._apply_theme(getattr(self, "_theme", None)
+                          or theming.manager().current_effective())
+        self.updateGeometry()
+
+    def sizeFactor(self) -> float:
+        return self._size_factor
+
+    def setStyleSheet(self, css: str) -> None:  # type: ignore[override]
+        """Every face's sheet funnels through here so the size step lands
+        on top of whichever one won (subclasses replace the base's)."""
+        super().setStyleSheet((css or "") + self._size_css(css or ""))
+
+    def _size_css(self, css: str) -> str:
+        f = getattr(self, "_size_factor", 1.0)
+        if abs(f - 1.0) < 1e-6:
+            return ""
+        import re as _re
+        m = _re.search(r"font-size:\s*([0-9.]+)pt", css)
+        if m:
+            base_pt = float(m.group(1))
+        else:
+            from PySide6.QtWidgets import QApplication as _QA
+            app = _QA.instance()
+            base_pt = app.font().pointSizeF() if app is not None else 10.0
+            if base_pt <= 0:
+                base_pt = 10.0
+        rule = f"font-size: {base_pt * f:.1f}pt;"
+        if self._primary and self._modern():
+            rule += f" border-radius: {self._primary_d() // 2}px;"
+        return f" QPushButton#BracketButton {{ {rule} }}"
+
+    def _primary_d(self) -> int:
+        return int(round(self.primary_diameter() * getattr(self, "_size_factor", 1.0)))
+
     def _modern(self) -> bool:
         return getattr(self._theme, "aesthetic", "") == "modern"
 
@@ -287,11 +332,12 @@ class BracketButton(QPushButton):
 
     def _icon_px(self, role: str) -> int:
         from . import scale as _scale
+        f = getattr(self, "_size_factor", 1.0)
         if self._primary:
-            return _scale.px(self.PRIMARY_ICON_PX)
+            return int(round(_scale.px(self.PRIMARY_ICON_PX) * f))
         hint = type(self).ICON_SIZE_HINT
         base = self._ICON_PX.get(hint) or self._ICON_PX.get(role) or 18
-        return _scale.px(base)
+        return int(round(_scale.px(base) * f))
 
     def _fit_primary(self) -> None:
         """Pin the primary button square so QSS's round radius fits; let
@@ -299,7 +345,7 @@ class BracketButton(QPushButton):
         Qt does not clamp a border-radius wider than the box, it just
         stops drawing it round, so the box has to match the radius."""
         if self._primary and self._modern():
-            d = self.primary_diameter()
+            d = self._primary_d()
             if self.minimumSize() != QSize(d, d):
                 self.setFixedSize(d, d)
         elif self.minimumSize() == self.maximumSize() and self.minimumWidth() > 0:
@@ -679,13 +725,24 @@ class MonoProgress(QWidget):
         p.drawText(QRect(x, 0, fm.horizontalAdvance(bracket_open), rect.height()),
                    Qt.AlignVCenter | Qt.AlignLeft, bracket_open)
         x += fm.horizontalAdvance(bracket_open)
-        # filled cells
+        # filled cells — the last few ease from accent toward the empty
+        # cells' ink, so the head has no hard switch (2.3)
         if filled:
-            p.setPen(accent)
-            chunk = self.FILLED_CHAR * filled
-            w = fm.horizontalAdvance(chunk)
-            p.drawText(QRect(x, 0, w, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, chunk)
-            x += w
+            from .waveform_seek import blend
+            fade = min(3, filled)
+            solid = filled - fade
+            if solid:
+                p.setPen(accent)
+                chunk = self.FILLED_CHAR * solid
+                w = fm.horizontalAdvance(chunk)
+                p.drawText(QRect(x, 0, w, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, chunk)
+                x += w
+            cw = fm.horizontalAdvance(self.FILLED_CHAR)
+            for j in range(fade):
+                p.setPen(blend(accent, fg, (j + 1) / (fade + 2)))
+                p.drawText(QRect(x, 0, cw, rect.height()),
+                           Qt.AlignVCenter | Qt.AlignLeft, self.FILLED_CHAR)
+                x += cw
         # empty cells
         if empty:
             p.setPen(fg)
@@ -995,6 +1052,14 @@ class AlbumArt(QLabel):
         ))
 
     def _render(self, pix: QPixmap) -> None:
+        from . import art_fx
+        if art_fx.running(self):
+            # A song change restyles the app (the adaptive accent reads
+            # the new cover) while the transition is still on its first
+            # frames; painting _pixmap_raw here flashed the NEXT cover
+            # before the flip had started. The transition lands on a
+            # fresh render of its own (_settle), in whatever look won.
+            return
         self.setPixmap(self._compose(pix))
 
     def _render_empty(self) -> None:
@@ -1024,6 +1089,14 @@ class NowPlayingLabel(QWidget):
         # Rides in the dim line beside album/status; empty = absent, so
         # sources without insights change nothing about the paint.
         self._insights = ""
+        # 2.3: the same numbers split up, so the bar's info lines can pick
+        # them one at a time ({"plays": "84.2m plays", ...}), the track's
+        # source, and the user's line layout (None = this variant's own;
+        # see ui/bar_config.py VARIANT_LINES).
+        self._insight_parts: dict[str, str] = {}
+        self._source = ""
+        self._line_fields: tuple[tuple[str, ...] | None,
+                                 tuple[str, ...] | None] = (None, None)
         self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
         from . import scale as _scale
@@ -1067,6 +1140,121 @@ class NowPlayingLabel(QWidget):
         if self._artist and self._title:
             return f"{self._artist} — {self._title}"
         return self._title or self._artist
+
+    # ----- 2.3 configurable lines -----
+
+    VARIANT = "stacked"
+
+    def set_line_fields(self, line1, line2) -> None:
+        """The bar's info-line layout: a field tuple per line (see
+        bar_config.FIELDS), or None to keep this variant's own."""
+        fields = (tuple(line1) if line1 is not None else None,
+                  tuple(line2) if line2 is not None else None)
+        if fields == self._line_fields:
+            return
+        self._line_fields = fields
+        self.update()
+
+    def line_fields(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        from .bar_config import VARIANT_LINES
+        base1, base2 = VARIANT_LINES.get(self.VARIANT, VARIANT_LINES["stacked"])
+        l1, l2 = self._line_fields
+        return (l1 if l1 is not None else base1,
+                l2 if l2 is not None else base2)
+
+    def setInsightParts(self, parts: dict) -> None:
+        """Structured numbers ({"plays", "likes", "year"} → display text).
+        Also composes the joined string the tooltip and older callers
+        read (a lone year with no counts stays out of it, as before)."""
+        parts = {k: str(v) for k, v in dict(parts or {}).items()
+                 if k in ("plays", "likes", "year") and v}
+        joined = [parts[k] for k in ("plays", "likes") if k in parts]
+        if joined and "year" in parts:
+            joined.append(parts["year"])
+        self.setInsights(" · ".join(joined))
+        self._insight_parts = parts
+        self.update()
+
+    def setSource(self, source: str) -> None:
+        source = str(source or "")
+        if source != self._source:
+            self._source = source
+            self.update()
+
+    def _field_text(self, field: str) -> str:
+        if field == "title":
+            return self._title
+        if field == "artist":
+            return self._artist
+        if field == "album":
+            return self._album
+        if field == "status":
+            return self._status
+        if field == "source":
+            return self._source
+        return self._insight_parts.get(field, "")
+
+    def _compose_line(self, fields, *, primary: bool, skip: str = "") -> str:
+        """One line's text from its fields, cased. Line 1 joins with an
+        em dash; line 2 groups adjacent numbers with " · " and separates
+        everything else with a wider dot — the pre-2.3 punctuation."""
+        style = lambda t: theming.styled_case(t, self._theme)  # noqa: E731
+        if primary:
+            parts = [self._field_text(f) for f in fields]
+            parts = [t for t in parts if t]
+            text = " — ".join(parts)
+            if not text:
+                # The line must never go blank while something plays:
+                # fall back to whichever name exists.
+                text = self._title or self._artist
+            return style(text) if text else ""
+        groups: list[str] = []
+        numbers: list[str] = []
+        stats = ("plays", "likes", "year")
+        has_count_field = any(f in fields for f in ("plays", "likes"))
+        raw_used = False
+
+        def flush() -> None:
+            if numbers:
+                groups.append(style(" · ".join(numbers)))
+                numbers.clear()
+
+        for f in fields:
+            if f in stats:
+                if not self._insight_parts and self._insights:
+                    # A caller handed over only the joined string.
+                    if not raw_used:
+                        numbers.append(self._insights)
+                        raw_used = True
+                    continue
+                t = self._insight_parts.get(f, "")
+                if f == "year" and has_count_field and not (
+                        self._insight_parts.get("plays")
+                        or self._insight_parts.get("likes")):
+                    t = ""      # a lone year reads like a typo
+                if t:
+                    numbers.append(t)
+                continue
+            flush()
+            t = self._field_text(f)
+            if t and t != skip:
+                groups.append(style(t))
+        flush()
+        return "  ·  ".join(groups)
+
+    def _lines(self) -> tuple[str, str]:
+        """(line 1, line 2) for this variant under the current fields."""
+        l1, l2 = self.line_fields()
+        first = self._compose_line(l1, primary=True)
+        # Don't say the same name twice when line 1 fell back to it.
+        skip = ""
+        if first and not any(self._field_text(f) for f in l1):
+            skip = self._title or self._artist
+        return first, self._compose_line(l2, primary=False, skip=skip)
+
+    def _role_font(self, role: str, base=None):
+        from . import typefaces
+        return typefaces.font_for(role, base if base is not None else self.font())
 
     def _refresh_tooltip(self) -> None:
         parts = [self._primary_text()]
@@ -1200,6 +1388,9 @@ class NowPlayingLabel(QWidget):
         self.update()
 
     def setInsights(self, text: str) -> None:
+        # A plain string supersedes any structured parts (setInsightParts
+        # re-installs its own right after calling this).
+        self._insight_parts = {}
         if text == self._insights:
             return
         self._insights = text
@@ -1209,6 +1400,8 @@ class NowPlayingLabel(QWidget):
     def clear(self) -> None:
         self._artist = self._title = self._album = self._status = ""
         self._insights = ""
+        self._insight_parts = {}
+        self._source = ""
         self._marquee.stop()
         self._refresh_tooltip()
         self.update()
@@ -1227,22 +1420,19 @@ class NowPlayingLabel(QWidget):
             p.drawText(rect, Qt.AlignVCenter | Qt.AlignLeft, idle)
             return
 
-        line1_rect = QRect(rect.x(), rect.y(), rect.width(), fm.height())
-        line2_rect = QRect(rect.x(), rect.y() + fm.height() + 2, rect.width(), fm.height())
+        # line 1 (default artist — title) in the title role's face;
+        # line 2 (default album · numbers · status, dim) in the body's.
+        # Both are the bar's to choose since 2.3 (set_line_fields).
+        line1, line2 = self._lines()
+        title_font = self._role_font("title")
+        tfm = QFontMetrics(title_font)
+        line1_rect = QRect(rect.x(), rect.y(), rect.width(), tfm.height())
+        line2_rect = QRect(rect.x(), rect.y() + tfm.height() + 2, rect.width(), fm.height())
 
-        # line 1: artist — title. Scrolls when it overruns the strip;
-        # elides (exactly as it always did) at motion OFF.
-        line1 = theming.styled_case(self._primary_text(), self._theme)
-        self._paint_line(p, line1_rect, line1, fm, "primary", color=fg, scroll=True)
-
-        # line 2: album · insights · status (dim)
-        line2_parts: list[str] = []
-        if self._album:
-            line2_parts.append(theming.styled_case(self._album, self._theme))
-        if self._insights:
-            line2_parts.append(theming.styled_case(self._insights, self._theme))
-        if self._status:
-            line2_parts.append(theming.styled_case(self._status, self._theme))
-        line2 = "  ·  ".join(line2_parts)
+        # Scrolls when it overruns the strip; elides (exactly as it
+        # always did) at motion OFF.
+        p.setFont(title_font)
+        self._paint_line(p, line1_rect, line1, tfm, "primary", color=fg, scroll=True)
+        p.setFont(self.font())
         if line2:
             self._paint_line(p, line2_rect, line2, fm, "secondary", color=dim)

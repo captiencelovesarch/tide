@@ -4,22 +4,25 @@ Three render paths:
 
   - **untimed**: render the full block in a scrollable label, like before.
   - **timed (default)**: render each line as its own widget so we can
-    highlight the active one (bolder + larger + accent color) and scroll
-    it into view as playback advances.
-  - **karaoke** (v1.2.1): toggleable from a checkbox at the top of this
-    view. Big-center current line with per-word highlight that
-    advances interpolated against the line's duration; prev/next lines
-    shown small + dim above and below.
+    highlight the active one (bolder + larger) and scroll it into view as
+    playback advances. The active line is sung word by word: a SweepLine
+    takes its label's place in the list while it's active.
+  - **karaoke**: toggleable from a checkbox at the top of this view.
+    Big-center current line whose words light up as they're sung, the
+    light sweeping through each word (ui/karaoke_line); prev/next lines
+    small + dim above and below.
 
-LRClib is the timed-lyrics fallback when YT Music has none. Word-level
-LRC annotations (``<mm:ss.cc>word``) are rare on LRClib in practice, so
-karaoke mode interpolates word position from the line's duration window
-— good enough to feel right at speech tempo.
+Word timing (2.3) comes from lyric_timing's shared service: a
+word-synced source (LRClib lyricsfile, NetEase YRC) matched onto the
+video's lines, optionally the local aligner, else line mode — words
+spread across each line's window by length. The karaoke checkbox names
+which one is in force. ``offset_ms`` (the "lyrics offset" setting) moves
+every surface's lyrics against the playhead.
 """
 from __future__ import annotations
 
-import html
 import weakref
+from bisect import bisect_right
 
 from PySide6.QtCore import (
     QObject, QThread, Qt, QVariantAnimation, Signal, QTimer,
@@ -36,8 +39,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, qthreads, theming
+from .. import api, lyric_timing, lyric_words, qthreads, theming
 from . import legibility, motion as motion_module, scale as _scale
+from .karaoke_line import SweepLine
 from .headings import Heading, line_heading as _line_heading
 
 
@@ -79,6 +83,83 @@ def set_size(name: str) -> None:
 
 def size() -> str:
     return _size
+
+
+_offset_s: float = 0.0
+OFFSET_RANGE_MS = 2000
+
+
+def set_offset_ms(ms) -> None:
+    """Move every surface's lyrics against the playhead: positive shows
+    them later (for a sheet that runs ahead of the singer)."""
+    global _offset_s
+    try:
+        ms = int(ms or 0)
+    except (TypeError, ValueError):
+        ms = 0
+    ms = max(-OFFSET_RANGE_MS, min(OFFSET_RANGE_MS, ms))
+    _offset_s = -ms / 1000.0
+    lyric_timing.set_offset_s(_offset_s)
+    for view in list(_views):
+        try:
+            view.update_position(view._raw_position)
+        except RuntimeError:
+            pass
+
+
+_list_sweep_on: bool = True
+
+
+def set_list_sweep(on: bool) -> None:
+    """Whether the lyrics list's active line sweeps word by word (off =
+    the whole line lights at once). Karaoke is not affected."""
+    global _list_sweep_on
+    _list_sweep_on = bool(on)
+    for view in list(_views):
+        try:
+            view.sweep_check.blockSignals(True)
+            view.sweep_check.setChecked(_list_sweep_on)
+            view.sweep_check.blockSignals(False)
+            view._unplace_sweep()
+            view._restyle_lines()
+            view._place_sweep()
+            view._list_sweep.report_position(view._last_position)
+        except RuntimeError:
+            pass
+
+
+def list_sweep() -> bool:
+    return _list_sweep_on
+
+
+def offset_ms() -> int:
+    return int(round(-_offset_s * 1000))
+
+
+def refresh_timing() -> None:
+    """Re-ask the word-timing service for every open view's sheet (its
+    settings changed). Cheap when nothing did: the answer is cached."""
+    for view in list(_views):
+        try:
+            view.refresh_timing()
+        except RuntimeError:
+            pass
+
+
+TIMING_TAGS: dict[str, str] = {
+    "source": "synced words",
+    "aligned": "aligned words",
+    "line": "estimated words",
+}
+
+
+def timing_of(sheet) -> str:
+    """The sheet's best word timing: "source" > "aligned" > "line"."""
+    kinds = {l.timing for l in sheet if l.words}
+    for k in ("source", "aligned"):
+        if k in kinds:
+            return k
+    return "line"
 
 
 def size_choices() -> tuple[tuple[str, str], ...]:
@@ -142,13 +223,19 @@ def _set_line_sheet(lbl: QLabel, sheet: str) -> None:
 
 class _KaraokeWidget(QWidget):
     """Big-center karaoke rendering. Stack of three lines (prev, current,
-    next) with the current one bigger, centered, and per-word
-    accent-highlighted as time advances through its duration window."""
+    next): the current one big and centred, its words lit as they're
+    sung by the SweepLine (ui/karaoke_line), the neighbours small + dim.
+
+    Fed a word sheet (lyric_words.WordLine list): word timing from a
+    source, the aligner, or — line mode — spread across the line's window
+    by length. The sheet's own line starts pick the current line, so a
+    re-timed sheet re-times the karaoke too."""
 
     def __init__(self, parent: QWidget | None = None, *,
                  font_scale: float = 1.0) -> None:
         super().__init__(parent)
-        self._lines: list[tuple[float, str]] = []
+        self._sheet: list = []
+        self._starts: list[float] = []
         # Effective, not base: built mid-song (mini panel, fullscreen)
         # the accent must be the adaptive one already in force.
         self._theme = theming.manager().current_effective()
@@ -158,14 +245,15 @@ class _KaraokeWidget(QWidget):
 
         # InkLabel: rich, selectable text paints past the style proxy.
         self.prev_label = legibility.InkLabel(" ")
-        self.current_label = legibility.InkLabel(" ")
         self.next_label = legibility.InkLabel(" ")
+        self.current_line = SweepLine()
 
-        for lbl in (self.prev_label, self.current_label, self.next_label):
+        for lbl in (self.prev_label, self.next_label):
             lbl.setWordWrap(True)
             lbl.setAlignment(Qt.AlignCenter)
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            lbl.setTextFormat(Qt.RichText)
+            # remote text: never rendered as markup
+            lbl.setTextFormat(Qt.PlainText)
             lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
         col = QVBoxLayout(self)
@@ -173,23 +261,36 @@ class _KaraokeWidget(QWidget):
         col.setSpacing(18)
         col.addStretch(1)
         col.addWidget(self.prev_label)
-        col.addWidget(self.current_label)
+        col.addWidget(self.current_line)
         col.addWidget(self.next_label)
         col.addStretch(1)
 
         self._apply_styles()
 
     def set_lines(self, lines: list[tuple[float, str]]) -> None:
-        self._lines = list(lines)
-        self._active_idx = -1
-        self._render()
+        self.set_sheet(lyric_words.line_sheet(list(lines)))
+
+    def set_sheet(self, sheet: list) -> None:
+        self._sheet = list(sheet)
+        self._starts = [l.start for l in self._sheet]
+        self._active_idx = -2
+        self.set_position(self._current_secs)
+
+    def sheet(self) -> list:
+        return list(self._sheet)
+
+    def set_position(self, secs: float) -> None:
+        self._current_secs = float(secs)
+        idx = bisect_right(self._starts, self._current_secs) - 1
+        if idx != self._active_idx:
+            self._active_idx = idx
+            self._render()
+        self.current_line.report_position(self._current_secs)
 
     def set_active_index(self, idx: int, current_secs: float) -> None:
-        if idx == self._active_idx and abs(current_secs - self._current_secs) < 0.05:
-            return
-        self._active_idx = idx
-        self._current_secs = current_secs
-        self._render()
+        """Kept for callers that pick the line themselves; the sheet's
+        own timing wins."""
+        self.set_position(current_secs)
 
     def set_theme(self, theme) -> None:
         self._theme = theme
@@ -202,6 +303,7 @@ class _KaraokeWidget(QWidget):
         theme = self._theme
         dim = theme.token("dim", "#6f6f6f") if theme else "#6f6f6f"
         fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
         side_pt = type_pt("side", self._font_scale)
         cur_pt = type_pt("center", self._font_scale)
         self.prev_label.setStyleSheet(
@@ -210,89 +312,22 @@ class _KaraokeWidget(QWidget):
         self.next_label.setStyleSheet(
             f"color: {dim}; background: transparent; font-size: {side_pt}pt; padding: 0;"
         )
-        # The current line's styling is set per-render because we paint
-        # the active word in accent and the rest in fg via rich-text spans.
-        self.current_label.setStyleSheet(
-            f"color: {fg}; background: transparent; font-size: {cur_pt}pt; "
-            f"font-weight: 700; padding: 12px 0; letter-spacing: 0.02em;"
-        )
+        modern = getattr(theme, "aesthetic", "") == "modern"
+        self.current_line.set_look(fg=QColor(fg), accent=QColor(accent),
+                                   modern=modern, pt=cur_pt)
+        self.current_line.setContentsMargins(0, 12, 0, 12)
 
     def _render(self) -> None:
         idx = self._active_idx
-        n = len(self._lines)
-        prev_text = self._lines[idx - 1][1] if 0 < idx < n else ""
-        cur_text = self._lines[idx][1] if 0 <= idx < n else ""
-        next_text = self._lines[idx + 1][1] if 0 <= idx < n - 1 else ""
-
-        self.prev_label.setText(html.escape(prev_text or " "))
-        self.next_label.setText(html.escape(next_text or " "))
-
-        # Active-word interpolation: find which word within the current
-        # line should be highlighted given how far we are through the
-        # line's duration window. Two refinements on top of the naive
-        # "split duration / word count":
-        #   1) Character-weighted distribution. "Mississippi" and "is"
-        #      shouldn't get the same time slice — they don't get sung
-        #      for the same length. We weight each word's time share
-        #      by its character count, which approximates syllable
-        #      count well enough for English-language pop.
-        #   2) Clamped sing window. LRC lines don't have an end time;
-        #      we only know when the NEXT line starts. If there's a
-        #      long instrumental break between lines, the naive math
-        #      drags the highlight across each word for seconds at a
-        #      time. Cap the effective duration at 4.5s OR a per-char
-        #      budget of 0.35s, whichever is larger.
-        #   3) Forward bias of 120ms — LRClib timestamps tend to land
-        #      slightly *after* the singer's actual word, biasing the
-        #      perceived timing as "too late". Nudging the highlight
-        #      forward by a small fraction matches what feels natural
-        #      on most tracks.
-        if not cur_text.strip() or idx < 0 or idx >= n:
-            self.current_label.setText(html.escape(cur_text or " "))
-            return
-        line_start = float(self._lines[idx][0])
-        line_end = float(self._lines[idx + 1][0]) if (idx + 1) < n else line_start + 4.0
-
-        words = cur_text.split()
-        if not words:
-            self.current_label.setText(html.escape(cur_text or " "))
-            return
-
-        char_budget = max(2, sum(len(w) for w in words))
-        max_sing_window = max(4.5, 0.35 * char_budget)
-        line_dur = max(0.4, min(line_end - line_start, max_sing_window))
-
-        elapsed = max(0.0, self._current_secs - line_start + 0.12)
-
-        # Build a cumulative character-weighted timeline: word i becomes
-        # active when elapsed crosses `cumulative_chars[i] / total_chars *
-        # line_dur`. This is much closer to how words are actually sung
-        # than uniform time slicing.
-        active = 0
-        accum = 0
-        for i, w in enumerate(words):
-            accum += max(1, len(w))
-            threshold = (accum / char_budget) * line_dur
-            if elapsed >= threshold:
-                active = i + 1
-        active = max(0, min(len(words) - 1, active))
-
-        theme = self._theme
-        accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
-        # The sung word's colour is baked into the markup, out of the
-        # palette's reach, so it reads the backdrop here.
-        accent = legibility.ink(self.current_label, QColor(accent)).name()
-        parts: list[str] = []
-        for i, w in enumerate(words):
-            esc = html.escape(w)
-            if i == active:
-                parts.append(f"<span style='color:{accent};'>{esc}</span>")
-            elif i < active:
-                # past words: slight dim so the "wave" of advance is visible
-                parts.append(f"<span style='opacity:0.75;'>{esc}</span>")
-            else:
-                parts.append(esc)
-        self.current_label.setText(" ".join(parts))
+        n = len(self._sheet)
+        prev_text = self._sheet[idx - 1].text if 0 < idx < n else ""
+        next_text = self._sheet[idx + 1].text if 0 <= idx < n - 1 else ""
+        if idx < 0 and n:
+            # the intro: what's coming up sits underneath
+            next_text = self._sheet[0].text
+        self.prev_label.setText(prev_text or " ")
+        self.next_label.setText(next_text or " ")
+        self.current_line.set_line(self._sheet[idx] if 0 <= idx < n else None)
 
 
 class LyricsView(QWidget):
@@ -302,6 +337,9 @@ class LyricsView(QWidget):
     # the button is now checked (swap to instrumental); False when the
     # user toggled it off (swap back to vocal).
     toggle_instrumental_requested = Signal(object, bool)   # track, want_instrumental
+    # The tab's [sweep words] checkbox: MainWindow persists it as
+    # Settings.lyrics_list_sweep and applies it (set_list_sweep).
+    list_sweep_toggled = Signal(bool)
 
     def __init__(self, api_obj: api.Api, parent: QWidget | None = None, *,
                  font_scale: float = 1.0) -> None:
@@ -316,11 +354,17 @@ class LyricsView(QWidget):
 
         self._current_video_id: str | None = None
         self._current_track = None
+        self._current_key: str | None = None
+        self._result = None
+        # Position as reported, before the lyrics offset.
+        self._raw_position: float = 0.0
+        lyric_timing.service().updated.connect(self._on_sheet)
         self._thread: QThread | None = None
         self._worker: _LyricsWorker | None = None
 
         # Timed state
         self._timed_lines: list[tuple[float, str]] = []
+        self._timed_starts: list[float] = []
         self._line_widgets: list[_LineLabel] = []
         self._active_line_index: int = -1
         self._lines_behind: bool = False
@@ -343,6 +387,15 @@ class LyricsView(QWidget):
         # on the main playback control bar.
         self.karaoke_check = QCheckBox(theming.styled_case("karaoke mode"))
         self.karaoke_check.toggled.connect(self._on_karaoke_toggled)
+        # Word-by-word sweep in the live list (karaoke always sweeps).
+        # Part of the tab's chrome: it follows karaoke_check's visibility,
+        # so embeds that hide the chrome (mini, fullscreen, the visualizer
+        # tile) hide this too.
+        self.sweep_check = QCheckBox(theming.styled_case("sweep words"))
+        self.sweep_check.setChecked(_list_sweep_on)
+        self.sweep_check.setToolTip(theming.styled_case(
+            "light the line being sung word by word. off lights the whole line."))
+        self.sweep_check.toggled.connect(self.list_sweep_toggled.emit)
         # "mute lyrics" — swap to instrumental version of current track.
         # Stays disabled until a track is loaded and the instrumental
         # search infrastructure (P3.5) is wired in.
@@ -358,6 +411,7 @@ class LyricsView(QWidget):
         toggles_row.setContentsMargins(0, 0, 0, 0)
         toggles_row.setSpacing(12)
         toggles_row.addWidget(self.karaoke_check)
+        toggles_row.addWidget(self.sweep_check)
         toggles_row.addWidget(self.mute_btn)
         toggles_row.addStretch(1)
 
@@ -377,6 +431,15 @@ class LyricsView(QWidget):
         self._timed_layout.setContentsMargins(0, 6, 0, 6)
         self._timed_layout.setSpacing(4)
         self._timed_layout.addStretch(1)
+        # The list's active line, sung word by word: this sweep line takes
+        # the active label's place in the list (the label hides) and moves
+        # down as the song does. Only for lines with words to sweep.
+        self._sheet: list = []
+        self._list_sweep = SweepLine(self._timed_host)
+        self._list_sweep.set_left_aligned(True)
+        self._list_sweep.setContentsMargins(0, 4, 0, 4)
+        self._list_sweep.hide()
+        self._sweep_at = -1
 
         self._karaoke_widget = _KaraokeWidget(font_scale=self._font_scale)
         # Named so the adaptive-background QSS transparentizes this container
@@ -405,6 +468,8 @@ class LyricsView(QWidget):
         if track is None:
             self._current_video_id = None
             self._current_track = None
+            self._current_key = None
+            self._result = None
             self.heading.set_label("lyrics")
             self._show_plain("── no track ──")
             self._clear_timed()
@@ -414,6 +479,8 @@ class LyricsView(QWidget):
             return
         self._current_video_id = track.video_id
         self._current_track = track
+        self._current_key = lyric_timing.track_key(track)
+        self._result = None
         self.heading.set_label(f"lyrics · {(track.title or '').lower()}")
         self._show_plain("── loading ──")
         self._clear_timed()
@@ -437,26 +504,27 @@ class LyricsView(QWidget):
         thread.start()
 
     def update_position(self, seconds: float) -> None:
-        self._last_position = float(seconds)
+        self._raw_position = float(seconds)
+        seconds = float(seconds) + _offset_s
+        self._last_position = seconds
         if not self._timed_lines:
             return
-        # Find latest line whose timestamp <= seconds.
-        idx = -1
-        for i, (t, _line) in enumerate(self._timed_lines):
-            if t <= seconds:
-                idx = i
-            else:
-                break
-        # Karaoke wants per-tick word interpolation even when the line
-        # didn't change, so it gets fed every position update.
+        # Latest line whose timestamp <= seconds.
+        idx = bisect_right(self._timed_starts, seconds) - 1
+        # Karaoke keeps its own clock between reports; every one re-syncs it.
         if self._karaoke_mode:
-            self._karaoke_widget.set_active_index(idx, float(seconds))
+            self._karaoke_widget.set_position(seconds)
+        elif self._sweep_at >= 0:
+            self._list_sweep.report_position(seconds)
         if idx == self._active_line_index:
             return
         self._active_line_index = idx
         if self._karaoke_mode:
             return
         self._restyle_lines()
+        self._place_sweep()
+        if self._sweep_at >= 0:
+            self._list_sweep.report_position(seconds)
         if not self.isVisible():
             # Nobody is looking: skip the colour fade (a stylesheet per
             # frame) and the scroll glide; showEvent parks the list.
@@ -467,6 +535,7 @@ class LyricsView(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.sweep_check.setVisible(not self.karaoke_check.isHidden())
         if self._lines_behind:
             self._lines_behind = False
             if not self._karaoke_mode and self._line_widgets:
@@ -481,12 +550,29 @@ class LyricsView(QWidget):
         if not isinstance(result, LyricsResult):
             self._show_plain("── no lyrics for this track ──")
             return
-        if result.has_timed:
-            self._show_timed(result.timed_lines)
+        self._result = result
+        # Word timing: the best sheet known now; the service upgrades it
+        # in the background (_on_sheet).
+        sheet = lyric_timing.service().sheet_for(self._current_track, result)
+        if sheet:
+            self._show_sheet(sheet)
         elif result.plain_text:
             self._show_plain(result.plain_text)
         else:
             self._show_plain("── no lyrics for this track ──")
+
+    def refresh_timing(self) -> None:
+        if self._result is None or self._current_track is None:
+            return
+        sheet = lyric_timing.service().sheet_for(self._current_track, self._result)
+        if sheet:
+            self._show_sheet(sheet)
+        self._karaoke_widget.current_line.update()
+
+    def _on_sheet(self, key: str, sheet) -> None:
+        if key != self._current_key or self._current_key is None or not sheet:
+            return
+        self._show_sheet(sheet)
 
     def _on_failed(self, video_id: str, _msg: str) -> None:
         if video_id != self._current_video_id:
@@ -495,8 +581,32 @@ class LyricsView(QWidget):
 
     # ---------- render modes ----------
 
+    def _show_sheet(self, sheet) -> None:
+        """Show a word sheet. A sheet with the same lines as the one up
+        (a timing upgrade) only re-times: the line widgets stay."""
+        lines = [(l.start, l.text) for l in sheet]
+        self._sheet = list(sheet)
+        same = (len(lines) == len(self._timed_lines) and self._line_widgets
+                and all(a[1] == b[1] for a, b in zip(lines, self._timed_lines)))
+        if same:
+            self._timed_lines = lines
+            self._timed_starts = [t for t, _l in lines]
+            self._karaoke_widget.set_sheet(sheet)
+            self._unplace_sweep()       # re-placed below with the new words
+        else:
+            self._show_timed(lines)
+            self._karaoke_widget.set_sheet(sheet)
+        tag = TIMING_TAGS[timing_of(sheet)]
+        self.karaoke_check.setText(theming.styled_case(f"karaoke mode · {tag}"))
+        self._active_line_index = -2
+        self.update_position(self._raw_position)
+
     def _show_plain(self, text: str) -> None:
+        self._sheet = []
+        self._unplace_sweep()
         self._timed_lines = []
+        self._timed_starts = []
+        self.karaoke_check.setText(theming.styled_case("karaoke mode"))
         self._active_line_index = -1
         self._plain_label.setText(text)
         self._scroll.takeWidget()
@@ -504,6 +614,7 @@ class LyricsView(QWidget):
 
     def _show_timed(self, lines: list[tuple[float, str]]) -> None:
         self._timed_lines = lines
+        self._timed_starts = [t for t, _l in lines]
         self._active_line_index = -1
         self._clear_timed()
         for _t, text in lines:
@@ -521,9 +632,58 @@ class LyricsView(QWidget):
 
     def _clear_timed(self) -> None:
         self._stop_line_motion()
+        self._unplace_sweep()
         for w in self._line_widgets:
             w.deleteLater()
         self._line_widgets = []
+
+    def _unplace_sweep(self) -> None:
+        at = self._sweep_at
+        self._sweep_at = -1
+        self._timed_layout.removeWidget(self._list_sweep)
+        self._list_sweep.hide()
+        self._list_sweep.set_line(None)
+        if 0 <= at < len(self._line_widgets):
+            try:
+                self._line_widgets[at].show()
+            except RuntimeError:
+                pass
+
+    def _place_sweep(self) -> None:
+        """Put the sweep line where the active label is (and the label
+        back where the sweep was)."""
+        idx = self._active_line_index
+        line = self._sheet[idx] if 0 <= idx < len(self._sheet) else None
+        ok = (_list_sweep_on and line is not None and bool(line.words) and idx < len(self._line_widgets)
+              and line.text == self._timed_lines[idx][1] and bool(line.text.strip()))
+        if self._sweep_at == idx and ok:
+            self._list_sweep.set_line(line)
+            return
+        self._unplace_sweep()
+        if not ok:
+            return
+        self._apply_sweep_look()
+        # start the text where the labels start theirs: QLabel indents by
+        # half an "x" when it has a frame (and the list labels do)
+        lbl = self._line_widgets[idx]
+        indent = lbl.indent()
+        if indent < 0:
+            indent = lbl.fontMetrics().horizontalAdvance("x") // 2 if lbl.frameWidth() > 0 else 0
+        self._list_sweep.setContentsMargins(lbl.contentsRect().left() + indent, 4, 0, 4)
+        self._list_sweep.set_line(line)
+        self._timed_layout.insertWidget(idx, self._list_sweep)
+        self._line_widgets[idx].hide()
+        self._list_sweep.show()
+        self._sweep_at = idx
+
+    def _apply_sweep_look(self) -> None:
+        theme = self._theme
+        fg = theme.token("fg", "#e6e6e6") if theme else "#e6e6e6"
+        accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
+        self._list_sweep.set_look(
+            fg=QColor(fg), accent=QColor(accent),
+            modern=getattr(theme, "aesthetic", "") == "modern",
+            pt=type_pt("active", self._font_scale))
 
     def _stop_line_motion(self) -> None:
         for anim in (self._scroll_anim, self._active_anim):
@@ -543,6 +703,8 @@ class LyricsView(QWidget):
         idx = self._active_line_index
         if not (0 <= idx < len(self._line_widgets)):
             return
+        if idx == self._sweep_at:
+            return   # the sweep line is up; the label is hidden
         if motion_module.intensity() == motion_module.Intensity.OFF:
             return   # _restyle_lines already painted the accent
         theme = self._theme
@@ -579,7 +741,7 @@ class LyricsView(QWidget):
         if self._scroll_anim is not None:
             self._scroll_anim.stop()
             self._scroll_anim = None
-        target = self._line_widgets[idx]
+        target = self._list_sweep if idx == self._sweep_at else self._line_widgets[idx]
         # Sizes just changed in _restyle_lines; settle geometry before
         # reading positions or the goal is one restyle stale.
         host_layout = self._timed_host.layout()
@@ -635,6 +797,7 @@ class LyricsView(QWidget):
 
     def _on_karaoke_toggled(self, on: bool) -> None:
         self._karaoke_mode = bool(on)
+        self.sweep_check.setEnabled(not self._karaoke_mode)   # karaoke always sweeps
         # No timed data yet → toggle is harmless visual-state-only.
         if not self._timed_lines:
             return
@@ -643,13 +806,7 @@ class LyricsView(QWidget):
             # Re-sync the karaoke widget to the current playback position
             # so the user doesn't see the "active line" pop back to -1
             # for a beat after toggling on.
-            idx = -1
-            for i, (t, _line) in enumerate(self._timed_lines):
-                if t <= self._last_position:
-                    idx = i
-                else:
-                    break
-            self._karaoke_widget.set_active_index(idx, self._last_position)
+            self._karaoke_widget.set_position(self._last_position)
             self._scroll.setWidget(self._karaoke_widget)
         else:
             self._scroll.setWidget(self._timed_host)
@@ -681,4 +838,5 @@ class LyricsView(QWidget):
             f"font-size: {type_pt('line', self._font_scale)}pt;")
         if self._line_widgets:
             self._restyle_lines()
+        self._apply_sweep_look()
         self._karaoke_widget.set_theme(self._theme)

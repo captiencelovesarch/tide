@@ -80,6 +80,44 @@ class Settings:
     show_thumbnails: str = "theme"
     # Empty = auto-detect default sink monitor; otherwise PulseAudio source name.
     audio_device: str = ""
+    # ---- the visualizer tab (2.3 remaster, ui/vis_deck.py + vis_play.py) ----
+    # Tile layout: "single" | "split" | "stack" | "trio" | "quad".
+    visualizer_layout: str = "stack"
+    # What each slot shows (vis_play.TILE_KINDS), in layout order; slots
+    # past the layout's count are kept for when it grows back.
+    visualizer_tile_1: str = "spectrum"
+    visualizer_tile_2: str = "deck"
+    visualizer_tile_3: str = "lyrics"
+    visualizer_tile_4: str = "halo"
+    # What a "classic renderer" tile draws: "theme" (the theme's own pick)
+    # or one of the pre-2.3 renderer slugs.
+    visualizer_classic: str = "theme"
+    # "auto" follows the theme's aesthetic: brutalist → blocks, modern → glow.
+    visualizer_look: str = "auto"
+    # Kicks leave fading ghosts of the bars / scope line.
+    visualizer_trails: bool = True
+    # Kicks send a light running round the tile outlines.
+    visualizer_ripple: bool = True
+    # Seconds of song across the deck (8 | 16 | 32).
+    visualizer_deck_span: int = 16
+    # What a kick does to the scene: "off" | "soft" | "hard" (hard also
+    # flashes the whole scene, on downbeats and big hits only).
+    visualizer_flash: str = "soft"
+    # Bars across the spectrum / mirror scenes (16 | 32 | 48 | 64).
+    visualizer_bars: int = 48
+    # Repaint rate while the tab is on screen (30 | 60).
+    visualizer_fps: int = 60
+    # Title · artist over the first spectrum / mirror / scope tile.
+    visualizer_caption: bool = True
+    # Interactive tile knobs (vis_play.py).
+    visualizer_river_view: str = "near"         # "near" (16 s) | "far" (48 s) | "whole" song
+    visualizer_spectrogram_history: int = 12    # seconds shown: 6 | 12 | 24
+    visualizer_spectrogram_contrast: str = "normal"  # "soft" | "normal" | "punchy"
+    visualizer_halo_spokes: int = 96            # 48 | 96 | 144
+    visualizer_halo_punch: str = "gentle"       # cover kick: "off" | "gentle" | "hard"
+    visualizer_tapper_target: str = "beats"     # "beats" | "downbeats" | "kicks"
+    visualizer_tapper_window: str = "normal"    # "tight" | "normal" | "loose"
+    visualizer_tapper_offset: int = 0           # ms your taps are judged earlier by
     listenbrainz_enabled: bool = False
     listenbrainz_token: str = ""
     layout: str = "classic"
@@ -131,6 +169,24 @@ class Settings:
     # Lyric type, relative to the body text: "small" | "medium" | "large"
     # | "huge" (see ui/lyrics.py SIZES). The ui scale multiplies it too.
     lyrics_size: str = "large"
+    # ---- 2.3 lyric word timing (see lyric_timing.py) ----
+    # Karaoke's word highlight: "sweep" (the light runs through each word
+    # as it's sung) | "word" (each word lights whole). The look follows
+    # the personality (soft edge in modern, letter steps in brutalist).
+    lyrics_sweep: str = "sweep"
+    # The lyrics list's active line sweeps word by word too (off = the
+    # whole line lights up at once, as before 2.3). Karaoke always sweeps.
+    lyrics_list_sweep: bool = True
+    # Where word timing comes from: "sources" (word-synced lyrics when a
+    # source has them, else spread by length) | "lines" (always spread).
+    lyrics_word_timing: str = "sources"
+    # Ask NetEase Cloud Music for word-synced lyrics (sends title + artist).
+    lyrics_netease: bool = True
+    # Time words against the track's own audio (lyric_align; needs
+    # python-onnxruntime-cpu + a 95 MB model the dialog downloads).
+    lyrics_precise: bool = False
+    # Lyrics vs the playhead, ms; positive shows them later.
+    lyrics_offset_ms: int = 0
     # Window + tray icon: "theme" draws it in the active theme's colours
     # (see ui/app_icon.py), "classic" keeps the launcher's night-blue one.
     app_icon: str = "theme"
@@ -144,6 +200,20 @@ class Settings:
     # Font-size override in points. 0 = use the active theme's size_pt.
     # The ui_scale preset still multiplies whichever base wins.
     font_size_override_pt: int = 0
+    # ---- 2.3 customization (personality-owned, see presets.STASH_FIELDS) ----
+    # Typography roles: {"ui"|"title"|"numbers": {family, weight, size,
+    # spacing}} — ui/typefaces.py. Empty = every role follows the theme.
+    font_roles: dict = field(default_factory=dict)
+    # The now-playing bar: controls shown / order / sizes, info lines,
+    # "next:" placement, art size, time readout, density —
+    # ui/bar_config.py. Empty = the bar as it always was.
+    bar_layout: dict = field(default_factory=dict)
+    # modern's icon set (ui/icon_sets.py): "regular" | "thin" | "bold" |
+    # "filled" | "duotone" | "rounded". brutalist draws text glyphs.
+    icon_set: str = "regular"
+    # brutalist's glyph pack (glyphs.py): "default" | "ascii" | "blocks" |
+    # "arrows" | "dots". The glyph editor's per-key overrides sit on top.
+    glyph_pack: str = "default"
     # Text-case override. Empty = use the active theme's typography.case;
     # otherwise "lower" | "upper" | "normal" | "leet" | "zalgo". Routed
     # through theming.styled_case, so it re-cases everything the theme would.
@@ -383,12 +453,35 @@ def load() -> Settings:
     known = {f.name for f in fields(Settings)}
     filtered = {k: v for k, v in raw.items() if k in known}
     _retire_backdrops(filtered)
+    _retire_visualizer_tiles(filtered)
     # If a settings file exists at all, the user is past first launch —
     # the file only gets written by `save()` which only runs after the
     # wizard, in-app settings dialog, etc. Auto-stamp existing configs so
     # users upgrading from pre-wizard versions don't get re-onboarded.
     filtered.setdefault("first_launch_complete", True)
     return Settings(**filtered)
+
+
+# Visualizer tiles tide no longer ships → the tile that took the slot's
+# job. The play-toy tiles (2.3 previews) went for music visuals.
+RETIRED_VISUALIZER_TILES: dict[str, str] = {
+    "pond": "halo",
+    "particles": "river",
+    "life": "spectrogram",
+}
+_VISUALIZER_TILE_FIELDS = (
+    "visualizer_tile_1", "visualizer_tile_2", "visualizer_tile_3", "visualizer_tile_4",
+)
+
+
+def _retire_visualizer_tiles(raw: dict) -> None:
+    """Rewrite saved tile slots that name a retired tile. Their knob
+    fields (visualizer_pond_* etc.) are gone from Settings, so load()'s
+    unknown-key filter has already dropped them."""
+    for key in _VISUALIZER_TILE_FIELDS:
+        value = raw.get(key)
+        if isinstance(value, str) and value in RETIRED_VISUALIZER_TILES:
+            raw[key] = RETIRED_VISUALIZER_TILES[value]
 
 
 _BACKDROP_FIELDS = (

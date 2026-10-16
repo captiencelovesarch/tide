@@ -319,6 +319,14 @@ def _substitute(qss: str, theme: Theme) -> str:
         # the rail and strip for both aesthetics, and modern wants them
         # back as translucent panels.
         out += _TOKEN_RE.sub(repl, _MODERN_SHELL_QSS)
+    # Typography roles (2.3) last: title / numbers faces beat the
+    # theme's own rules for the widgets that carry a role.
+    try:
+        from .ui import typefaces as _typefaces
+        out += _typefaces.extra_qss(_scale.round_pt(
+            float(theme.t("typography", "size_pt", 10))))
+    except Exception:
+        pass
     return out
 
 
@@ -521,6 +529,9 @@ class ThemeManager(QObject):
                 font = QFont(family) if family else QFont()
                 font.setPointSize(size_pt)
                 font.setWeight(QFont.Weight(weight))
+            # The body role's weight + tracking (ui/typefaces.py).
+            from .ui import typefaces as _typefaces
+            font = _typefaces.apply_to_app_font(font)
             self._queue_restyle(qss, font)
 
         self._current = theme
@@ -631,7 +642,20 @@ class ThemeManager(QObject):
         wobbled by adaptive, and both win over the readability layer so an
         explicitly chosen colour is never second-guessed."""
         readable = self._readable_layer(theme)
-        if not self._dynamic_overrides and not self._user_overrides and not readable:
+        # The user's family / size override rides the typography table so
+        # the stylesheet's @font_family / @font_size (and the title and
+        # display sizes derived from it) say it too. Before 2.3 only the
+        # app font carried it, and the sheet's ``*`` rule painted every
+        # widget back in the theme's family.
+        typography = theme.typography
+        if self._user_font or self._user_font_size:
+            typography = dict(theme.typography or {})
+            if self._user_font:
+                typography["family"] = self._user_font
+            if self._user_font_size:
+                typography["size_pt"] = self._user_font_size
+        if not self._dynamic_overrides and not self._user_overrides \
+                and not readable and typography is theme.typography:
             return theme
         merged = dict(theme.tokens)
         merged.update(readable)
@@ -639,7 +663,7 @@ class ThemeManager(QObject):
         merged.update(self._user_overrides)
         return Theme(
             slug=theme.slug, name=theme.name, path=theme.path,
-            tokens=merged, typography=theme.typography, layout=theme.layout,
+            tokens=merged, typography=typography, layout=theme.layout,
             slots=theme.slots, aesthetic=theme.aesthetic,
             aesthetic_declared=theme.aesthetic_declared,
             qss=theme.qss, dark=theme.dark,

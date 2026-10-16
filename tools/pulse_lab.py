@@ -106,7 +106,7 @@ def summarize(name: str, m: BeatMap | None, elapsed: float, truth: list[float] |
         return
     times = np.array([b.time for b in m.beats])
     pulsed = [b for b in m.beats
-              if not (b.period < beat_map.HALF_TIME_PERIOD_S and b.phase % 2)]
+              if b.pulse]
     strengths = np.array([b.strength for b in pulsed if b.strength > 0.05])
     ibi = np.diff(times) if times.size > 2 else np.zeros(0)
     ibi_cv = float(ibi.std() / ibi.mean()) if ibi.size and ibi.mean() > 0 else float("nan")
@@ -151,7 +151,7 @@ def plot(name: str, m: BeatMap, low: np.ndarray, full: np.ndarray, out_dir: str,
     ax.plot(t[sel], low[sel], lw=0.8, color="#3b6ea5", label="low-band onset (35-200 Hz)")
     for bt in m.beats:
         if a <= bt.time <= b:
-            faint = bt.period < beat_map.HALF_TIME_PERIOD_S and bt.phase % 2
+            faint = not bt.pulse
             ax.axvline(bt.time, color="#d9534f" if not faint else "#f0b0ad",
                        alpha=0.25 + 0.75 * bt.strength, lw=1.0)
     for h in m.hits:

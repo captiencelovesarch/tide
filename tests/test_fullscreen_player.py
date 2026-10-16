@@ -691,7 +691,7 @@ class LyricsFontScaleTest(unittest.TestCase):
         view.update_position(1.0)
         self.assertIn("13pt", view._line_widgets[0].styleSheet())
         classic = _KaraokeWidget()
-        self.assertIn("28pt", classic.current_label.styleSheet())
+        self.assertEqual(classic.current_line.font().pointSize(), 28)
         self.assertIn("12pt", classic.prev_label.styleSheet())
 
     def test_default_is_bigger_than_the_body_text(self) -> None:
@@ -741,7 +741,7 @@ class LyricsFontScaleTest(unittest.TestCase):
         from tide.ui.lyrics import _KaraokeWidget
         self._lyrics.set_size("small")
         big = _KaraokeWidget(font_scale=2.0)
-        self.assertIn("56pt", big.current_label.styleSheet())
+        self.assertEqual(big.current_line.font().pointSize(), 56)
         self.assertIn("24pt", big.prev_label.styleSheet())
 
 

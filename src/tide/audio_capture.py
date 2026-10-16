@@ -758,6 +758,15 @@ def _pulse_frame(
 
 
 def _compute_bands(samples: np.ndarray, prev: np.ndarray | None = None) -> np.ndarray:
+    # One non-finite sample (a glitched chunk at a stream switch) made the
+    # whole FFT NaN, and the smoothing below carried that NaN into every
+    # later frame: the spectrum sat flat for the rest of the capture while
+    # bands kept "arriving". Zero the bad samples, and never smooth
+    # against a poisoned history.
+    if not np.isfinite(samples).all():
+        samples = np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0)
+    if prev is not None and not np.isfinite(prev).all():
+        prev = None
     windowed = samples * _HANN_WINDOW
     spec = np.fft.rfft(windowed)
     mag = np.abs(spec)
@@ -1086,6 +1095,25 @@ class AudioVisualizerFeed(QObject):
             self._spectrum = bool(holders - _PULSE_ONLY_CONSUMERS)
             self.start(source=self._preferred_source)
 
+    def retarget(self) -> bool:
+        """Auto mode: if tide's own stream is no longer the one being
+        captured, end the current parec so the worker respawns onto it.
+        For the case the worker can't see — a stale stream that lingers
+        corked instead of closing just blocks the read, with no EOF to
+        respawn on. Runs pactl, so callers rate-limit it. True if it kicked."""
+        if not self._running or self._explicit_source:
+            return False
+        idx = _own_sink_input()
+        if idx is None or idx == self._stream_idx:
+            return False
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                return False
+        return True
+
     def _resolve_target(self) -> tuple[str | None, int | None]:
         """(monitor_name, stream_index) for the next parec spawn. Stream
         mode when auto resolution claims one of tide's own sink inputs;
@@ -1298,13 +1326,21 @@ class AudioVisualizerFeed(QObject):
                 # stream. Time-gated so pactl runs at most every ~2 s, and
                 # only reached while audio flows, which is exactly when a
                 # wrong-scope capture matters.
+                #
+                # Stream mode gets the same check every ~3 s: a song change
+                # can move tide onto a new sink input while the old one
+                # lingers feeding silence, and parec stays on the old one
+                # (no EOF, nothing to respawn on). A ``_next_upgrade`` of 0
+                # means no checks were scheduled (start() never ran).
                 if (
                     self._explicit_source is None
-                    and self._stream_idx is None
+                    and self._next_upgrade
                     and time.monotonic() >= self._next_upgrade
                 ):
-                    self._next_upgrade = time.monotonic() + 2.0
-                    if _own_sink_input() is not None:
+                    self._next_upgrade = time.monotonic() + (
+                        2.0 if self._stream_idx is None else 3.0)
+                    own = _own_sink_input()
+                    if own is not None and own != self._stream_idx:
                         try:
                             proc.terminate()
                             proc.wait(timeout=1.0)
@@ -1373,7 +1409,9 @@ class AudioVisualizerFeed(QObject):
                         return
                     if spectrum:
                         self.bands_updated.emit(self._prev_bands.copy())
-                        self.waveform_updated.emit(samples.copy())
+                        self.waveform_updated.emit(
+                            samples.copy() if np.isfinite(samples).all()
+                            else np.nan_to_num(samples, nan=0.0, posinf=0.0, neginf=0.0))
                     try:
                         self._pulse_env = _compute_pulse(samples, self._pulse_env)
                     except Exception:

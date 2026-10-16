@@ -7,7 +7,13 @@ ask LRClib by title + artist + (optional) album + duration.
 
 Result shape:
 
-  LyricsResult(plain_text="...", timed_lines=[(seconds, "line"), ...])
+  LyricsResult(plain_text="...", timed_lines=[(seconds, "line"), ...],
+               line_ends=[seconds | None, ...], word_lines=[WordLine, ...])
+
+``line_ends`` (parallel to timed_lines, may be empty) is when each line
+stops being sung, where the source says; ``word_lines`` is a word-synced
+sheet when the source has one (LRClib's lyricsfile ``words`` or enhanced
+LRC tags). Both feed the per-word karaoke (lyric_timing).
 
 If neither plain nor timed is available, the result is None and callers
 fall back to the "no lyrics" empty state.
@@ -25,6 +31,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
+from .lyric_words import (
+    lyricsfile_line_ends, parse_enhanced_lrc, parse_lyricsfile, sheet_payload,
+)
 
 
 USER_AGENT = "tide/1.0 (https://github.com/captiencelovesarch/tide)"
@@ -39,6 +48,8 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 class LyricsResult:
     plain_text: str = ""
     timed_lines: list[tuple[float, str]] = field(default_factory=list)
+    line_ends: list = field(default_factory=list)
+    word_lines: list = field(default_factory=list)
 
     @property
     def has_timed(self) -> bool:
@@ -50,6 +61,8 @@ class LyricsResult:
 
 
 _LRC_LINE = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\](.*)")
+# enhanced-LRC word stamps: kept out of the line text (lyric_words reads them)
+_LRC_WORD_TAG = re.compile(r"<\d+:\d+(?:\.\d+)?>")
 
 
 def parse_lrc(text: str) -> list[tuple[float, str]]:
@@ -80,7 +93,7 @@ def parse_lrc(text: str) -> list[tuple[float, str]]:
             rest = m.group(3)
         if not timestamps:
             continue
-        line = rest.strip()
+        line = " ".join(_LRC_WORD_TAG.sub("", rest).split())
         for t in timestamps:
             out.append((t, line))
     out.sort(key=lambda x: x[0])
@@ -121,7 +134,19 @@ def _load_cache(key: str) -> LyricsResult | None:
             except (ValueError, TypeError):
                 continue
     plain = data.get("plain", "")
-    return LyricsResult(plain_text=plain if isinstance(plain, str) else "", timed_lines=timed)
+    ends: list = []
+    raw_ends = data.get("ends")
+    if isinstance(raw_ends, list) and len(raw_ends) == len(timed):
+        for e in raw_ends:
+            try:
+                ends.append(None if e is None else float(e))
+            except (TypeError, ValueError):
+                ends = []
+                break
+    from .lyric_words import sheet_from_payload
+    words = sheet_from_payload(data.get("words")) if data.get("words") else None
+    return LyricsResult(plain_text=plain if isinstance(plain, str) else "", timed_lines=timed,
+                        line_ends=ends, word_lines=words or [])
 
 
 def _save_cache(key: str, result: LyricsResult) -> None:
@@ -132,6 +157,8 @@ def _save_cache(key: str, result: LyricsResult) -> None:
             json.dump({
                 "plain": result.plain_text,
                 "timed": [(t, line) for t, line in result.timed_lines],
+                "ends": list(result.line_ends),
+                "words": sheet_payload(result.word_lines) if result.word_lines else "",
             }, f)
     except OSError:
         pass
@@ -142,7 +169,8 @@ def fetch_lrclib(*, title: str, artist: str, album: str = "",
     """Query LRClib for the track. Returns None on miss or network error."""
     if not title or not artist:
         return None
-    key = f"{title}|{artist}|{album}|{int(duration_seconds)}"
+    # v2: the cache entry also holds line ends + word timing
+    key = f"v2|{title}|{artist}|{album}|{int(duration_seconds)}"
     cached = _load_cache(key)
     if cached is not None and not cached.is_empty:
         return cached
@@ -171,7 +199,13 @@ def fetch_lrclib(*, title: str, artist: str, album: str = "",
     plain = (data.get("plainLyrics") or "").strip()
     synced = (data.get("syncedLyrics") or "").strip()
     timed = parse_lrc(synced) if synced else []
-    result = LyricsResult(plain_text=plain, timed_lines=timed)
+    lyricsfile = data.get("lyricsfile") if isinstance(data.get("lyricsfile"), str) else ""
+    words = parse_lyricsfile(lyricsfile) if lyricsfile else []
+    if not words and synced:
+        words = parse_enhanced_lrc(synced)
+    ends = lyricsfile_line_ends(lyricsfile, timed) if lyricsfile else []
+    result = LyricsResult(plain_text=plain, timed_lines=timed, line_ends=ends,
+                          word_lines=words)
     if not result.is_empty:
         _save_cache(key, result)
     return result if not result.is_empty else None

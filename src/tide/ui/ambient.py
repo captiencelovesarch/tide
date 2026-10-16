@@ -4,6 +4,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections import deque
 import math
+from typing import NamedTuple
 import os
 import time
 
@@ -22,6 +23,10 @@ _CONSUMER = "ambient"
 _SETTLE_SECONDS = 0.15
 _CHECKPOINT_SECONDS = 30.0
 _RENDER_INTERVAL_MS = 16
+# player clock reports are read across this much history (mpv reports every
+# 100 ms, spotify every 250): long enough to hold a promptly delivered one,
+# short enough that a speed or drift change is not remembered for long.
+_ANCHOR_WINDOW_S = 1.0
 
 
 def _beat_lead() -> float:
@@ -35,6 +40,13 @@ def _beat_lead() -> float:
 
 
 _BEAT_LEAD_S = _beat_lead()
+
+
+class BeatClock(NamedTuple):
+    """what a view drawing against the beat map reads each frame."""
+    beat_map: object          # BeatMap
+    position: float | None    # media seconds now; None while the clock is stopped
+    speed: float
 
 
 class AmbientController(QObject):
@@ -60,6 +72,9 @@ class AmbientController(QObject):
         self._feed = audio_capture.feed()
         self._enabled = False
         self._mini_active = False
+        # views that read the beat clock without driving the backdrop
+        # (the visualizer's deck). they keep the clock and the map alive.
+        self._watchers: set[str] = set()
         self._holding = False
         self._key: str | None = None
         self._generation = 0
@@ -111,6 +126,33 @@ class AmbientController(QObject):
         self._mini_active = on
         self._reconcile()
 
+    def set_watching(self, name: str, on: bool) -> None:
+        """hold the beat map and the player clock for ``name`` while it is
+        on screen, whether or not the backdrop pulses."""
+        before = bool(self._watchers)
+        if on:
+            self._watchers.add(name)
+        else:
+            self._watchers.discard(name)
+        if bool(self._watchers) != before:
+            self._reconcile()
+
+    def beat_clock(self) -> BeatClock | None:
+        """the current track's beat map and where the playhead is on it.
+        None when no map has arrived; position None while paused or
+        between clock reports."""
+        beat_map = self._beat_map
+        if beat_map is None:
+            return None
+        speed = self._speed()
+        position = None
+        if self._holding and self._anchors and self._is_playing():
+            now = time.monotonic()
+            wall, _position = self._anchors[-1]
+            if 0 <= now - wall <= MAX_CLOCK_GAP:
+                position = self._media_at(now, speed) + _BEAT_LEAD_S * speed
+        return BeatClock(beat_map, position, speed)
+
     def add_target(self, central_bg) -> None:
         if central_bg is not None and central_bg not in self._targets:
             self._targets.append(central_bg)
@@ -148,6 +190,9 @@ class AmbientController(QObject):
     def _wants_pulse(self) -> bool:
         return bool(self._targets) and (self._enabled or self._mini_active)
 
+    def _wants_clock(self) -> bool:
+        return self._wants_pulse() or bool(self._watchers)
+
     def _set_pulse(self, level: float, targets=None) -> None:
         for target in (self._targets if targets is None else targets):
             try:
@@ -163,6 +208,8 @@ class AmbientController(QObject):
         # the blend crossfades whenever the source changes: live, learned
         # map, beat map, and (for the beat map) each newer map object
         self._scheduled = scheduled
+        if not self._wants_pulse():
+            return              # only watchers hold the clock: the backdrop stays still
         mixed = self._blend.mix(level, scheduled if source is None else source, now)
         self._set_pulse(max(mixed, self._rescue_value(now)))
 
@@ -203,10 +250,16 @@ class AmbientController(QObject):
         self._render_pulse(now)
 
     def _reconcile(self) -> None:
-        if self._wants_pulse() and self._is_playing():
+        if self._wants_clock() and self._is_playing():
             self._acquire()
+            if self._wants_pulse():
+                self._render_timer.start()
+            else:
+                self._render_timer.stop()
+                self._blend = PulseBlend()
+                self._set_pulse(0.0)
         else:
-            if not self._wants_pulse():
+            if not self._wants_clock():
                 self._finish()
             self._release()
             self._blend = PulseBlend()
@@ -262,7 +315,6 @@ class AmbientController(QObject):
             pass
         self._feed.add_consumer(_CONSUMER, source=source)
         self._holding = True
-        self._render_timer.start()
 
     def _release(self) -> None:
         self._render_timer.stop()
@@ -368,6 +420,23 @@ class AmbientController(QObject):
         if now - self._last_save >= _CHECKPOINT_SECONDS:
             self._checkpoint()
 
+    def _media_at(self, now: float, speed: float) -> float:
+        """the media position now. an anchor is stamped when the gui thread
+        gets to it, never before the player read it, so a busy frame only
+        ever makes an anchor read late: of the last second's anchors, the
+        one that puts the playhead furthest along was delivered soonest."""
+        best = -math.inf
+        for wall, position in reversed(self._anchors):
+            age = now - wall
+            if age > _ANCHOR_WINDOW_S:
+                break
+            if age >= 0:
+                best = max(best, position + age * speed)
+        if best == -math.inf:
+            wall, position = self._anchors[-1]
+            best = position + (now - wall) * speed
+        return best
+
     @Slot()
     def _on_render_tick(self) -> None:
         if self._holding and self._wants_pulse() and self._is_playing():
@@ -380,10 +449,10 @@ class AmbientController(QObject):
             wall, position = self._anchors[-1]
             elapsed = now - wall
             if 0 <= elapsed <= MAX_CLOCK_GAP:
-                # spotify reports every 250 ms. sample between reports, always
-                # from their latest anchor; recording keeps exact brackets.
+                # spotify reports every 250 ms. sample between reports, from
+                # the freshest-reading anchor; recording keeps exact brackets.
                 speed = self._speed()
-                media = position + elapsed * speed
+                media = self._media_at(now, speed)
                 if self._beat_map is not None:
                     # the map was made from the stream itself, so one
                     # anchor is enough and capture state is irrelevant

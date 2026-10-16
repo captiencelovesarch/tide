@@ -1,8 +1,11 @@
 """Audio visualizer view.
 
-One ``VisualizerView`` widget. Multiple ``Renderer`` strategies. The
-active strategy is chosen by the current theme's ``[layout].visualizer``
-token (``bars-mono`` | ``bars-filled`` | ``oscilloscope`` | ``neon-grid``).
+2.3: ``VisualizerView`` hosts the remastered ``vis_deck.DeckCanvas`` — a
+live scene over the track's beat deck (see that module). The classic
+``Renderer`` strategies below stay: they are the "classic · …" scenes,
+the theme's own pick (``[layout].visualizer``: ``bars-mono`` |
+``bars-filled`` | ``oscilloscope`` | ``neon-grid`` | …), and what the
+mini player's art-flip canvas (``_Canvas``) draws.
 
 Each strategy reads palette tokens at paint time so theme swaps repaint
 correctly.
@@ -29,11 +32,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QHBoxLayout,
-    QLabel,
     QMenu,
-    QPushButton,
     QSizePolicy,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -61,6 +61,10 @@ def _fill_backdrop(_p: QPainter, _rect: QRect, _color: QColor) -> None:
 _RENDER_CAP = 1280
 # How long the visualizer keeps its capture while hidden (see hideEvent).
 _RELEASE_HIDDEN_MS = 20_000
+# Watchdog (VisualizerView._check_capture): no bands for this long while
+# playing = the capture is stuck; retries are spaced at least this far.
+_STALL_S = 2.5
+_RETRY_S = 3.0
 
 # Repaint cap. The audio feed pushes ~43 frames/s; there's no need to repaint
 # faster than this, and coalescing bursts halves the paint load.
@@ -697,100 +701,239 @@ class _Canvas(QWidget):
 
 
 class VisualizerView(QWidget):
+    """the visualizer tab: a header and up to four tiles (vis_play.TileGrid)
+    driven by one engine (vis_deck.VisEngine). owns the "visualizer"
+    consumer on the shared capture and, while on screen, watches the
+    ambient controller's beat clock (which keeps the track's beat map
+    alive even when the backdrop pulse is off)."""
+
     status_message = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        from .headings import Heading
+        from .vis_deck import VisEngine
+        from .vis_play import TileGrid
         self._feed = audio_capture.feed()
         self._feed.bands_updated.connect(self._on_bands)
         self._feed.waveform_updated.connect(self._on_waveform)
+        self._feed.pulse_updated.connect(self._on_pulse)
         self._feed.error.connect(self._on_error)
         # Local view-capturing flag. The feed is refcounted and may also be
         # held by the ambient bass-pulse, so ``feed.running`` no longer maps
         # 1:1 to "this view is displaying" — track our own membership.
         self._capturing = False
-
-        self._canvas = _Canvas(self)
-        self._theme = theming.manager().current()
-        theming.manager().theme_changed.connect(self._on_theme)
-        self._renderer_override: str | None = None
+        self._watching = False
+        self._playing = False
+        self._last_bands_at = time.monotonic()
+        self._last_retry = -math.inf
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(1000)
+        self._watchdog.timeout.connect(self._check_capture)
+        self._player = None
+        self._queue = None
+        self._api_provider = None
+        self._settings_provider = None
+        self._ambient_provider = None
+        self._fallback_settings = None
         self._audio_source_override: str | None = None
 
-        self._heading = QLabel(self._heading_text())
-        self._heading.setProperty("class", "dim")
-        self._heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.engine = VisEngine(self)
+        self.engine.set_clock_provider(self._beat_clock)
+        self.engine.seek_requested.connect(self._on_seek)
+        self.engine.fullscreen_requested.connect(self._toggle_fullscreen)
+        self._grid = TileGrid(self.engine, api_provider=self._api)
+        self._grid.menu_requested.connect(self._on_tile_menu)
+        self._grid.setFocusPolicy(Qt.ClickFocus)
 
-        self._toggle_btn = BracketButton("start")
-        self._toggle_btn.clicked.connect(self._on_toggle)
-
+        self._heading = Heading("visualizer")
+        self._heading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self._style_btn = BracketButton("style")
+        self._style_btn.setToolTip("layout, tiles, look and audio source. "
+                                   "hover a tile and hit [edit] for its own knobs")
+        self._style_btn.clicked.connect(self._open_style_menu)
         self._fullscreen_btn = BracketButton("fullscreen")
         self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
 
-        bar = QHBoxLayout()
+        from . import scale as _scale
+        self._header = QWidget(self)
+        bar = QHBoxLayout(self._header)
         bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(_scale.px(6))
         bar.addWidget(self._heading, stretch=1)
-        bar.addWidget(self._toggle_btn)
+        bar.addWidget(self._style_btn)
         bar.addWidget(self._fullscreen_btn)
 
-        from . import scale as _scale
         root = QVBoxLayout(self)
         root.setContentsMargins(*_scale.margins(16, 14, 16, 8))
         root.setSpacing(_scale.px(8))
-        root.addLayout(bar)
-        root.addWidget(self._canvas, stretch=1)
-
-        # Floating cog button on top-right of the canvas.
-        self._cog = QToolButton(self._canvas)
-        self._cog.setText("⚙")
-        self._cog.setAutoRaise(True)
-        self._cog.setPopupMode(QToolButton.InstantPopup)
-        self._cog.setStyleSheet(
-            "QToolButton { background: rgba(0,0,0,140); color: white; "
-            "border: 1px solid rgba(255,255,255,80); border-radius: 4px; "
-            "padding: 4px 8px; font-size: 14pt; }"
-            "QToolButton:hover { background: rgba(0,0,0,200); }"
-            "QToolButton::menu-indicator { image: none; width: 0; }"
-        )
-        self._cog.setMenu(self._build_cog_menu())
-        # Position deferred to first resize.
-        self._cog.show()
-        self._cog.raise_()
+        root.addWidget(self._header)
+        root.addWidget(self._grid, stretch=1)
 
         self._fullscreen = False
-        # Apply saved audio device override at construction time so the first
-        # start() uses the user's choice.
+        self._was_geometry = None
+        # The first start() uses the saved device; apply_settings keeps it
+        # current once the window attaches its live Settings.
+        self.apply_settings(self._settings())
+
+    # ---------- wiring ----------
+
+    def attach(self, *, player=None, queue=None, settings=None, ambient=None,
+               api=None) -> None:
+        """hand over the player (position, seek, state), the queue (now
+        playing), the live Settings provider, the ambient-controller
+        provider (the beat clock) and the api provider (lyrics). each is
+        optional: a bare view still draws the live capture."""
+        self._player = player
+        self._queue = queue
+        self._settings_provider = settings
+        self._ambient_provider = ambient
+        self._api_provider = api
+        if player is not None:
+            player.state_changed.connect(self._on_state)
+            player.position_changed.connect(self.engine.set_position)
+            player.duration_changed.connect(self.engine.set_duration)
+            self._on_state(player.state)
+        if queue is not None:
+            queue.current_changed.connect(self._on_track)
+            self._on_track(getattr(queue, "current", None))
+        if api is not None:
+            # lyrics tiles built before the api arrived get rebuilt
+            self._grid.teardown()
+        self.apply_settings(self._settings())
+
+    def _settings(self):
+        s = self._settings_provider() if self._settings_provider is not None else None
+        if s is None:
+            if self._fallback_settings is None:
+                try:
+                    self._fallback_settings = settings_module.load()
+                except Exception:
+                    self._fallback_settings = settings_module.Settings()
+            s = self._fallback_settings
+        return s
+
+    def _ambient(self):
         try:
-            saved = settings_module.load()
-            if saved.audio_device:
-                self._audio_source_override = saved.audio_device
+            return self._ambient_provider() if self._ambient_provider is not None else None
+        except Exception:
+            return None
+
+    def _api(self):
+        try:
+            return self._api_provider() if self._api_provider is not None else None
+        except Exception:
+            return None
+
+    def _beat_clock(self):
+        ambient = self._ambient()
+        return ambient.beat_clock() if ambient is not None else None
+
+    def tiles(self) -> list:
+        return list(self._grid.tiles)
+
+    def apply_settings(self, s) -> None:
+        if s is None:
+            return
+        self._audio_source_override = s.audio_device or None
+        self.engine.apply_settings(s)
+        from .vis_play import SLOT_KEYS
+        self._grid.configure(s.visualizer_layout,
+                             [str(getattr(s, k, "spectrum")) for k in SLOT_KEYS])
+        self._reconcile_watch()
+
+    def _set_setting(self, name: str, value) -> None:
+        """the menus' write path: the live Settings, field-scoped save (a
+        whole-object save would revert other savers), re-apply."""
+        s = self._settings()
+        setattr(s, name, value)
+        try:
+            settings_module.save_fields(s, name)
         except Exception:
             pass
+        self.apply_settings(s)
 
-    # ---------- cog menu ----------
+    # ---------- menus ----------
 
-    def _build_cog_menu(self) -> QMenu:
+    def _radio(self, sub: QMenu, rows, current, name: str) -> None:
+        group = QActionGroup(sub)
+        group.setExclusive(True)
+        for value, label in rows:
+            a = QAction(theming.styled_case(str(label)), sub, checkable=True)
+            a.setChecked(value == current)
+            a.triggered.connect(lambda _=False, v=value: self._set_setting(name, v))
+            group.addAction(a)
+            sub.addAction(a)
+
+    def _toggle(self, menu: QMenu, label: str, name: str) -> None:
+        a = QAction(theming.styled_case(label), menu, checkable=True)
+        a.setChecked(bool(getattr(self._settings(), name)))
+        a.toggled.connect(lambda on: self._set_setting(name, bool(on)))
+        menu.addAction(a)
+
+    def _knob_menu(self, menu: QMenu, keys) -> None:
+        """one submenu per knob, straight from the settings descriptors."""
+        from . import settings_schema
+        s = self._settings()
+        for key in keys:
+            desc = settings_schema.by_key().get(key)
+            if desc is None or not isinstance(desc.choices, tuple):
+                continue
+            label = desc.label.split("· ", 1)[-1]
+            sub = menu.addMenu(theming.styled_case(label))
+            self._radio(sub, desc.choices, getattr(s, key), key)
+
+    def _slot_menu(self, menu: QMenu, slot: int) -> None:
+        """what slot ``slot`` shows, and that tile's knobs."""
+        from .vis_play import SLOT_KEYS, TILE_KINDS
+        s = self._settings()
+        key = SLOT_KEYS[slot]
+        kmenu = menu.addMenu(theming.styled_case("show"))
+        self._radio(kmenu, TILE_KINDS, getattr(s, key), key)
+        tile = self._grid.tiles[slot] if slot < len(self._grid.tiles) else None
+        knobs = getattr(tile, "KNOBS", ())
+        if tile is not None and tile.kind == "deck":
+            knobs = ("visualizer_deck_span",)
+        elif tile is not None and tile.kind == "classic":
+            knobs = ("visualizer_classic",)
+        elif tile is not None and tile.kind in ("spectrum", "mirror"):
+            knobs = ("visualizer_bars",)
+        if knobs:
+            menu.addSeparator()
+            self._knob_menu(menu, knobs)
+        if tile is not None and tile.kind == "tapper":
+            a = QAction(theming.styled_case("reset score"), menu)
+            a.triggered.connect(tile.reset)
+            menu.addAction(a)
+
+    def _build_style_menu(self) -> QMenu:
+        from . import settings_schema
+        from .vis_play import LAYOUT_LABELS, SLOT_NAMES, LAYOUTS
+        s = self._settings()
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_DeleteOnClose)
 
-        # Renderer submenu
-        rmenu = menu.addMenu("renderer")
-        r_group = QActionGroup(rmenu)
-        r_group.setExclusive(True)
-        a_theme = QAction("from theme", rmenu, checkable=True)
-        a_theme.setChecked(self._renderer_override is None)
-        a_theme.triggered.connect(lambda: self._set_renderer_override(None))
-        r_group.addAction(a_theme)
-        rmenu.addAction(a_theme)
-        rmenu.addSeparator()
-        for slug in renderer_slugs():
-            a = QAction(slug, rmenu, checkable=True)
-            a.setChecked(self._renderer_override == slug)
-            a.triggered.connect(lambda _=False, s=slug: self._set_renderer_override(s))
-            r_group.addAction(a)
-            rmenu.addAction(a)
+        lmenu = menu.addMenu(theming.styled_case("layout"))
+        self._radio(lmenu, LAYOUT_LABELS, s.visualizer_layout, "visualizer_layout")
+        tmenu = menu.addMenu(theming.styled_case("tiles"))
+        layout = s.visualizer_layout if s.visualizer_layout in LAYOUTS else "stack"
+        for slot, name in enumerate(SLOT_NAMES[layout]):
+            self._slot_menu(tmenu.addMenu(theming.styled_case(name)), slot)
+        menu.addSeparator()
+        look = menu.addMenu(theming.styled_case("look"))
+        self._radio(look, (("auto", "auto"), ("blocks", "blocks"), ("glow", "glow")),
+                    s.visualizer_look, "visualizer_look")
+        self._knob_menu(menu, ("visualizer_flash",))
+        self._toggle(menu, "strobe trails", "visualizer_trails")
+        self._toggle(menu, "outline ripple", "visualizer_ripple")
+        self._toggle(menu, "title over the scene", "visualizer_caption")
+        menu.addSeparator()
+        self._knob_menu(menu, ("visualizer_bars", "visualizer_deck_span",
+                               "visualizer_classic", "visualizer_fps"))
+        menu.addSeparator()
 
         # Audio device submenu
-        amenu = menu.addMenu("audio source")
+        amenu = menu.addMenu(theming.styled_case("audio source"))
         a_group = QActionGroup(amenu)
         a_group.setExclusive(True)
         a_auto = QAction("auto (tide's audio only)", amenu, checkable=True)
@@ -811,56 +954,45 @@ class VisualizerView(QWidget):
             a = QAction("(no monitor sources found — check pactl)", amenu)
             a.setEnabled(False)
             amenu.addAction(a)
-
-        menu.addSeparator()
-        a_fs = QAction("fullscreen", menu)
-        a_fs.triggered.connect(self._toggle_fullscreen)
-        menu.addAction(a_fs)
-
-        a_stop = QAction("stop / restart", menu)
-        a_stop.triggered.connect(self._on_toggle)
-        menu.addAction(a_stop)
-
         return menu
 
-    def _refresh_cog_menu(self) -> None:
-        # Rebuild so device list re-enumerates fresh.
-        self._cog.setMenu(self._build_cog_menu())
+    def _build_tile_menu(self, slot: int) -> QMenu:
+        from .vis_play import LAYOUT_LABELS
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        self._slot_menu(menu, slot)
+        menu.addSeparator()
+        lmenu = menu.addMenu(theming.styled_case("layout"))
+        self._radio(lmenu, LAYOUT_LABELS, self._settings().visualizer_layout,
+                    "visualizer_layout")
+        return menu
 
-    def _set_renderer_override(self, slug: str | None) -> None:
-        self._renderer_override = slug
-        self._canvas.set_renderer_override(slug)
-        self._heading.setText(self._heading_text())
-        self._refresh_cog_menu()
-        self.status_message.emit(theming.styled_case(
-            f"visualizer · {slug}" if slug else "visualizer · theme default"
-        ))
+    def _open_style_menu(self) -> None:
+        # Rebuilt per open so the device list re-enumerates fresh. Deferred
+        # a tick: a modal exec straight from a click handler can crash on
+        # PySide6 + Python 3.14.
+        QTimer.singleShot(0, self, self._show_style_menu)
+
+    def _show_style_menu(self) -> None:
+        menu = self._build_style_menu()
+        menu.popup(self._style_btn.mapToGlobal(self._style_btn.rect().bottomLeft()))
+
+    def _on_tile_menu(self, slot: int, global_pos) -> None:
+        QTimer.singleShot(0, self, lambda: self._build_tile_menu(slot).popup(global_pos))
 
     def _set_audio_source(self, name: str | None) -> None:
         self._audio_source_override = name
-        # Persist so the picker remembers across launches.
-        try:
-            s = settings_module.load()
+        s = self._settings()
+        if (s.audio_device or None) != name:
             s.audio_device = name or ""
-            settings_module.save(s)
-        except Exception:
-            pass
+            try:
+                settings_module.save_fields(s, "audio_device")
+            except Exception:
+                pass
         # Restart the shared capture on the new device if it's live (this
         # keeps all consumers, e.g. the ambient pulse, attached).
         if self._feed.running:
             self._feed.set_source(name or None)
-        self._refresh_cog_menu()
-
-    def _position_cog(self) -> None:
-        if self._cog and self._canvas:
-            margin = 8
-            x = self._canvas.width() - self._cog.width() - margin
-            y = margin
-            self._cog.move(max(0, x), max(0, y))
-
-    def resizeEvent(self, ev) -> None:
-        super().resizeEvent(ev)
-        self._position_cog()
 
     # ---------- visibility-driven start/stop ----------
 
@@ -868,9 +1000,17 @@ class VisualizerView(QWidget):
         super().showEvent(event)
         if not self._capturing:
             self._start_capture()
+        self._reconcile_watch()
+        self._last_bands_at = time.monotonic()
+        self._watchdog.start()
+        self.engine.set_active(True)
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
+        if getattr(self, "engine", None) is None:
+            return      # Qt hides children while tearing the wrapper down
+        self._watchdog.stop()
+        self.engine.set_active(False)
         # Don't tear down audio the moment the visualizer goes behind another
         # view: flicking back to it stays instant. Left hidden for a while,
         # it lets go, so leaving the page doesn't keep the spectrum FFT (and
@@ -879,36 +1019,86 @@ class VisualizerView(QWidget):
         QTimer.singleShot(_RELEASE_HIDDEN_MS, self, self._release_if_hidden)
 
     def _release_if_hidden(self) -> None:
-        if self._capturing and not self.isVisible():
+        if self.isVisible():
+            return
+        if self._capturing:
             self._feed.remove_consumer("visualizer")
             self._capturing = False
-            self._toggle_btn.setLabel("start")
+        self._reconcile_watch()
+
+    def _reconcile_watch(self) -> None:
+        """watch the beat clock while on screen (the deck, the kicks, the
+        trails, the ripple and the play tiles all ride the map). let go
+        when hidden past the release delay."""
+        want = self.isVisible() or (self._watching and self._capturing)
+        ambient = self._ambient()
+        if ambient is None or not hasattr(ambient, "set_watching"):
+            self._watching = False
+            return
+        if want != self._watching:
+            ambient.set_watching("visualizer", want)
+            self._watching = want
 
     def teardown(self) -> None:
         self._feed.remove_consumer("visualizer")
         self._capturing = False
-        self._toggle_btn.setLabel("start")
+        self._watchdog.stop()
+        self.engine.set_active(False)
+        ambient = self._ambient()
+        if ambient is not None and self._watching and hasattr(ambient, "set_watching"):
+            ambient.set_watching("visualizer", False)
+        self._watching = False
+
+    # ---------- capture ----------
+
+    def _start_capture(self, quiet: bool = False) -> None:
+        ok = self._feed.add_consumer("visualizer", source=self._audio_source_override)
+        # registered either way: if this start failed, the next one (ours
+        # from the watchdog, or the ambient pulse's) runs the spectrum for us
+        self._capturing = True
+        self._last_retry = time.monotonic()
+        if quiet:
+            return
+        if ok:
+            self.status_message.emit(theming.styled_case(f"visualizer · capturing from {self._feed.device}"))
+        else:
+            self.status_message.emit(theming.styled_case("visualizer · no audio device"))
+
+    def _check_capture(self) -> None:
+        """the watchdog (1 Hz while on screen and playing). the shared
+        capture can stop under us: its worker gives up after parec keeps
+        exiting, or it sits on a stream tide has left (a song change can
+        leave the old one corked, which blocks parec without an EOF). the
+        scenes then froze until the tab was re-opened. restart a stopped
+        feed; retarget one that's gone quiet."""
+        if not self.isVisible() or not self._playing:
+            self._last_bands_at = time.monotonic()
+            return
+        now = time.monotonic()
+        if not self._feed.running:
+            if now - self._last_retry >= _RETRY_S:
+                self._start_capture(quiet=True)
+                self._last_bands_at = now
+            return
+        if not self._capturing:
+            self._start_capture(quiet=True)
+            return
+        if now - self._last_bands_at >= _STALL_S and now - self._last_retry >= _RETRY_S:
+            self._last_retry = now
+            self._last_bands_at = now
+            try:
+                self._feed.retarget()
+            except Exception:
+                pass
 
     # ---------- actions ----------
 
-    def _start_capture(self) -> None:
-        ok = self._feed.add_consumer("visualizer", source=self._audio_source_override)
-        self._capturing = bool(ok)
-        if ok:
-            self._toggle_btn.setLabel("stop")
-            self.status_message.emit(theming.styled_case(f"visualizer · capturing from {self._feed.device}"))
-        else:
-            self._toggle_btn.setLabel("start")
-            self.status_message.emit(theming.styled_case("visualizer · no audio device"))
-
-    def _on_toggle(self) -> None:
-        if self._capturing:
-            self._feed.remove_consumer("visualizer")
-            self._capturing = False
-            self._toggle_btn.setLabel("start")
-            self.status_message.emit(theming.styled_case("visualizer · stopped"))
-        else:
-            self._start_capture()
+    def _on_seek(self, seconds: float) -> None:
+        if self._player is not None:
+            try:
+                self._player.seek(float(seconds))
+            except Exception:
+                pass
 
     def _toggle_fullscreen(self) -> None:
         if not self._fullscreen:
@@ -916,38 +1106,59 @@ class VisualizerView(QWidget):
             self.window().showFullScreen()
             self._fullscreen = True
             self._fullscreen_btn.setLabel("exit fullscreen")
+            # lean back: the tiles get the whole view; esc or a double-click
+            # brings the header back (focus on the grid so esc reaches
+            # keyPressEvent wherever focus was before)
+            self._header.hide()
+            self._grid.setFocus(Qt.OtherFocusReason)
         else:
             self.window().showNormal()
             try:
-                self.window().restoreGeometry(self._was_geometry)
+                if self._was_geometry is not None:
+                    self.window().restoreGeometry(self._was_geometry)
             except Exception:
                 pass
             self._fullscreen = False
             self._fullscreen_btn.setLabel("fullscreen")
+            self._header.show()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key_Escape and self._fullscreen:
+            self._toggle_fullscreen()
+            return
+        super().keyPressEvent(event)
+
+    # ---------- player / queue ----------
+
+    def _on_state(self, state) -> None:
+        from ..player import PlayState
+        playing = state == PlayState.PLAYING
+        if playing and not self._playing:
+            # a fresh start (or a new song) gets the full grace period
+            self._last_bands_at = time.monotonic()
+        self._playing = playing
+        self.engine.set_playing(playing)
+
+    def _on_track(self, track) -> None:
+        self.engine.set_now_playing(track)
 
     # ---------- feed signals (GUI thread) ----------
 
     def _on_bands(self, bands: np.ndarray) -> None:
         # Only when this view is actively capturing (not merely because the
         # ambient pulse is holding the shared feed) and on screen.
-        if self._capturing and self._canvas.isVisible():
-            self._canvas.update_bands(bands)
+        if self._capturing:
+            self._last_bands_at = time.monotonic()
+            if self.isVisible():
+                self.engine.update_bands(bands)
 
     def _on_waveform(self, wave: np.ndarray) -> None:
-        if self._capturing and self._canvas.isVisible():
-            self._canvas.update_waveform(wave)
+        if self._capturing and self.isVisible():
+            self.engine.update_waveform(wave)
+
+    def _on_pulse(self, level: float) -> None:
+        if self._capturing and self.isVisible():
+            self.engine.update_pulse(level)
 
     def _on_error(self, msg: str) -> None:
         self.status_message.emit(f"visualizer: {msg}")
-
-    # ---------- theme ----------
-
-    def _on_theme(self, theme) -> None:
-        self._theme = theme
-        self._heading.setText(self._heading_text())
-
-    def _heading_text(self) -> str:
-        r = renderer_for_theme(self._theme)
-        line = "─" * 40
-        label = theming.styled_case(f"visualizer · {r.slug}")
-        return f"── {label} {line}"

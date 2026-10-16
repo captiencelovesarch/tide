@@ -129,3 +129,46 @@ def set_overrides(mapping: dict[str, str]) -> None:
     persisted state from another version must never crash."""
     global _overrides
     _overrides = {k: v for k, v in dict(mapping).items() if k in DEFAULT_PACK}
+
+
+# ---- 2.3 packs (Settings.glyph_pack, per personality) ----
+# Picked from what the bundled JetBrains Mono really draws (plus plain
+# ASCII), so a pack never lands on a fallback font's floating metrics —
+# the default pack's ▮▮ war story, generalised. Labels for the picker
+# live in PACK_LABELS; register a pack and a label together.
+PACK_LABELS: dict[str, str] = {
+    "default": "default",
+    "ascii": "ascii",
+    "blocks": "blocks",
+    "arrows": "arrows",
+    "dots": "dots",
+}
+
+register_pack("ascii", {
+    "play": ">", "pause": "||", "loading": "...", "prev": "|<",
+    "next": ">|", "shuffle": "~", "repeat": "@", "repeat_one": "@1",
+    "like_on": "<3", "like_off": "</3", "sleep": "zz", "fullscreen": "[ ]",
+    "heading_dash": "-",
+})
+register_pack("blocks", {
+    "play": "▶", "pause": "▌▌", "loading": "░", "prev": "◀◀", "next": "▶▶",
+    "shuffle": "◇◆", "repeat": "↩", "repeat_one": "↩¹", "like_on": "■",
+    "like_off": "□", "sleep": "▄▄", "fullscreen": "⊞", "heading_dash": "━",
+})
+register_pack("arrows", {
+    "play": "→", "pause": "‖", "loading": "⋯", "prev": "⟵", "next": "⟶",
+    "shuffle": "↗↙", "repeat": "↪", "repeat_one": "↪¹", "like_on": "↑",
+    "like_off": "↓", "sleep": "↓z", "fullscreen": "↔", "heading_dash": "─",
+})
+register_pack("dots", {
+    "play": "◉", "pause": "◎", "loading": "∙∙∙", "prev": "◂•", "next": "•▸",
+    "shuffle": "∴", "repeat": "◯", "repeat_one": "◯¹", "like_on": "●",
+    "like_off": "○", "sleep": "◦◦◦", "fullscreen": "◈", "heading_dash": "·",
+})
+
+
+def sample(name: str) -> str:
+    """A one-line preview of pack ``name`` for pickers."""
+    pack = _packs.get(name, DEFAULT_PACK)
+    return "  ".join(pack[k] for k in ("prev", "play", "pause", "next",
+                                        "shuffle", "like_on"))

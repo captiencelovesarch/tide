@@ -146,6 +146,31 @@ def audio_device_choices() -> tuple[tuple[str, str], ...]:
     return tuple(rows)
 
 
+def visualizer_layout_choices() -> tuple[tuple[str, str], ...]:
+    from .vis_play import LAYOUT_LABELS
+    return LAYOUT_LABELS
+
+
+def visualizer_tile_choices() -> tuple[tuple[str, str], ...]:
+    from .vis_play import TILE_KINDS
+    return TILE_KINDS
+
+
+def visualizer_classic_choices() -> tuple[tuple[str, str], ...]:
+    """The theme's own pick, then every pre-2.3 renderer."""
+    from .visualizer import renderer_slugs
+    return (("theme", "the theme's own"),) + tuple((s, s) for s in renderer_slugs())
+
+
+def glyph_pack_choices() -> tuple[tuple[str, str], ...]:
+    """Every registered glyph pack, labelled with a preview of its faces."""
+    from .. import glyphs
+    return tuple(
+        (name, f"{glyphs.PACK_LABELS.get(name, name)} · {glyphs.sample(name)}")
+        for name in glyphs.packs()
+    )
+
+
 def nav_icon_choices() -> tuple[tuple[str, str], ...]:
     """Nav-rail icon sets; glyph-set labels embed the actual glyphs."""
     from . import nav_icons
@@ -214,6 +239,12 @@ def art_transition_choices() -> tuple[tuple[str, str], ...]:
     """Track-change album-art styles, in art_fx's order."""
     from . import art_fx
     return art_fx.choices()
+
+
+def lyrics_sweep_choices() -> tuple[tuple[str, str], ...]:
+    """Karaoke word-highlight styles."""
+    from . import karaoke_line
+    return karaoke_line.style_choices()
 
 
 def lyrics_size_choices() -> tuple[tuple[str, str], ...]:
@@ -305,6 +336,14 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "routes through styled_case (nav, buttons, toasts, …).",
     ),
     OptionDesc(
+        key="font_roles", label="type roles", kind="custom",
+        tab="appearance", section="typography",
+        per_preset=True, live="apply_font_roles_setting",
+        tooltip="a face, weight, size and tracking for titles and for "
+                "numbers, and weight + tracking for the body. pairings set "
+                "them all at once.",
+    ),
+    OptionDesc(
         key="ui_scale", label="ui scale", kind="choice",
         tab="appearance", section="typography",
         choices="scale_choices", live="apply_ui_scale_setting",
@@ -317,6 +356,56 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices="lyrics_size_choices", live="apply_lyrics_size_setting",
         tooltip="lyric lines, measured against the rest of the text. "
                 "fullscreen makes them bigger again, the mini smaller.",
+    ),
+    # ---- playback · lyrics (2.3 word timing) ----
+    OptionDesc(
+        key="lyrics_sweep", label="karaoke highlight", kind="choice",
+        tab="playback", section="lyrics",
+        choices="lyrics_sweep_choices", live="apply_lyrics_timing_setting",
+        tooltip="how karaoke lights the words. modern sweeps with a soft "
+                "edge, brutalist a letter at a time.",
+    ),
+    OptionDesc(
+        key="lyrics_list_sweep", label="sweep the live lyrics word by word",
+        kind="bool", tab="playback", section="lyrics",
+        live="apply_lyrics_timing_setting",
+        tooltip="the line being sung in the lyrics list lights up word by "
+                "word, like karaoke. off lights the whole line at once.",
+    ),
+    OptionDesc(
+        key="lyrics_word_timing", label="word timing", kind="choice",
+        tab="playback", section="lyrics",
+        choices=(
+            ("sources", "word-synced lyrics when they exist"),
+            ("lines", "estimate from the line timing"),
+        ),
+        live="apply_lyrics_timing_setting",
+        tooltip="word-synced lyrics come from lrclib or netease and are "
+                "lined up with this video's own timing. songs without "
+                "them spread each line's words by length.",
+    ),
+    OptionDesc(
+        key="lyrics_netease", label="ask netease for word-synced lyrics",
+        kind="bool", tab="playback", section="lyrics",
+        live="apply_lyrics_timing_setting",
+        tooltip="netease cloud music has word timing for many songs. the "
+                "lookup sends the title and artist to music.163.com "
+                "(china-hosted).",
+    ),
+    OptionDesc(
+        key="lyrics_precise", label="precise timing", kind="custom",
+        tab="playback", section="lyrics",
+        live="apply_lyrics_timing_setting",
+        tooltip="listens to the song itself to place words and pull lyrics "
+                "that run early or late onto the singing. once per song, "
+                "in the background. clear vocals work best.",
+    ),
+    OptionDesc(
+        key="lyrics_offset_ms", label="lyrics offset", kind="int",
+        tab="playback", section="lyrics",
+        live="apply_lyrics_timing_setting",
+        tooltip="nudges every lyric surface against the playhead. positive "
+                "shows the lyrics later.",
     ),
     # ---- appearance · layout ----
     OptionDesc(
@@ -342,6 +431,30 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices="nav_icon_choices", per_preset=True,
         live="apply_nav_icons_setting",
         tooltip="a small glyph rendered before each nav label.",
+    ),
+    OptionDesc(
+        key="icon_set", label="icons", kind="custom",
+        tab="appearance", section="chrome",
+        per_preset=True, live="apply_icon_set_setting",
+        tooltip="modern's icons everywhere: the bar, the rail, the mini "
+                "and fullscreen players. brutalist draws text glyphs "
+                "(see glyphs below).",
+    ),
+    OptionDesc(
+        key="glyph_pack", label="glyphs", kind="choice",
+        tab="appearance", section="chrome",
+        choices="glyph_pack_choices", per_preset=True,
+        live="apply_glyph_pack_setting",
+        tooltip="brutalist's transport glyphs, as a set. the glyph editor's "
+                "one-key swaps still win on top.",
+    ),
+    # ---- appearance · player bar ----
+    OptionDesc(
+        key="bar_layout", label="bar", kind="custom",
+        tab="appearance", section="player bar",
+        per_preset=True, live="apply_bar_layout_setting",
+        tooltip="which controls show, their order and size, what the info "
+                "lines say. also: long-press any empty spot on the bar.",
     ),
     OptionDesc(
         key="app_icon", label="app icon", kind="choice",
@@ -470,8 +583,154 @@ REGISTRY: tuple[OptionDesc, ...] = (
         key="audio_device", label="visualizer audio", kind="choice",
         tab="appearance", section="visualizer",
         choices="audio_device_choices", live="apply_audio_device_setting",
-        tooltip="which monitor source the visualizer captures. backup for "
-                "the visualizer's own cog menu; auto = tide's audio only.",
+        tooltip="which monitor source the visualizer captures. also in "
+                "the visualizer's own [style] menu; auto = tide's audio only.",
+    ),
+    OptionDesc(
+        key="visualizer_layout", label="layout", kind="choice",
+        tab="appearance", section="visualizer",
+        choices="visualizer_layout_choices",
+        live="apply_visualizer_setting",
+        tooltip='how many tiles share the tab and how they sit. hover a tile and hit [edit] to change it.',
+    ),
+    OptionDesc(
+        key="visualizer_tile_1", label="tile 1", kind="choice",
+        tab="appearance", section="visualizer",
+        choices="visualizer_tile_choices",
+        live="apply_visualizer_setting",
+        tooltip="the big / top-left / only tile. tiles beyond the layout's count are remembered for when it grows.",
+    ),
+    OptionDesc(
+        key="visualizer_tile_2", label="tile 2", kind="choice",
+        tab="appearance", section="visualizer",
+        choices="visualizer_tile_choices",
+        live="apply_visualizer_setting",
+        tooltip="second tile. tiles beyond the layout's count are remembered for when it grows.",
+    ),
+    OptionDesc(
+        key="visualizer_tile_3", label="tile 3", kind="choice",
+        tab="appearance", section="visualizer",
+        choices="visualizer_tile_choices",
+        live="apply_visualizer_setting",
+        tooltip="third tile. tiles beyond the layout's count are remembered for when it grows.",
+    ),
+    OptionDesc(
+        key="visualizer_tile_4", label="tile 4", kind="choice",
+        tab="appearance", section="visualizer",
+        choices="visualizer_tile_choices",
+        live="apply_visualizer_setting",
+        tooltip="fourth tile (quad only). tiles beyond the layout's count are remembered for when it grows.",
+    ),
+    OptionDesc(
+        key="visualizer_look", label="look", kind="choice",
+        tab="appearance", section="visualizer",
+        choices=(("auto", "auto (follow the personality)"),
+                 ("blocks", "blocks"), ("glow", "glow")),
+        live="apply_visualizer_setting",
+        tooltip='blocks: hard cells and an inverse flash. glow: soft bars, bloom and rings off every kick.',
+    ),
+    OptionDesc(
+        key="visualizer_flash", label="kick flash", kind="choice",
+        tab="appearance", section="visualizer",
+        choices=(("off", "off"), ("soft", "soft"), ("hard", "hard")),
+        live="apply_visualizer_setting",
+        tooltip='how hard a kick lands on the scenes. hard also flashes the whole scene, on downbeats and big hits only.',
+    ),
+    OptionDesc(
+        key="visualizer_trails", label="strobe trails", kind="bool",
+        tab="appearance", section="visualizer",
+        live="apply_visualizer_setting",
+        tooltip='each kick leaves a fading ghost of the bars (or the scope line) behind the live ones.',
+    ),
+    OptionDesc(
+        key="visualizer_ripple", label="outline ripple", kind="bool",
+        tab="appearance", section="visualizer",
+        live="apply_visualizer_setting",
+        tooltip='each kick sends a light running round the tile outlines, out from the middle of the grid.',
+    ),
+    OptionDesc(
+        key="visualizer_bars", label="bars", kind="choice",
+        tab="appearance", section="visualizer",
+        choices=((16, "16"), (32, "32"), (48, "48"), (64, "64")),
+        live="apply_visualizer_setting",
+    ),
+    OptionDesc(
+        key="visualizer_deck_span", label="deck span", kind="choice",
+        tab="appearance", section="visualizer",
+        choices=((8, "8 seconds"), (16, "16 seconds"), (32, "32 seconds")),
+        live="apply_visualizer_setting",
+        tooltip='how much of the song the beat deck shows at once.',
+    ),
+    OptionDesc(
+        key="visualizer_classic", label="classic renderer", kind="choice",
+        tab="appearance", section="visualizer",
+        choices="visualizer_classic_choices",
+        live="apply_visualizer_setting",
+        tooltip="what a 'classic renderer' tile draws: the pre-2.3 styles.",
+    ),
+    OptionDesc(
+        key="visualizer_caption", label="title over the scene", kind="bool",
+        tab="appearance", section="visualizer",
+        live="apply_visualizer_setting",
+        tooltip='title and artist over the first spectrum, mirror or scope tile.',
+    ),
+    OptionDesc(
+        key="visualizer_fps", label="frame rate", kind="choice",
+        tab="appearance", section="visualizer",
+        choices=((60, "60 fps"), (30, "30 fps (lighter)")),
+        live="apply_visualizer_setting", advanced=True,
+        tooltip='repaint rate while the visualizer is on screen. 60 drops to 30 by itself while frames are expensive (a huge window); either way it stops repainting when paused.',
+    ),
+    OptionDesc(
+        key="visualizer_river_view", label="river · shows", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=(("near", "the next 16 seconds"), ("far", "the next 48 seconds"), ("whole", "the whole song")),
+        live="apply_visualizer_setting",
+        tooltip="how much of the song's loudness the river shows around the playhead.",
+    ),
+    OptionDesc(
+        key="visualizer_spectrogram_history", label="spectrogram · history", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=((6, "6 seconds"), (12, "12 seconds"), (24, "24 seconds")),
+        live="apply_visualizer_setting",
+    ),
+    OptionDesc(
+        key="visualizer_spectrogram_contrast", label="spectrogram · contrast", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=(("soft", "soft"), ("normal", "normal"), ("punchy", "punchy")),
+        live="apply_visualizer_setting",
+        tooltip="punchy lifts quiet detail; soft keeps only what's loud.",
+    ),
+    OptionDesc(
+        key="visualizer_halo_spokes", label="halo · spokes", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=((48, "48"), (96, "96"), (144, "144")),
+        live="apply_visualizer_setting",
+    ),
+    OptionDesc(
+        key="visualizer_halo_punch", label="halo · cover on the kick", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=(("off", "still"), ("gentle", "gentle"), ("hard", "hard")),
+        live="apply_visualizer_setting",
+    ),
+    OptionDesc(
+        key="visualizer_tapper_target", label="tapper · tap on", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=(("beats", "every beat"), ("downbeats", "downbeats"), ("kicks", "kicks")),
+        live="apply_visualizer_setting",
+    ),
+    OptionDesc(
+        key="visualizer_tapper_window", label="tapper · timing window", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=(("tight", "tight"), ("normal", "normal"), ("loose", "loose")),
+        live="apply_visualizer_setting",
+    ),
+    OptionDesc(
+        key="visualizer_tapper_offset", label="tapper · your latency", kind="choice",
+        tab="appearance", section="visualizer tiles",
+        choices=((-60, "-60 ms"), (-30, "-30 ms"), (0, "0 ms"), (30, "+30 ms"), (60, "+60 ms")),
+        live="apply_visualizer_setting",
+        tooltip="if the tapper says you're always late (bluetooth, a slow screen), move this toward what it suggests.",
     ),
 
     # ---- playback · instant play ----

@@ -201,7 +201,7 @@ class HomeViewSmokeTest(unittest.TestCase):
         import sys
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QApplication
-        from tide.ui.home import HomeView
+        from tide.ui.home import HomeView, patterns
         QApplication.instance() or QApplication(sys.argv[:1])
         view = HomeView(_HomeFakeApi())
         with mock.patch("tide.ui.home.view.history_module") as hist, \
@@ -212,9 +212,17 @@ class HomeViewSmokeTest(unittest.TestCase):
             # Workers (against the fake, instant) + the one-block-per-tick
             # build chain both need event-loop turns.
             QTest.qWait(200)
-        # Hero + 2 shelf blocks (heading+body each) + new-releases extra
-        # (heading+body) + trailing stretch — at minimum 6 widgets.
-        self.assertGreaterEqual(view._content_col.count(), 6)
+        # Hero, then the strata (2.3): 2 shelf blocks (heading+body each)
+        # in the shelves slot, the new-releases extra (heading+body) in
+        # the extras slot, the shelves first.
+        self.assertIsInstance(view._content_col.itemAt(0).widget(),
+                              patterns.Hero)
+        self.assertGreaterEqual(view._shelves_col.count(), 4)
+        self.assertGreaterEqual(view._extras_col.count(), 2)
+        widgets = [view._content_col.itemAt(i).widget()
+                   for i in range(view._content_col.count())]
+        self.assertLess(widgets.index(view._shelves_slot),
+                        widgets.index(view._extras_slot))
         self.assertTrue(view._loaded)
 
 

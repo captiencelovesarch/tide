@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from . import lyrics_provider, qthreads
+from . import lyric_timing, lyrics_provider, qthreads
 
 if TYPE_CHECKING:
     from .player import Player
@@ -131,7 +131,7 @@ class LyricTracker(QObject):
             return
         # Latest line whose timestamp <= position. Bisect (not a walk from
         # the previous index) so seeks in either direction just work.
-        idx = bisect_right(self._times, float(secs)) - 1
+        idx = bisect_right(self._times, float(secs) + lyric_timing.offset_s()) - 1
         text = self._lines[idx].strip() if idx >= 0 else ""
         self._emit(text or None)
 

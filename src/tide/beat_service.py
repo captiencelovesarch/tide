@@ -11,7 +11,7 @@ from . import beat_map, cache
 from .beat_map import BeatMap
 
 
-NAMESPACE = "beat-maps-v1"
+NAMESPACE = "beat-maps-v3"
 # analysis is a pure function of the audio, so a map stays right for as
 # long as the track does
 TTL_SECONDS = 90 * 24 * 3600

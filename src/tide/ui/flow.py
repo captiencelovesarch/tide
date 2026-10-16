@@ -13,7 +13,10 @@ edge until the cap is hit. Tiles are plain widgets that answer two calls,
 and anything else can ride it. A tile added with ``span=2`` takes a 2×2
 block, which is how the mosaic's featured item is placed.
 
-Two modes. *wrap* (the default) adds rows as tiles arrive. *columns*
+Two modes. *wrap* (the default) adds rows as tiles arrive; with
+``max_rows`` it stops there and hides the tiles that would start a row
+past it, so a pattern can bring more tiles than a narrow page shows and
+fill a wide one. *columns*
 (``rows=N``) fills N fixed rows column by column, sizes the columns so a
 whole number fits the width, and lets further columns run past the right
 edge for a horizontal scroller to page through — the quick-picks shape.
@@ -102,6 +105,7 @@ class ResponsiveGrid(QWidget):
     def __init__(self, *, min_tile: int, max_tile: int, gap: int = 8,
                  row_gap: int | None = None, rows: int | None = None,
                  balance: bool = True, max_columns: int | None = None,
+                 max_rows: int | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         # wrap mode: even out the rows once tiles wrap (eleven tiles and
@@ -109,6 +113,7 @@ class ResponsiveGrid(QWidget):
         # a grid), and cap the columns where a pattern has a shape to keep.
         self._balance = bool(balance)
         self._max_columns = int(max_columns) if max_columns else None
+        self._max_rows = int(max_rows) if max_rows else None
         self._min = max(1, int(min_tile))
         self._max = max(self._min, int(max_tile))
         self._gap = max(0, int(gap))
@@ -139,6 +144,10 @@ class ResponsiveGrid(QWidget):
 
     def tiles(self) -> list[QWidget]:
         return [t for t, _ in self._tiles]
+
+    def shown_tiles(self) -> list[QWidget]:
+        """The tiles the last layout placed (max_rows hides the rest)."""
+        return [t for t, _ in self._tiles if not t.isHidden()]
 
     def columns(self) -> int:
         """Columns the last layout used (visible columns in columns mode)."""
@@ -223,6 +232,11 @@ class ResponsiveGrid(QWidget):
                     c += 1
                     continue
                 break
+            if self._max_rows and r + span > self._max_rows:
+                tile.hide()
+                continue
+            if tile.isHidden():
+                tile.show()
             w = tw * span + gap * (span - 1)
             tile.set_tile_width(w)
             h = int(tile.tile_height(w))

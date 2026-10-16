@@ -780,27 +780,37 @@ class YTMusicSource(MusicSource):
         if not isinstance(body, list):
             return None
         # LyricLine objects (or dicts) with `text` + `start_time` in ms.
-        timed: list[tuple[float, str]] = []
+        # Each line's end_time too: karaoke sweeps a line's words across
+        # [start, end] instead of guessing where the singing stops.
+        rows: list[tuple[float, str, float | None]] = []
         texts: list[str] = []
         for ln in body:
             if isinstance(ln, dict):
                 text = str(ln.get("text") or "")
                 start = ln.get("start_time")
+                end = ln.get("end_time")
             else:
                 text = str(getattr(ln, "text", "") or "")
                 start = getattr(ln, "start_time", None)
+                end = getattr(ln, "end_time", None)
             if start is None:
                 continue
             try:
                 secs = float(start) / 1000.0
             except (TypeError, ValueError):
                 continue
+            try:
+                end_s = float(end) / 1000.0 if end is not None else None
+            except (TypeError, ValueError):
+                end_s = None
             texts.append(text)
-            timed.append((secs, text))
-        timed.sort(key=lambda x: x[0])
-        if not timed:
+            rows.append((secs, text, end_s if end_s is not None and end_s > secs else None))
+        rows.sort(key=lambda x: x[0])
+        if not rows:
             return None
-        return LyricsResult(plain_text="\n".join(texts), timed_lines=timed)
+        return LyricsResult(plain_text="\n".join(texts),
+                            timed_lines=[(t, text) for t, text, _e in rows],
+                            line_ends=[e for _t, _text, e in rows])
 
     def get_lyrics_for_track(self, track: Track):
         from ..lyrics_provider import LyricsResult, fetch_lrclib
@@ -820,7 +830,9 @@ class YTMusicSource(MusicSource):
         )
         if lrc is not None and lrc.has_timed:
             return LyricsResult(plain_text=plain or lrc.plain_text,
-                                timed_lines=lrc.timed_lines)
+                                timed_lines=lrc.timed_lines,
+                                line_ends=lrc.line_ends,
+                                word_lines=lrc.word_lines)
         if plain:
             return LyricsResult(plain_text=plain)
         return lrc

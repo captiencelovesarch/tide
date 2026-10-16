@@ -21,6 +21,7 @@ from __future__ import annotations
 from PySide6.QtCore import QRectF, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -303,14 +304,16 @@ class DenseGrid(ResponsiveGrid):
 
 
 class Mosaic(ResponsiveGrid):
-    """One featured 2×2 tile + up to eight 1×1s, on a grid whose small
-    tiles fill the width. ``seed`` picks the featured item, so the
-    arrangement reshuffles with the daily seed instead of always crowning
-    items[0]."""
+    """One featured 2×2 tile + up to sixteen 1×1s, on a grid whose small
+    tiles fill the width. Always two rows: a wide page shows more of the
+    small tiles, a narrow one fewer (the rest are hidden, not wrapped).
+    ``seed`` picks the featured item, so the arrangement reshuffles with
+    the daily seed instead of always crowning items[0]."""
 
     item_activated = Signal(object)
     SMALL = 108
     MAX_SMALL = 160
+    MAX_REST = 16
 
     def __init__(self, items: list, seed: int = 0,
                  parent: QWidget | None = None) -> None:
@@ -318,7 +321,7 @@ class Mosaic(ResponsiveGrid):
         import math
         margin = 2 * _scale.px(Card.MARGIN)
         featured_idx = seed % len(items) if items else 0
-        rest = [it for i, it in enumerate(items) if i != featured_idx][:8]
+        rest = [it for i, it in enumerate(items) if i != featured_idx][:self.MAX_REST]
         # The shape is the point: two rows, the feature on the left, the
         # rest split evenly beside it. So at most 2 + half-the-rest columns,
         # and no row balancing (it would count the feature as two cells).
@@ -326,7 +329,7 @@ class Mosaic(ResponsiveGrid):
                          max_tile=_scale.px(self.MAX_SMALL) + margin,
                          gap=_scale.px(4), balance=False,
                          max_columns=2 + max(1, math.ceil(len(rest) / 2)),
-                         parent=parent)
+                         max_rows=2, parent=parent)
         if not items:
             return
         featured = items[featured_idx]
@@ -386,6 +389,81 @@ class RankedList(ResponsiveGrid):
                                   rank=e.rank, trend=e.trend)
             row.clicked.connect(self.item_activated.emit)
             self.add(row)
+
+
+class ChartsBand(QWidget):
+    """top songs and the charts artists as one band: side by side once
+    both fit at two columns each, stacked under each other below that.
+    On their own, either one capped its rows at MAX_COL and left the
+    right third of a wide page empty.
+
+    The two lists come from different workers; each lands in its own
+    half (``slot`` = "top_songs" | "charts_artists"), always top songs on
+    the left, whichever answers first."""
+
+    ORDER = ("top_songs", "charts_artists")
+    SPACING = 32
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QBoxLayout
+        self._box = QBoxLayout(QBoxLayout.TopToBottom, self)
+        self._box.setContentsMargins(0, 0, 0, 0)
+        self._box.setSpacing(12)
+        self._halves: dict[str, QWidget] = {}
+        self._wide = False
+
+    def set_list(self, slot: str, title: str, ranked: QWidget) -> None:
+        from .. import scale as _scale
+        from ..headings import Heading
+        old = self._halves.pop(slot, None)
+        if old is not None:
+            self._box.removeWidget(old)
+            old.deleteLater()
+        half = QWidget()
+        col = QVBoxLayout(half)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(_scale.px(10))
+        heading = Heading(title)
+        heading.setProperty("class", "dim")
+        col.addWidget(heading)
+        col.addWidget(ranked)
+        col.addStretch(1)
+        half.heading = heading          # type: ignore[attr-defined]
+        half.ranked = ranked            # type: ignore[attr-defined]
+        rank = self.ORDER.index(slot) if slot in self.ORDER else len(self.ORDER)
+        index = sum(1 for s in self._halves
+                    if (self.ORDER.index(s) if s in self.ORDER else 99) < rank)
+        self._box.insertWidget(index, half, 1)
+        self._halves[slot] = half
+        self._reflow(force=True)
+
+    def halves(self) -> list[QWidget]:
+        return [self._box.itemAt(i).widget() for i in range(self._box.count())]
+
+    def side_by_side(self) -> bool:
+        return self._wide
+
+    def _min_wide(self) -> int:
+        """Both lists at two columns of the narrowest row, plus the gutter."""
+        from .. import scale as _scale
+        one = 2 * _scale.px(CompactTrackRow.WIDTH) + _scale.px(24)
+        return 2 * one + _scale.px(self.SPACING)
+
+    def _reflow(self, force: bool = False) -> None:
+        from PySide6.QtWidgets import QBoxLayout
+        from .. import scale as _scale
+        wide = len(self._halves) > 1 and self.width() >= self._min_wide()
+        if wide == self._wide and not force:
+            return
+        self._wide = wide
+        self._box.setDirection(QBoxLayout.LeftToRight if wide
+                               else QBoxLayout.TopToBottom)
+        self._box.setSpacing(_scale.px(self.SPACING) if wide else 12)
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        self._reflow()
 
 
 class ChipRow(QWidget):
@@ -585,6 +663,170 @@ class _RepeatRow(QWidget):
         super().mousePressEvent(ev)
 
 
+class RecentStrip(QWidget):
+    """The hero's middle: covers of what you played lately, two rows of
+    small squares, as many as the width holds (view.recently_played
+    picks them, one per cover). Click a cover to play that song; hover
+    for its name. It takes whatever room the keep-listening card and the
+    week leave it, so a wide hero has no empty middle."""
+
+    track_clicked = Signal(object)      # Track
+
+    TILE = 52
+    TILE_MODERN = 60
+    ROWS = 2
+    GAP = 6
+    MAX_GAP = 18
+
+    def __init__(self, tracks: list, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._tracks = [t for t in tracks if getattr(t, "thumbnail", "")]
+        self._theme = theming.manager().current_effective()
+        self._hover = -1
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumWidth(0)
+        self._fit()
+        art_cache.cache().image_loaded.connect(self._on_art)
+        for t in self._tracks:
+            art_cache.cache().request(t.thumbnail, None)
+        theming.manager().theme_changed.connect(self._on_theme)
+
+    def tracks(self) -> list:
+        return list(self._tracks)
+
+    def _tile(self) -> int:
+        from .. import scale as _scale
+        modern = getattr(self._theme, "aesthetic", "") == "modern"
+        return _scale.px(self.TILE_MODERN if modern else self.TILE)
+
+    def _fit(self) -> None:
+        from .. import scale as _scale
+        self.setFixedHeight(self.ROWS * self._tile()
+                            + (self.ROWS - 1) * _scale.px(self.GAP))
+
+    def sizeHint(self):  # noqa: N802
+        from PySide6.QtCore import QSize
+        from .. import scale as _scale
+        tile, gap = self._tile(), _scale.px(self.GAP)
+        return QSize(6 * tile + 5 * gap, self.height())
+
+    def cells(self) -> list[QRect]:
+        """One rect per cover shown: rows filled left to right, newest
+        first, columns spread to the full width once there are covers
+        enough to fill it."""
+        from .. import scale as _scale
+        import math
+        tile, gap = self._tile(), _scale.px(self.GAP)
+        n = len(self._tracks)
+        fit = max(0, (self.width() + gap) // (tile + gap))
+        cols = min(fit, math.ceil(n / self.ROWS)) if n else 0
+        if cols <= 0:
+            return []
+        step = tile + gap
+        if cols == fit and cols > 1:
+            spread = (self.width() - cols * tile) / (cols - 1)
+            step = tile + min(spread, _scale.px(self.MAX_GAP))
+        out = []
+        for i in range(min(n, cols * self.ROWS)):
+            r, c = divmod(i, cols)
+            out.append(QRect(round(c * step), r * (tile + gap), tile, tile))
+        return out
+
+    def _index_at(self, pos) -> int:
+        for i, rect in enumerate(self.cells()):
+            if rect.contains(pos):
+                return i
+        return -1
+
+    def _on_theme(self, theme) -> None:
+        self._theme = theme
+        self._fit()
+        self.update()
+
+    def _on_art(self, url: str, _img) -> None:
+        if any(t.thumbnail == url for t in self._tracks):
+            self.update()
+
+    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+        i = self._index_at(ev.position().toPoint())
+        if i != self._hover:
+            self._hover = i
+            self.update()
+        super().mouseMoveEvent(ev)
+
+    def leaveEvent(self, ev) -> None:  # noqa: N802
+        self._hover = -1
+        self.update()
+        super().leaveEvent(ev)
+
+    def mousePressEvent(self, ev) -> None:  # noqa: N802
+        if ev.button() == Qt.LeftButton:
+            i = self._index_at(ev.position().toPoint())
+            if i >= 0:
+                self.track_clicked.emit(self._tracks[i])
+                ev.accept()
+                return
+        super().mousePressEvent(ev)
+
+    def event(self, ev) -> bool:
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QToolTip
+        if ev.type() == QEvent.ToolTip:
+            i = self._index_at(ev.pos())
+            if i >= 0:
+                t = self._tracks[i]
+                text = f"{t.artists} — {t.title}" if t.artists else t.title
+                QToolTip.showText(ev.globalPos(), text, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().event(ev)
+
+    def paintEvent(self, _ev) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        theme = self._theme
+        modern = getattr(theme, "aesthetic", "") == "modern"
+        radius = theming.effective_radius_px(theme)
+        accent = _qcolor(theme, "accent", "#d4b95e")
+        dpr = self.devicePixelRatioF()
+        for i, rect in enumerate(self.cells()):
+            t = self._tracks[i]
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(rect), radius, radius)
+            pix = art_cache.cache().scaled(t.thumbnail, rect.width(),
+                                           rect.height(), dpr)
+            if pix is None:
+                p.setPen(Qt.NoPen)
+                p.setBrush(_qcolor(theme, "surface_1", "#0dffffff") if modern
+                           else _qcolor(theme, "bg_alt", "#141414"))
+                p.drawPath(path)
+            else:
+                # Centre-crop: video thumbnails are 16:9, covers square.
+                side = min(pix.width(), pix.height())
+                src = QRectF((pix.width() - side) / 2, (pix.height() - side) / 2,
+                             side, side)
+                p.save()
+                if radius > 0:
+                    p.setClipPath(path)
+                p.drawPixmap(QRectF(rect), pix, src)
+                p.restore()
+            if i == self._hover:
+                p.setBrush(Qt.NoBrush)
+                if modern:
+                    pen = QColor(_qcolor(theme, "fg", "#e6e6e6"))
+                    pen.setAlphaF(0.85)
+                    p.setPen(pen)
+                    p.drawRoundedRect(QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5),
+                                      radius, radius)
+                else:
+                    p.setPen(accent)
+                    p.drawRect(rect.adjusted(-1, -1, 0, 0))
+        p.end()
+
+
 class WeekPanel(QWidget):
     """The hero's right side: the week at a glance (a bar per day, the
     streak, artists new to you) and the songs on repeat. Local history
@@ -653,7 +895,11 @@ class Hero(QWidget):
 
     modern: the page's one big moment — the greeting at display size, the
     art at 128px, the block on its own surface. brutalist: the bold
-    greeting and 72px art it has always had, no surface."""
+    greeting and 72px art it has always had, no surface.
+
+    The body is three zones: keep listening, the recently-played covers
+    (which take the spare width), and the week. Too narrow for all three
+    on one line, the week drops under the other two."""
 
     resume_clicked = Signal()
     track_clicked = Signal(object)      # Track
@@ -663,9 +909,11 @@ class Hero(QWidget):
     ART = 72
     ART_MODERN = 128
 
+    TEXT_MAX = 340          # keep-listening column, so the covers get the rest
+
     def __init__(self, greeting: str, stats_line: str, last_track,
                  *, can_resume: bool, show_likes: bool,
-                 week: dict | None = None,
+                 week: dict | None = None, recent: list | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         from .. import scale as _scale
@@ -675,6 +923,10 @@ class Hero(QWidget):
         self._greeting = greeting
         self._art_url = ""
         self._texts: list[tuple[QLabel, str]] = []   # (label, raw) to re-case
+        self.week_panel = None
+        self.recent_strip = None
+        self._body = None
+        self._wide: bool | None = None
 
         title = QLabel(theming.styled_case(greeting))
         self._title = title
@@ -723,6 +975,7 @@ class Hero(QWidget):
                           if last_track.artists else last_track.title)
             track_lbl = QLabel(theming.styled_case(track_text))
             track_lbl.setTextFormat(Qt.PlainText)
+            track_lbl.setWordWrap(True)
             self._texts.append((track_lbl, track_text))
 
             btns = QHBoxLayout()
@@ -744,7 +997,8 @@ class Hero(QWidget):
                 btns.addWidget(lk)
             btns.addStretch(1)
 
-            text_col = QVBoxLayout()
+            self._text_box = QWidget()
+            text_col = QVBoxLayout(self._text_box)
             text_col.setContentsMargins(0, 0, 0, 0)
             text_col.setSpacing(2)
             text_col.addWidget(keep)
@@ -752,20 +1006,101 @@ class Hero(QWidget):
             text_col.addLayout(btns)
             text_col.addStretch(1)
 
-            resume_row = QHBoxLayout()
-            resume_row.setSpacing(12)
-            if self._art is not None:
-                resume_row.addWidget(self._art, alignment=Qt.AlignTop)
-            resume_row.addLayout(text_col, stretch=1)
-            # The rest of the row used to be empty: the week goes there.
-            self.week_panel = None
+            # keep listening | recently played (the spare width) | the week
+            if recent:
+                self.recent_strip = RecentStrip(recent)
+                self.recent_strip.track_clicked.connect(self.track_clicked.emit)
+                self._recent_box = QWidget()
+                rcol = QVBoxLayout(self._recent_box)
+                rcol.setContentsMargins(0, 0, 0, 0)
+                rcol.setSpacing(_scale.px(6))
+                head = QLabel(theming.styled_case("recently played"))
+                head.setProperty("class", "dim")
+                head.setTextFormat(Qt.PlainText)
+                self._texts.append((head, "recently played"))
+                rcol.addWidget(head)
+                rcol.addWidget(self.recent_strip)
+                rcol.addStretch(1)
             if week:
                 self.week_panel = WeekPanel(week)
                 self.week_panel.track_clicked.connect(self.track_clicked.emit)
-                resume_row.addWidget(self.week_panel, alignment=Qt.AlignTop)
-            col.addLayout(resume_row)
+            self._body = QGridLayout()
+            self._body.setContentsMargins(0, 0, 0, 0)
+            self._body.setHorizontalSpacing(_scale.px(24))
+            self._body.setVerticalSpacing(_scale.px(14))
+            self._fit_text_box()
+            self._place(wide=True)
+            col.addLayout(self._body)
 
         theming.manager().theme_changed.connect(self._on_theme)
+
+    # ---- body layout ----
+
+    def _fit_text_box(self) -> None:
+        from .. import scale as _scale
+        box = getattr(self, "_text_box", None)
+        if box is not None and self.recent_strip is not None:
+            box.setMaximumWidth(_scale.px(self.TEXT_MAX))
+
+    def _min_wide(self) -> int:
+        """Width the body needs for all three zones on one line: the
+        keep-listening card, three covers, the week."""
+        from .. import scale as _scale
+        need = 0
+        if self._art is not None:
+            need += self._art_px + 12
+        need += _scale.px(220)
+        if self.recent_strip is not None:
+            need += 3 * self.recent_strip._tile() + _scale.px(24)
+        if self.week_panel is not None:
+            need += self.week_panel.sizeHint().width() + _scale.px(24)
+        m = self._col.contentsMargins()
+        return need + m.left() + m.right()
+
+    def is_wide(self) -> bool:
+        return bool(self._wide)
+
+    def _place(self, *, wide: bool) -> None:
+        """(Re)seat the zones in the body grid. Wide: one line. Narrow:
+        art + keep listening + covers on top, the week under them."""
+        body = self._body
+        if body is None or wide == self._wide:
+            return
+        self._wide = wide
+        for w in (self._art, getattr(self, "_text_box", None),
+                  getattr(self, "_recent_box", None), self.week_panel):
+            if w is not None:
+                body.removeWidget(w)
+        for c in range(4):
+            body.setColumnStretch(c, 0)
+        art = self._art
+        if art is not None:
+            body.addWidget(art, 0, 0, Qt.AlignTop)
+        body.addWidget(self._text_box, 0, 1, Qt.AlignTop)
+        if self.recent_strip is not None:
+            body.addWidget(self._recent_box, 0, 2)
+            body.setColumnStretch(2, 1)
+        else:
+            body.setColumnStretch(1, 1)
+        if self.week_panel is not None:
+            if wide:
+                body.addWidget(self.week_panel, 0, 3, Qt.AlignTop | Qt.AlignRight)
+            else:
+                body.addWidget(self.week_panel, 1, 0, 1, 4,
+                               Qt.AlignTop | Qt.AlignLeft)
+
+    def minimumSizeHint(self):  # noqa: N802
+        # The one-line body's minimum would hold the page open at its
+        # width, and the hero would never get narrow enough to reflow.
+        from PySide6.QtCore import QSize
+        from .. import scale as _scale
+        hint = super().minimumSizeHint()
+        return QSize(min(hint.width(), _scale.px(320)), hint.height())
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        if self._body is not None:
+            self._place(wide=self.width() >= self._min_wide())
 
     # ---- faces ----
 
@@ -814,6 +1149,9 @@ class Hero(QWidget):
             img = art_cache.cache().get(self._art_url) if self._art_url else None
             if img is not None:
                 self._set_art(img)
+        if self._body is not None:
+            self._fit_text_box()
+            self._place(wide=self.width() >= self._min_wide())
         self.update()
 
     def _set_art(self, img) -> None:
