@@ -636,10 +636,10 @@ each phase ends with something that works and ships on its own.
 - done when: an existing user's discord and listenbrainz setup survives the
   upgrade untouched, and both can be switched off and on live.
 
-**phase 4 · steamvr plugin** (see `design/steamvr.md`, vr 1 to vr 3)
+**phase 4 · steamvr plugin** (see `design/steamvr.md`, vr 1 to vr 5)
 - [ ] `ctx.beats`, plus the extra hooks steamvr.md lists
 - [ ] publish `python-openvr` to the aur, add the optdepend
-- [ ] vr 1 (it shows up), vr 2 (it's physical), vr 3 (it lives here)
+- [ ] vr 1 (it shows up), vr 2 (physical), vr 3 (the ring), vr 4 (voice), vr 5 (it lives here)
 - done when: in vivecraft you touch your headphones, skip a song, look
   back at the game and it's gone.
 

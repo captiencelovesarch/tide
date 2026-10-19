@@ -4,6 +4,12 @@
 > framework in `design/plugins.md` (the `ctx` api, settings, safe mode).
 > that doc's §4 is the transport layer (overlays, textures, laser). this
 > one is how it should *feel*.
+>
+> **decided (2026-10-18):** valve index controllers, so poke uses real
+> finger tracking. body gestures summon it, with three quick clicks of both
+> thumbsticks as the backup. when you stop paying attention it's gone, it
+> never follows you. added on top: voice search, and the ring, a visualizer
+> around the edge of your view that pulses over the game.
 
 the brief: you're in a game (vivecraft is the test case). you do a small
 gesture, tide floats up in front of you. you use it, you look back at your
@@ -60,20 +66,32 @@ fight the game's bindings.
 | **tap your wrist** | tap the inside of one wrist twice with the other hand's finger, within 0.6 s | feels like checking a watch. two taps almost never happen by accident |
 | **look at your palm** | turn a palm up toward your face and hold it there for 0.8 s | the quest menu idiom, people know it. more false positives in games where you look at your hands |
 
-**button chord**: shipped as a steamvr action (`/actions/tide/in/summon`)
-with a default binding like "hold both menu buttons". you rebind it in
-steamvr's own binding ui, per controller, per game. good for people who want
-zero false positives. steamvr gives overlay apps the same button presses the
-game gets, so the default must be something games rarely use. *verify in
-the spike.*
+**the backup: click both thumbsticks, three times, fast.** for when your
+hands are busy or a gesture won't fire.
 
-settings: `summon` (headphones / wrist tap / palm / button only, multi-pick)
-and `summon hand` (either / left / right).
+- "both" means the two clicks land within 150 ms of each other. three of
+  those inside 1.2 s fires it. one or two does nothing.
+- built as two plain steamvr actions (`/actions/tide/in/stick_left`,
+  `/actions/tide/in/stick_right`) bound to the stick clicks by default. the
+  triple-click pattern is detected in our code, so it's covered by the same
+  replay tests as the gestures. you can rebind the two actions in steamvr's
+  binding ui like any other.
+- steamvr gives overlay apps the same presses the game gets, so the game
+  sees three stick clicks too. *check in the spike what that does in
+  vivecraft* (if stick click toggles something there, three clicks leave it
+  flipped once).
+- same pattern again while it's open closes it.
+
+settings: `summon` (headphones / wrist tap / palm, multi-pick),
+`summon hand` (either / left / right) and `stick triple-click` (on / off,
+default on).
 
 **the vivecraft bow problem.** drawing a bow in vivecraft puts your hand at
 your cheek, near the ear. that's why the headphones gesture needs an *open*
-hand: drawing a bow means holding the trigger. with index finger tracking
-"open" means fingers extended. on wands it means no button held.
+hand: drawing a bow means holding the trigger. index controllers report how
+curled each finger is (`IVRInput.getSkeletalSummaryData`, 0 = straight, 1 =
+fist), so "open" is simply all four fingers under 0.3 curl. a bow draw or a
+held block never looks like that.
 
 **not summoning by accident:** hold times, a 1 s cooldown after it hides,
 and a `sensitivity` setting (relaxed / normal / strict) that scales the hold
@@ -131,6 +149,12 @@ everything works two ways: **poke** (reach out and touch) and **laser**
 (point and pull the trigger, steamvr draws the laser). poke is the fun one,
 the laser is for when it's out of reach.
 
+with index controllers poke is your real index fingertip (the skeleton's
+fingertip bone), and only counts while that finger is pointing (index curl
+low, the others curled), so a loose hand brushing the panel doesn't press
+anything. grabbing is closing your hand around the frame (grip curl past
+0.7), the way you'd pick up a real object. no buttons involved in either.
+
 | you want to | you do | you feel |
 |---|---|---|
 | play / pause / skip / like | poke the button | a tick when it sinks, a lighter one when it comes back |
@@ -141,7 +165,9 @@ the laser is for when it's out of reach.
 | move it | grip the card's frame, move, let go | |
 | resize it | grip with both hands and stretch | |
 | keep it around | poke the pin | |
-| get rid of it now | **throw it away** (grip, toss it off to the side) or do the summon gesture again | |
+| get rid of it now | **throw it away** (grab, toss it off to the side) or do the summon gesture again | |
+| search | hold the mic button and talk (see voice search) | a tick when the mic opens and closes |
+| turn the ring on or off | poke the ring button | |
 
 quick controls without opening anything: while your hand is in the
 headphones pose, a **flick forward** is next, a **flick back** is previous,
@@ -190,6 +216,135 @@ and stays there (never stuck to your face). setting: `on song change` show
 
 ---
 
+## the ring
+
+tide's backdrop pulse, moved into vr: a grainy glow that hugs the edge of
+what you can see and pulses with the music over the game. the middle of
+your view stays clear.
+
+```
+   ┌──────────────── one eye's view ────────────────┐
+   │        ░░▒▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒▒░░                │
+   │     ░▒▓▓▓                     ▓▓▓▒░            │
+   │   ░▒▓▓                           ▓▓▒░          │
+   │  ░▓▓                               ▓▓░         │
+   │  ▒▓             the game            ▓▒         │
+   │  ░▓▓                               ▓▓░         │
+   │   ░▒▓▓                           ▓▓▒░          │
+   │     ░▒▓▓▓                     ▓▓▓▒░            │
+   │        ░░▒▒▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▒▒░░                 │
+   └──────── edge follows the lens, nose cut too ───┘
+```
+
+**the shape is the lens.** steamvr knows the exact outline each eye can
+see, nose cutout included (`IVRSystem.getHiddenAreaMesh(eye,
+HiddenAreaMesh_LineLoop)`). the ring is drawn just inside that line, so it
+sits on the edge of your vision on any headset, not on a generic circle.
+
+**getting it on screen.**
+- one overlay locked to the headset
+  (`setOverlayTransformTrackedDeviceRelative` to device 0), ~2 m out and wide
+  enough to cover the whole field of view.
+- a stereo texture: `VROverlayFlags_SideBySide_Parallel` sends the left half
+  to the left eye and the right half to the right eye, so each eye gets its
+  own outline. each half is lined up using that eye's projection
+  (`getProjectionRaw`). it'll be a little off at the very edge because of
+  your eye spacing. for a soft glow that doesn't matter.
+- normally anything stuck to your face in vr is bad. this one is fine:
+  games already darken the edge of your view to cut motion sickness
+  ("comfort vignettes"). the ring is one of those that dances.
+
+**animating it without redrawing.** the ring is a big texture (about
+2048 × 1024) and uploading it 90 times a second is out of the question. so
+it's uploaded a few times and then only moved and faded:
+- the texture is white. color comes from `setOverlayColor`, so a new
+  cover color costs nothing.
+- the grain shimmers by cross-fading 4 copies of the ring with different
+  grain (4 overlays, alpha only).
+- the pulse is alpha plus a slight squeeze inward
+  (`setOverlayWidthInMeters`), driven by `ctx.beats.on_pulse`.
+- kicks come from the beat map, so the flash can be timed to land exactly
+  on the beat instead of a frame late (the same idea as
+  `TIDE_BEAT_LEAD_MS`).
+
+**settings.**
+- `ring`: off / on the kick (dark until a kick, flashes, fades) / breathing
+  (always faintly there, swells with the bass). default: off.
+- `strength`: subtle / normal / loud.
+- `ring color`: from the cover / theme accent.
+- a ring button on the panel turns it on and off without opening settings.
+
+**personality.** brutalist: a hard stepped edge, chunky grain cells, flashes
+that cut. modern: a soft glow, fine grain, a springy swell.
+
+**rules it keeps.**
+- only while music is playing. fades out on pause.
+- never reaches more than ~12% in from the edge. the game stays the game.
+- **no more than 3 flashes a second.** fast music (drum and bass, a 16th
+  note hi-hat) turns into a swell instead of strobing. photosensitive
+  seizure guidelines draw the line at 3, and in a headset you can't look
+  away from it.
+- motion intensity off means no ring (it is nothing but motion). the
+  setting is greyed with a note saying why.
+
+## voice search
+
+**talking.** hold the mic button on the panel like a walkie-talkie, talk,
+let go. or, without the panel: from the headphones pose, pinch your thumb
+and index finger together and hold (index tracks the pinch). the mic is
+only open while you hold. a red dot shows on the panel and your hand gets
+a tick when it opens and when it closes.
+
+**while you talk** the music drops to 30% (the index's speakers sit off your
+ears and leak into the mic), and the words appear above the panel as they're
+heard, if the engine can stream (see below).
+
+**what it does with what you said.** a short list of commands first,
+anything else is a search:
+
+| you say | it does |
+|---|---|
+| "play daft punk one more time" | searches, plays the top song |
+| "queue ..." / "add ..." | searches, puts the top song next |
+| "skip" / "next" · "back" / "previous" | that |
+| "pause" / "play" | that |
+| "louder" / "quieter" | volume ±10% |
+| "like this" | likes the current song |
+| anything else | search, results float up |
+
+**results.** five cards in an arc in front of the panel: songs, plus an
+artist card when the top hit is an artist. poke one to play it. **grab one
+and drop it on the panel to play it next.** throw it away to clear the
+results. look away and the results go first, then the usual attention rule.
+
+**the engine.** everything runs on your computer. no audio leaves it.
+- **first try: the model tide already has.** precise lyric timing downloads
+  a speech model (`lyric_align.py`: wav2vec2-base-960h, int8 onnx, ~95 MB,
+  on onnxruntime). it's a speech recognizer already. reading its output
+  straight as text gives a transcript with no new dependency. it has no
+  sense of words, so names come out spelled by ear ("dafft punk won more
+  time"), but youtube music search is forgiving about spelling. the spike
+  tries 20 real requests and decides.
+- **if that's too rough: whisper through sherpa-onnx.**
+  `python-sherpa-onnx` (aur, 1.13.8) runs on the same onnxruntime tide
+  already uses, and also has streaming models, which is what makes words
+  appear while you talk. a bigger download.
+  `python-faster-whisper` (aur, 1.2.1) is the other option but pulls in
+  ctranslate2, a second ml runtime.
+- either way the model downloads on request from settings, pinned to a
+  revision and a sha256, the way `lyric_align.download_model` does it.
+
+**the mic.** `parec` on the default input at 16 kHz mono. steamvr switches
+the default input to the headset mic when vr starts (a steamvr audio
+setting), so tide doesn't need to know which mic it is. same subprocess
+approach as `audio_capture.py`.
+
+**settings.** `voice search` (on / off), `pinch to talk` (on / off),
+`duck music while talking` (on / off), `speech model` (with a download
+button and its size). english only for now.
+
+---
+
 ## what it looks like (panel, modern-ish)
 
 ```
@@ -200,13 +355,14 @@ and stays there (never stuck to your face). setting: `on song change` show
    │ │ art  │  artist · album                 │
    │ └──────┘  ━━━━━━━━━━━●────────── 1:02 3:40│
    │                                          │
-   │    [ |◀ ]   [ ▶ ]   [ ▶| ]   [ ♥ ]   [⌖] │  ← each a raised overlay
+   │    [ |◀ ]   [ ▶ ]   [ ▶| ]   [ ♥ ]        │  ← each a raised overlay
+   │  [ mic ]                    [ ◯ ]  [⌖]   │  ← talk · ring · pin
    └──────────────────────────────────────────┘
                    ‾‾‾‾ pull ‾‾‾‾                ← up next handle
 ```
 
 sizes are set by readability, not pixels: at 55 cm, title text 1.6 cm tall,
-secondary text 1.1 cm, buttons 4 cm square. the card is ~30 × 14 cm,
+secondary text 1.1 cm, buttons 4 cm square. the card is ~30 × 18 cm,
 rendered at ~2.5 px/mm (750 × 350 for the card texture).
 
 ---
@@ -241,9 +397,12 @@ one place in the code (safe mode still catches it).
 | up next ×5 | below card | queue change |
 | glance | world | song change |
 | hand label | controller (device-relative transform) | on a quick control |
+| ring ×4 (grain variants) | headset, side-by-side stereo | uploaded once, then alpha / color / width only |
+| transcript line | card, above | as words are heard |
+| search results ×5 | arc in front of card | on a search |
 | dashboard tab | steamvr dashboard | always there |
 
-about 15 overlays, most of them tiny and rarely redrawn. the dashboard tab
+about 25 overlays, most of them tiny and rarely redrawn. the dashboard tab
 (`createDashboardOverlay`) is the fallback: if you forget the gesture, tide
 is still in the steamvr menu.
 
@@ -306,8 +465,9 @@ everything in the gui, under settings → plugins → steamvr:
 
 | setting | choices | default |
 |---|---|---|
-| summon | headphones / wrist tap / palm / button only (multi) | headphones |
+| summon | headphones / wrist tap / palm (multi) | headphones |
 | summon hand | either / left / right | either |
+| stick triple-click | on / off | on |
 | sensitivity | relaxed / normal / strict | normal |
 | linger | 1–6 s | 2.5 s |
 | size | small / medium / large | medium |
@@ -317,6 +477,13 @@ everything in the gui, under settings → plugins → steamvr:
 | lyrics | off / line / ribbon | line |
 | on song change | show / don't | show |
 | quick controls at your ear | on / off | on |
+| ring | off / on the kick / breathing | off |
+| ring strength | subtle / normal / loud | normal |
+| ring color | from the cover / theme accent | from the cover |
+| voice search | on / off | off until a model is there |
+| pinch to talk | on / off | on |
+| duck music while talking | on / off | on |
+| speech model | download button, shows size | |
 | reset pinned spots | button | |
 
 `pinned spots` (per game) are internal state in the plugin's data dir, with
@@ -327,10 +494,18 @@ the reset button as their gui.
 on top of the hooks already in `plugins.md`:
 
 - `ctx.track.art(track, size, cb)` for *any* track, not just the current
-  one (up next covers).
-- `ctx.queue.play_at(index)` (poking an up next card).
+  one (up next and search result covers).
+- `ctx.queue.play_at(index)` (poking an up next card) and
+  `ctx.queue.add_next(track)` (dropping a result on the panel).
+- `ctx.search(query, kind="songs") → list[TrackInfo]` through the active
+  source, off the gui thread. new: nothing in `plugins.md` searched yet.
+- `ctx.playback.duck(level)` / `unduck()`: a temporary volume dip that
+  doesn't touch the saved volume.
+- `ctx.theme.cover_colors()`: the palette `AdaptiveDriver` already pulls from
+  the cover, for the ring.
 - `ctx.lyrics` word timing, for the ribbon.
-- `kind = "action"` settings (a button row), for "reset pinned spots".
+- `kind = "action"` settings (a button row), for "reset pinned spots" and
+  the model download.
 - multi-pick choice settings, for `summon`.
 - `ctx.motion` curves usable off the gui thread (just numbers, no qt
   animation objects).
@@ -341,17 +516,27 @@ on top of the hooks already in `plugins.md`:
 
 replaces phases 4 and 5 in `plugins.md`.
 
-**vr 0 · spike** (1–2 evenings, a script outside tide)
+**vr 0 · spike** (2 evenings, a script outside tide)
 - [ ] overlay a png in front of you; then a rendered `QWidget`; then a laser
       click on it
 - [ ] check: does the game still get the trigger when you click the overlay?
-      do overlay actions (the summon chord) arrive while vivecraft has focus?
-- [ ] record pose streams: each gesture ×10, five minutes of normal play
-- done when: a qt button clicks in vr and you have pose recordings.
+      do our stick-click actions arrive while vivecraft has focus, and what
+      do three stick clicks do in vivecraft?
+- [ ] a head-locked side-by-side overlay with the lens outline from
+      `getHiddenAreaMesh` drawn on it: does it line up with the edge of
+      your view in each eye?
+- [ ] record pose streams: each gesture ×10, stick triple-clicks ×10, five
+      minutes of normal vivecraft play
+- [ ] record 20 spoken requests through the headset mic, run them through
+      the wav2vec2 model tide already has, search youtube music with the
+      text, count how many find the right song
+- done when: a qt button clicks in vr, the ring outline sits on the lens
+  edge, and you have pose and voice recordings.
 
 **vr 1 · it shows up** (4–5 days)
 - [ ] vr thread, overlays, steamvr retry and quit handling, dashboard tab
-- [ ] headphones gesture + button chord, bubble and panel, grow-from-hand
+- [ ] headphones gesture + stick triple-click, bubble and panel,
+      grow-from-hand
 - [ ] attention model, fade and shrink, reversal
 - [ ] laser input
 - [ ] the glance on song change
@@ -359,45 +544,64 @@ replaces phases 4 and 5 in `plugins.md`.
   laser, look back at the game and it's gone.
 
 **vr 2 · it's physical** (4–5 days)
-- [ ] poke (index skeleton or a faked fingertip), layered overlays,
-      sinking buttons, haptics
+- [ ] poke with the index fingertip, layered overlays, sinking buttons,
+      haptics
 - [ ] flick the cover, scrub, volume knob
 - [ ] grab, move, throw away, two-hand resize
 - [ ] wrist tap and palm gestures
 - done when: you never need the laser for something within reach.
 
-**vr 3 · it lives here** (3–4 days)
+**vr 3 · the ring** (2–3 days)
+- [ ] lens outline → ring textures, 4 grain variants, side-by-side stereo
+- [ ] pulse from `ctx.beats`, kicks timed from the beat map, the 3-a-second
+      cap
+- [ ] the three modes, color from the cover, brutalist and modern looks
+- done when: you'd leave it on through a whole vivecraft session.
+
+**vr 4 · voice** (3–4 days)
+- [ ] push to talk (button and pinch), mic capture, ducking
+- [ ] speech engine (whichever won the spike), command list, search
+- [ ] result cards: poke to play, drop on the panel to queue, throw to clear
+- done when: "play daft punk one more time" plays it, and holding a result
+  over the panel and letting go puts it next.
+
+**vr 5 · it lives here** (3–4 days)
 - [ ] pin and ambient mode, pinned spots per game
 - [ ] ear quick controls (flick, twist)
-- [ ] lyric ribbon, up next fan, pulse
+- [ ] lyric ribbon, up next fan, pulse on the panel
 - [ ] `TIDE_VR_PREVIEW` window (could move earlier if layout work drags)
 
-**vr 4 · experiments**
+**vr 6 · experiments**
 - [ ] brightness that follows the game's frame
 - [ ] "feel the kick" haptics
+- [ ] streaming speech (words while you talk) if the first engine can't
 - [ ] gl texture upload if raw uploads are too slow with this many overlays
 
 ## risks, on top of plugins.md
 
 | risk | what to do |
 |---|---|
-| the headphones gesture fires during play | the replay tests against real play recordings; strict sensitivity; the button-only option |
-| overlay action bindings may not reach us while a game has focus | the spike checks it first. if they don't, body gestures are the only summon, which is fine |
-| 15 overlays × raw uploads too slow | most are tiny and rarely change. measure in vr 1, gl textures in vr 4 if needed |
-| flicks and throws feel wrong | velocity comes straight from steamvr (`vVelocity` on each pose). thresholds are settings internally and tuned against recordings |
-| motion sickness from things moving near your face | nothing head-locked, soft pulse by default, intensity off means no motion at all |
+| the headphones gesture fires during play | the replay tests against real play recordings, strict sensitivity, turning gestures off and using the stick triple-click |
+| stick-click actions may not reach us while a game has focus | the spike checks it first. if they don't, body gestures are the only summon |
+| three stick clicks do something in vivecraft | the spike checks. if it's bad, rebind our two actions to something else in steamvr's binding ui |
+| the ring doesn't line up with the lens edge (eye spacing, reprojection, a headset that reports its outline oddly) | the spike checks on your index. fallback: a plain ellipse with a size setting |
+| the ring is too much in a dark game | off by default, `strength`, kick-only mode, and the panel button to kill it fast |
+| photosensitivity | the 3-flashes-a-second cap is not a setting, it's always on |
+| wav2vec2 transcripts too rough to search with | the spike measures it. sherpa-onnx whisper is the fallback |
+| the mic hears the game | push to talk keeps clips short, music ducks. game audio can't be ducked by tide |
+| 25 overlays × raw uploads too slow | most are tiny and rarely change, the ring never re-uploads. measure in vr 1, gl textures in vr 6 if needed |
+| flicks and throws feel wrong | velocity comes straight from steamvr (`vVelocity` on each pose). thresholds are tuned against recordings |
+| motion sickness | nothing big is head-locked (the ring stays at the edge, like a comfort vignette), soft pulse by default, intensity off means no motion at all |
 
 ## questions for you
 
-1. **controllers?** index (real finger poke), wands, or quest through steam
-   link / virtual desktop? decides how much of vr 2 is real tracking vs a
-   faked fingertip.
-2. **headphones as the default summon:** does that feel right, or did you
-   picture a button combo? (both will exist, this is just the default.)
-3. **when you turn away, gone or follow?** this sketch says gone (your "stop
-   giving it attention"). the other option is a lazy follow that drifts back
-   into view. i'd only add it as a setting if gone feels wrong in practice.
-4. **anything you want it to *do* in vr** beyond controls, lyrics and up
-   next? (search by voice, liking with a thumbs up, a visualizer you can
-   stand inside...) these are later, but they change what the panel needs
-   room for.
+1. **the ring's shape:** i read your drawing as one eye's view, with the flat
+   bit at the bottom left being the nose. so the ring follows each eye's
+   real lens edge. right, or did you want a plain circle?
+2. **ring timing:** always on while music plays (as long as it's switched
+   on), or only while the panel is hidden so it doesn't compete with it?
+3. **voice:** happy with english only and push to talk to start? an always
+   listening "hey tide" is possible later but means the mic is always open,
+   which i'd rather not do.
+4. **stick triple-click:** both sticks at once, three times (what's written
+   here), or either stick three times?
