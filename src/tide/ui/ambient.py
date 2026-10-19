@@ -79,6 +79,7 @@ class AmbientController(QObject):
         # setting says (plugins: the vr ring). the backdrop targets stay
         # gated by adaptive_pulse.
         self._listeners: list = []
+        self._backdrop_live = False
         self._holding = False
         self._key: str | None = None
         self._generation = 0
@@ -216,14 +217,27 @@ class AmbientController(QObject):
     def _wants_clock(self) -> bool:
         return self._wants_pulse() or bool(self._watchers)
 
-    def _set_pulse(self, level: float, targets=None) -> None:
-        if targets is None:
-            targets = (self._targets if self._backdrop_pulses() else []) + self._listeners
+    @staticmethod
+    def _send(level: float, targets) -> None:
         for target in targets:
             try:
                 target.set_pulse(level)
             except RuntimeError:
                 pass
+
+    def _set_pulse(self, level: float, targets=None) -> None:
+        if targets is not None:
+            self._send(level, targets)
+            return
+        backdrop = self._backdrop_pulses()
+        if backdrop:
+            self._send(level, self._targets)
+        elif self._backdrop_live or level == 0.0:
+            # the backdrop just stopped pulsing (listeners may keep the
+            # clock running): put it at rest instead of freezing mid-swell
+            self._send(0.0, self._targets)
+        self._backdrop_live = backdrop
+        self._send(level, self._listeners)
 
     def _live_value(self, now: float) -> float:
         return self._live if now - self._last_live_at <= MAX_CLOCK_GAP else 0.0
@@ -275,6 +289,10 @@ class AmbientController(QObject):
         self._render_pulse(now)
 
     def _reconcile(self) -> None:
+        if self._backdrop_live and not self._backdrop_pulses():
+            # switched off while a listener keeps the clock: rest it now
+            self._send(0.0, self._targets)
+            self._backdrop_live = False
         if self._wants_clock() and self._is_playing():
             self._acquire()
             if self._wants_pulse():
