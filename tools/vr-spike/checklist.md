@@ -70,10 +70,11 @@ steamvr's compositor in testing; `raw` and `file` both did).
         `inactive`. note which
       - every stick press should print `stick l down (action)` or
         `legacy l buttons 0x...`. note which kind shows up, or none
-- [ ] if no presses show up at all: steamvr settings → developer → turn on
-      "experimental overlay input overrides" (exact wording may differ),
-      then `./run.sh panel --global-input` and try again. note whether the
-      sticks still do their normal thing in a game while it runs
+- [ ] if no presses show up at all: steamvr settings → turn on "advanced
+      settings" → developer → "enable global input from overlays
+      (experimental)" (`steamvr/globalActionSetPriority`, no restart
+      needed). then `./run.sh panel --global-input` and try again. note
+      whether the sticks still do their normal thing in a game while it runs
 - [ ] when you close it the terminal ends with `teardown: qt events
       drained` and no segfault. if it crashes, copy the last lines
 
