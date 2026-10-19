@@ -636,6 +636,9 @@ running log from `tools/vr-spike`. each one changes the plan above.
   flipped bounds already turn it top-down; flipping it again sent clicks to
   the mirror spot. the slider only worked because it sits at mid height.
   rule for the plugin: **flip the texture or the laser y, never both.**
+- **2026-10-19 · laser input confirmed:** with only the texture flipped,
+  click, hold and drag all work on the gl panel. the laser path (overlay
+  mouse events → synthesized qt mouse events) is proven.
 
 ## risks, on top of plugins.md
 
