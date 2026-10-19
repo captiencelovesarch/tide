@@ -10,6 +10,11 @@
 > thumbsticks as the backup. when you stop paying attention it's gone, it
 > never follows you. added on top: voice search, and the ring, a visualizer
 > around the edge of your view that pulses over the game.
+>
+> **decided, round 2:** the ring follows the lens edge (the index nose cut
+> was the point of the drawing). it's a toggle and only shows while music
+> plays. voice is english only and push to talk, on a physical button on the
+> panel, nothing else. the stick backup is both sticks at once, three times.
 
 the brief: you're in a game (vivecraft is the test case). you do a small
 gesture, tide floats up in front of you. you use it, you look back at your
@@ -240,6 +245,9 @@ your view stays clear.
 see, nose cutout included (`IVRSystem.getHiddenAreaMesh(eye,
 HiddenAreaMesh_LineLoop)`). the ring is drawn just inside that line, so it
 sits on the edge of your vision on any headset, not on a generic circle.
+on the index that means the nose cut. headsets without one report their
+own shape and get a ring that matches it, no special case needed. a headset
+that reports no outline at all gets a plain ellipse.
 
 **getting it on screen.**
 - one overlay locked to the headset
@@ -289,11 +297,15 @@ that cut. modern: a soft glow, fine grain, a springy swell.
 
 ## voice search
 
-**talking.** hold the mic button on the panel like a walkie-talkie, talk,
-let go. or, without the panel: from the headphones pose, pinch your thumb
-and index finger together and hold (index tracks the pinch). the mic is
-only open while you hold. a red dot shows on the panel and your hand gets
-a tick when it opens and when it closes.
+**talking.** push to talk, one way only: the mic button on the panel. it's
+the biggest button on the card and it's built like a real one. push it in
+with your finger and hold, it sinks a full centimetre (deeper than the
+others) and lights red, your hand gets a firm click. talk. let go, it springs
+back with a softer click and the mic closes. it works with the laser too
+(hold the trigger on it).
+
+the mic is never open any other way: no wake word, no gesture, nothing
+while the button is up.
 
 **while you talk** the music drops to 30% (the index's speakers sit off your
 ears and leak into the mic), and the words appear above the panel as they're
@@ -339,8 +351,8 @@ the default input to the headset mic when vr starts (a steamvr audio
 setting), so tide doesn't need to know which mic it is. same subprocess
 approach as `audio_capture.py`.
 
-**settings.** `voice search` (on / off), `pinch to talk` (on / off),
-`duck music while talking` (on / off), `speech model` (with a download
+**settings.** `voice search` (on / off), `duck music while talking`
+(on / off), `speech model` (with a download
 button and its size). english only for now.
 
 ---
@@ -481,7 +493,6 @@ everything in the gui, under settings → plugins → steamvr:
 | ring strength | subtle / normal / loud | normal |
 | ring color | from the cover / theme accent | from the cover |
 | voice search | on / off | off until a model is there |
-| pinch to talk | on / off | on |
 | duck music while talking | on / off | on |
 | speech model | download button, shows size | |
 | reset pinned spots | button | |
@@ -559,7 +570,7 @@ replaces phases 4 and 5 in `plugins.md`.
 - done when: you'd leave it on through a whole vivecraft session.
 
 **vr 4 · voice** (3–4 days)
-- [ ] push to talk (button and pinch), mic capture, ducking
+- [ ] the mic button (deep press, hold to talk), mic capture, ducking
 - [ ] speech engine (whichever won the spike), command list, search
 - [ ] result cards: poke to play, drop on the panel to queue, throw to clear
 - done when: "play daft punk one more time" plays it, and holding a result
@@ -595,13 +606,4 @@ replaces phases 4 and 5 in `plugins.md`.
 
 ## questions for you
 
-1. **the ring's shape:** i read your drawing as one eye's view, with the flat
-   bit at the bottom left being the nose. so the ring follows each eye's
-   real lens edge. right, or did you want a plain circle?
-2. **ring timing:** always on while music plays (as long as it's switched
-   on), or only while the panel is hidden so it doesn't compete with it?
-3. **voice:** happy with english only and push to talk to start? an always
-   listening "hey tide" is possible later but means the mic is always open,
-   which i'd rather not do.
-4. **stick triple-click:** both sticks at once, three times (what's written
-   here), or either stick three times?
+none open. next step is the vr 0 spike.
