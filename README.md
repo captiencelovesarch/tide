@@ -1,178 +1,140 @@
-# tide
+<p align="center">
+  <img src="assets/icon-128.png" width="96" alt="" />
+</p>
 
-a music player for linux that pulls from youtube music, spotify, subsonic/navidrome, soundcloud, bandcamp, mixcloud and your local files, and lets you mix all of them in one queue. native Qt6 on top of mpv. no electron anywhere in the building.
+<h1 align="center">tide</h1>
 
-since 2.0 it is also two players. **brutalist**: a music player. nothing else. **modern**: the same songs, alive. same library, same queue underneath, two completely different things to look at.
+<p align="center">
+  a youtube music client for linux.<br />
+  native qt6 on top of mpv, with your whole account in it.
+</p>
 
-<img src="assets/screenshots/chooser-panes.png" alt="choose your tide" width="780" />
+<p align="center">
+  <img src="assets/media/hero.avif" width="820" alt="tide playing a song, the backdrop pulsing with the bass" />
+</p>
 
 ```sh
 yay -S tide
 ```
 
-first launch asks the one question above, then walks you through signing into youtube music in your normal browser and imports the cookies itself. that is the whole setup. everything else is optional and lives in the settings dialog, you never edit a config file.
+first launch signs you into youtube music through the browser you already use. that's the setup.
 
-## two players
+## your youtube music, all of it
 
-**brutalist** is what tide has been since 1.0, distilled. monospace type, hard edges, no gradients, [bracket] buttons and block meters, nothing animates. album art still shows, because art is content, not chrome.
+<table>
+  <tr>
+    <td width="50%"><img src="assets/media/home.png" alt="home" /><br /><b>home.</b> your feed: recently played, quick picks, listen again, charts, new releases, moods.</td>
+    <td width="50%"><img src="assets/media/song-page.png" alt="song page" /><br /><b>song pages.</b> plays, likes, credits, other recordings, and the comments. timestamps in them seek.</td>
+  </tr>
+  <tr>
+    <td><img src="assets/media/queue.png" alt="queue with radio on" /><br /><b>radio.</b> when the queue runs low it keeps going from what you're playing, and skips fan re-uploads. save the queue as a playlist in one click.</td>
+    <td><img src="assets/media/lyrics.png" alt="synced lyrics in fullscreen" /><br /><b>lyrics.</b> youtube's own synced lyrics, with lrclib and netease as backup. <code>F11</code> puts them next to big art.</td>
+  </tr>
+</table>
 
-<img src="assets/screenshots/brutalist-window.png" alt="brutalist" width="780" />
+your library is all there too: songs, albums, artists you follow, playlists. likes, follows and playlist edits go to your account, and history shows what you played everywhere, not only in tide. tide can also report plays so your recommendations keep up (off unless you turn it on).
 
-**modern** is the other answer: springy sliders that snap to magnetic detents and settle with a little overshoot, soft corners, icons, and a backdrop that takes its color from the album cover and moves with the bass.
+## two ways to look at it
 
-<img src="assets/screenshots/modern-window.png" alt="modern" width="780" />
+<table>
+  <tr>
+    <td width="50%"><img src="assets/media/brutalist.png" alt="brutalist" /></td>
+    <td width="50%"><img src="assets/media/modern.png" alt="modern" /></td>
+  </tr>
+  <tr>
+    <td><b>brutalist.</b> monospace, hard edges, nothing moves.</td>
+    <td><b>modern.</b> springy controls, soft corners, a backdrop that takes its colour from the cover and moves with the bass.</td>
+  </tr>
+</table>
 
-they are not two themes. each personality owns its whole look — theme, layout, motion, corners, nav icons, glyphs, backdrops, sounds — and each remembers its own customizations. flip to modern, tweak it for a month, flip back: brutalist is exactly as you left it, your gruvbox and your slot layout included. the split holds at the engine level too: turn motion on in brutalist and you get clean mechanical animation, never bounce. the springs belong to modern.
+pick one on first launch and switch whenever. each keeps its own theme and tweaks. 16 themes between them, and a theme editor for more.
 
-the chooser appears once, on a fresh install or on the first launch after updating into 2.0, and dismissing it changes nothing — a 1.x install keeps exactly the look it had. after that it lives in settings → appearance: a quick flip picker, or the full-screen side-by-side again if you want to compare.
+## the rest
 
-## why i made it
+<table>
+  <tr>
+    <td width="50%"><img src="assets/media/visualizer.avif" alt="visualizer" /><br /><b>visualizer.</b> up to four tiles, built from a beat map of the song, so you see the drop coming.</td>
+    <td width="50%"><img src="assets/media/player-bar.avif" alt="player bar customizer" /><br /><b>your own player bar.</b> long-press it, then drag, resize and pick what shows.</td>
+  </tr>
+</table>
 
-i wanted a music app that looks like something. most players are a grey rectangle with a sidebar and i was tired of it, so tide ships sixteen themes and they are not palette swaps. each theme picks its own fonts, text casing (synthwave types in l33t, terminal-green and storm shout in caps, brutalist-mono stays lowercase), corner radius, widget variants, list markers and default visualizer. five are brutalist, eleven are modern, and the picker shows the ones that fit the personality you're wearing, with a "show all" escape hatch for crossing over. since v1.3 tide draws its own titlebar as well, so the theme goes to the very top pixel instead of stopping under your window manager's grey bar.
+also: a mini player, a 10-band eq and reverb rack, 0.5× to 2× speed, sleep timer, mpris, tray, discord presence, listenbrainz.
 
-the set: brutalist-mono, gruvbox, terminal-green, storm (slate + one lightning-yellow accent) and solarized-light on the brutalist side; adaptive (recolors itself from the current album cover), abyss, blackwater (true black, made for OLED), golden hour, undertow (indigo + one blood-red accent), nord, catppuccin, rosé pine, paper, ambient and synthwave on the modern side.
+## other sources
 
-if none of those fit, drop a `theme.toml` + `theme.qss` into `~/.config/tide/themes/` and it shows up in the picker. the font picker also lists every family on your system, drawn in its own face, with live preview. and since 2.0 you don't need to write the files at all — see the next section.
+youtube music is the main thing. tide can also play these, all in the same queue:
 
-## the power tools
+| source | what works |
+|---|---|
+| local files | search, albums, artists |
+| subsonic / navidrome | search, playlists, albums, artists |
+| soundcloud, bandcamp, mixcloud | search |
+| spotify | search and library only. playback is broken upstream ([why](#spotify)) |
 
-settings → appearance grew a row of deep-cut editors in 2.0:
+<details>
+<summary><b>other distros</b></summary>
 
-- **theme editor** — the active theme's colors, typography and radius, edited live on the whole running app. save the result and it becomes a real theme in `~/.config/tide/themes/`, in the picker next to the bundled ones.
-- **strip builder** — build your own player bar: every slot on the strip picks its variant from a live miniature preview.
-- **keymap editor** — every shortcut in the app, rebindable. the keymap is global on purpose; muscle memory doesn't flip with the personality.
-- **glyph editor** — swap any transport glyph (▶ ▮▮ ♥ …) for one to three characters of your own, per personality.
-
-nothing here touches a config file; everything previews live and reverts on cancel. the test suite (1611 tests) fails if a setting exists without a place in the GUI, which is how it stays that way.
-
-## the modern face (2.1)
-
-2.1 is the update where modern stopped borrowing brutalist's bones. no brackets anywhere on that side: icons where an action has one, text pills where the label is the content, and the glyph editor still wins if you typed your own. three translucent surface tiers and a hairline are derived from every theme's background, so cards, pills, the search field and the player bar have something to sit on in blackwater as much as in nord, third-party themes included. the grids read the window and fill it, thumbnails follow your corner style, the player bar floats with rounded corners, headings are headings, and the home greeting is the big moment on the page. the rail marks where you are and folds to icons on `Ctrl+B`. a black-and-white cover gets a grey backdrop instead of the theme's accent. and the title has four ways to change when the track does: scramble, sweep, rise, or just change. brutalist got none of this, on purpose.
-
-## sources
-
-| source | search | library | needs |
-|---|---|---|---|
-| youtube music | yes | playlists (editable), songs, albums, artists, subscriptions, home, charts, moods, account history | cookie import |
-| spotify | yes | playlists, liked songs | login. playback is dead, see below |
-| subsonic / navidrome | yes | playlists, albums, artists, shelves | your server url + login |
-| local files | yes | albums, artists | a music directory |
-| soundcloud | yes | no | nothing |
-| bandcamp | yes | no | nothing |
-| mixcloud | yes | no | nothing |
-
-the queue does not care where a track came from. a youtube search result, a bandcamp deep cut and a local flac sit in the same queue and each one plays through the right backend. there is also a federated search mode that queries every enabled source at once and tags each result with where it came from.
-
-about spotify: the integration exists and works for search and your library, but spotify's february 2026 platform-security change broke audio decryption for librespot on every account we tested, so playback is silence. tide tells you this when you enable it. if librespot ever gets around it, playback here starts working again with no update needed.
-
-## what it does day to day
-
-plays music, obviously. queue with radio autoplay when it runs low. synced lyrics (youtube's own timings first, LRClib fallback) with a karaoke mode. a history view, sleep timer, like button, resume-on-launch, and stream prefetch so track changes are close to instant. tide is single-instance now: launch it again and the running window comes forward instead of a second one fighting it for the settings file.
-
-v1.5 filled out the youtube music side. the home tab is an actual feed: greeting with your listening stats, quick-pick grids, mosaics that reshuffle daily, ranked charts, new releases, mood chips. if you preferred the plain rows, settings → appearance → "plain shelves" brings them back. every track has a song page (click the now-playing title) with view and like counts, credits, related songs including other recordings of the same track, and the youtube comments. comments are read-only and threaded, and timestamps inside them are clickable, so "the drop at 3:31" seeks to 3:31. the library has real tabs (songs / albums / artists / following), playlists can be edited from any right-click, the queue can be saved as a playlist, and the history view shows both what tide played and what your account played everywhere else.
-
-tide can also report plays to your youtube music account, using the same play event the web player sends. that keeps your recommendations current when you listen here instead of in a browser. it's off unless you turn it on: the setup wizard asks directly, with nothing pre-checked, and explains that off means google gets nothing from tide. existing installs stay off until you flip it in settings → integrations.
-
-there is a proper mini player (v1.3): click the album art and you get a small frameless card where the window border is the progress bar, the backdrop breathes with the bass, a synced lyric ticks under the artist, and the controls fade out when you leave it alone. click the art again to come back. it can pin itself above other windows, KWin willing.
-
-and the opposite of the mini (2.0): a fullscreen mode. `F11` anywhere, or the `[⤢]` button on the strip. big album art with the title under it, and level with it a pane for synced lyrics or the queue, your backdrop behind everything. the lyrics glide as lines advance, and the queue is the real one: double-click a row to jump. controls and cursor fade out when the mouse goes idle and come back when it moves, and the screen stays awake while music plays. made for putting a song on the speakers and going to do something else. esc gets you back, `l` and `q` switch the pane, karaoke mode sits in the right-click menu (`k`) next to the backdrop picker.
-
-the fx rack (`Ctrl+8`) has a 10-band EQ, a real reverb (room, hall, plate, cathedral, and one called slowed), bass and treble shelves, loudness normalization, stereo width, a compressor, and an effects drawer: chorus, flanger, phaser, tremolo, exciter, headphone crossfeed and a lofi mode. playback speed goes 0.5× to 2× and shifts pitch by default because that is the point; there is a preserve-pitch toggle for audiobook people. in modern the speed popover is a spring slider with detents at the usual stops, brutalist keeps its [bracket] stepper, and a source that can't do variable speed says so — spotify greys the control instead of quietly ignoring you. ten visualizer renderers run off a pipewire capture, `Ctrl+6`, F11 for fullscreen.
-
-<img src="assets/screenshots/modern-speed-slider.png" alt="the modern speed popover" width="480" />
-
-adaptive accent and the living backdrop are modern's defaults and opt-in anywhere: the theme accent drifts toward the current cover's dominant color and the whole window (titlebar included) glows with it, swelling on bass. the bass pulse learns each track: the first listen is live detection, and tide records what the detector heard. from the next play on, the recording is replayed against the player clock, so the pulse lands on the beat instead of a frame after it. the live detector stays underneath — it covers whatever the recording doesn't, and takes back over if the audio stops matching what was recorded.
-
-system stuff: MPRIS2 so media keys and the KDE/GNOME panel work, tray with hide-on-close, optional discord rich presence (your server's member list shows the song, links back to it, a live-lyric mode, a tray switch to hide it), optional listenbrainz scrobbling, and a daily update check against github releases.
-
-<img src="assets/screenshots/lyrics-synced.png" alt="synced lyrics" width="780" />
-
-## install
-
-arch: `yay -S tide` and you are done, every dependency resolves from the repos except python-spotipy which comes from the AUR alongside it.
-
-building by hand does the same thing the AUR does:
+there's no package outside the AUR yet. from a checkout:
 
 ```sh
 git clone https://github.com/captiencelovesarch/tide.git
 cd tide
-makepkg -si
+PYTHONPATH=src python -m tide
 ```
 
-every other distro: flathub. the submission is in review; once it lands this is the whole install:
+needs python 3.12+, PySide6, mpv + python-mpv, ytmusicapi, yt-dlp, mutagen, cryptography, numpy and spotipy. the visualizer wants `parec` from pipewire-pulse. a flatpak manifest lives in [`flatpak/`](flatpak/) if you want to build one.
 
-```sh
-flatpak install flathub io.github.captiencelovesarch.tide
-```
+</details>
 
-the flatpak is the same tide on the kde 6.11 runtime with its own libmpv. the sandbox changes three things:
+<details>
+<summary><b>how sign-in works</b></summary>
 
-- **signing in.** the sandbox can't read your browser's profile, so the sign-in window offers "paste headers instead": sign in on music.youtube.com, copy the request headers of any request from devtools, paste. if you would rather have the normal one-click import, let tide see the browser and open the sign-in window again. firefox:
+google doesn't let outside apps log into youtube music, so tide borrows the session from your browser. it reads the cookies through yt-dlp (chromium, chrome, brave, vivaldi, edge, opera, whale, firefox) with your keyring's permission, and keeps the session fresh while it runs. if google ends it anyway, tide tells you and re-imports in one click. the cookies never leave your machine.
 
-  ```sh
-  flatpak override --user --filesystem=~/.mozilla:ro --filesystem=xdg-config/mozilla:ro io.github.captiencelovesarch.tide
-  ```
+</details>
 
-  a chromium-family browser also keeps its cookie key in your wallet, so it needs the profile (`xdg-config/google-chrome`, `chromium`, `BraveSoftware`, `vivaldi`, `microsoft-edge`, `opera` or `naver-whale`) and the wallet: `--talk-name=org.freedesktop.secrets` on gnome, `--talk-name=org.kde.kwalletd6` on kde. a browser that is itself a flatpak keeps its profile under `~/.var/app/<its id>/config`, grant that path instead.
-- **local files.** `~/Music` is visible out of the box. another folder: pick it in settings → sources, or `flatpak override --user --filesystem=/path/to/music:ro io.github.captiencelovesarch.tide`.
-- **updates** come from flathub, so the in-app release toast is off.
+<details>
+<summary><b id="spotify">spotify</b></summary>
 
-the manifest lives in [`flatpak/`](flatpak/) with notes on building it yourself.
+search and your library work. playback has been silent since spotify's february 2026 change broke librespot's audio decryption. if librespot fixes it, tide plays again without an update.
 
-running from a checkout on anything else: it is plain python + PySide6 + mpv, so `PYTHONPATH=src python -m tide` after installing the deps from the tech list below will probably run. the visualizer wants `parec` from pipewire-pulse. no promises.
+</details>
 
-signing in: google blocks OAuth for the youtube music endpoints, so cookies are the only path that works. tide reads them out of your own browser (chromium, chrome, brave, vivaldi, edge, opera, whale or firefox, flatpak and snap installs included) through yt-dlp's cookie loader, with your wallet key. after that tide keeps the session going on its own: it saves the cookies youtube sends back and refreshes the short-lived ones every ten minutes (a call to accounts.youtube.com, the same one your browser makes), so it doesn't go stale while tide is open. if google does end the session, tide notices, says so, and offers a one-click refresh that re-imports from your still-signed-in browser. sessions imported before v1.2.7 just re-import once.
+<details>
+<summary><b>keys</b></summary>
 
-## keys
+all rebindable in the keymap editor.
 
-the defaults — every one of them is rebindable in the keymap editor.
-
-| key | action |
+| key | does |
 |---|---|
-| `Ctrl+1` … `Ctrl+9` | views: home, library, queue, lyrics, history, visualizer, sources, fx, settings |
 | `Space` | play / pause |
-| `Ctrl+→` / `Ctrl+←` | next / previous |
-| `Ctrl+↑` / `Ctrl+↓` | volume |
-| `Ctrl+S` / `Ctrl+R` | shuffle / repeat |
-| `[` `]` `\` | speed down / up / reset |
+| `Ctrl+←` `Ctrl+→` | previous / next |
+| `Ctrl+↑` `Ctrl+↓` | volume |
+| `[` `]` `\` | slower / faster / reset speed |
+| `Ctrl+1` … `Ctrl+9` | home, library, queue, lyrics, history, visualizer, sources, fx, settings |
+| `Ctrl+L` | search |
 | `Ctrl+H` | like |
-| `Ctrl+I` | sleep timer |
 | `Ctrl+M` | mini player |
-| `Ctrl+B` | fold / unfold the rail |
-| `Ctrl+L` / `Ctrl+F` | search |
-| `Ctrl+Shift+R` | refresh yt session |
-| `F11` | fullscreen mode (on the visualizer view: fullscreen visualizer) |
+| `F11` | fullscreen |
 
-right-click a track row for play now / play next / add to queue / start radio.
+</details>
 
-## where things live
+<details>
+<summary><b>where your stuff lives</b></summary>
 
 | path | what |
 |---|---|
-| `~/.config/tide/settings.toml` | all settings. written by the app, not by you |
-| `~/.config/tide/browser.json` | imported cookies, 0600 |
-| `~/.config/tide/yt_cookies.txt` | the live youtube music session, 0600 |
-| `~/.config/tide/themes/`, `layouts/` | your own themes and layouts — the theme editor saves here too |
-| `~/.cache/tide/` | stream urls, art, lyrics, history, session |
+| `~/.config/tide/settings.toml` | settings. the app writes it, you don't have to |
+| `~/.config/tide/themes/` | your themes |
+| `~/.config/tide/browser.json`, `yt_cookies.txt` | the youtube session (0600) |
+| `~/.cache/tide/` | art, lyrics, beat maps, history |
 
-config and cache roots are 0700, credential files 0600, writes are atomic. subsonic stream urls are never cached because they carry auth. the longer security story is in [SECURITY.md](SECURITY.md).
+more in [SECURITY.md](SECURITY.md).
 
-## tech
-
-```
-python 3.12+       PySide6 (Qt6)      mpv + python-mpv
-ytmusicapi         yt-dlp             spotipy (+ librespot)
-mutagen            cryptography       numpy
-parec              IBM Plex + JetBrains Mono + Inter bundled
-optional: pypresence, secretstorage, kwallet, watchdog
-```
-
-full history in the [changelog](CHANGELOG.md). it is long because i keep adding things.
-
-## license
-
-[GPL-3.0-or-later](LICENSE). not affiliated with youtube, google, spotify or anyone else. cookies and tokens stay on your machine.
+</details>
 
 ---
 
-made with care, claude, and a lot of "lol let's just add that too"
+[changelog](CHANGELOG.md) · [contributing](CONTRIBUTING.md) · [GPL-3.0-or-later](LICENSE) · not affiliated with youtube, google or spotify
+
+<sub>made with care, claude, and a lot of "lol let's just add that too"</sub>

@@ -1,32 +1,39 @@
-# Security policy
+# security
 
-## Supported versions
+## reporting
 
-tide is small and moves fast. Only the latest released minor version receives security fixes, older versions get whatever lands in the next release.
+found something? please don't open a public issue. use github's [private advisory form](https://github.com/captiencelovesarch/tide/security/advisories/new) and i'll get back to you within a few days.
 
-| version | supported |
-|---------|-----------|
-| 2.2.x   | ✅        |
-| 2.0.x   | ❌        |
-| < 1.5   | ❌        |
+fixes go into the latest release only.
 
-## Reporting a vulnerability
+| version | fixes |
+|---|---|
+| 2.3.x | yes |
+| older | no, update |
 
-**Do not open a public issue for a security report.** Instead, report it privately via GitHub's [security advisory form](https://github.com/captiencelovesarch/tide/security/advisories/new). I'll respond within a few days.
+i aim for 90 days from report to disclosure, sooner if the fix is out sooner. happy to coordinate with packagers.
 
-Things worth reporting:
+## worth reporting
 
-- arbitrary code execution from a malicious stream / metadata field / theme file
-- credential leakage (YouTube Music cookie jar, Spotify OAuth tokens, Subsonic/Navidrome passwords, ListenBrainz token, Discord ID)
-- anything that lets a remote party read or modify your local audio cache, history, or session
-- supply-chain issues in tide's bundled fonts / icons / themes
+- code execution from a stream, track metadata, lyrics, or a theme file
+- anything that leaks your youtube session, spotify token, subsonic password or listenbrainz token
+- a remote party reading or changing your cache, history or session
+- a problem in the fonts, icons or themes tide ships
 
-Things that are **not** vulnerabilities:
+## not a vulnerability
 
-- a crash from a malformed manual edit to `~/.config/tide/settings.toml`
-- inability to play a track that requires DRM tide doesn't support (Apple Music — the lack itself isn't a CVE)
-- "tide reads my browser's cookie database" — that's the YouTube Music sign-in working as designed: the wizard imports cookies from your own browser session, with your keyring's consent, because Google blocks credential entry in embedded webviews (tide ships no webview at all)
+- tide crashing after you hand-edit `settings.toml` into something broken
+- **tide reading your browser's cookies.** that's how youtube music sign-in works. google blocks outside logins, so tide imports the session from your own browser, and only after your keyring says yes. tide has no embedded browser.
 
-## Disclosure timeline
+## what tide keeps, and where
 
-I'll aim for the standard 90-day disclosure window. If a fix lands sooner the advisory ships sooner. Coordinated disclosure with downstream packagers (AUR) is welcome.
+| path | what | mode |
+|---|---|---|
+| `~/.config/tide/` | settings, themes | 0700 |
+| `~/.config/tide/browser.json` | imported cookies | 0600 |
+| `~/.config/tide/yt_cookies.txt` | the live youtube session | 0600 |
+| `~/.cache/tide/` | stream urls, art, lyrics, beat maps, history | 0700 |
+
+writes are atomic, so a crash can't leave half a file. subsonic stream urls are never cached because they carry your login.
+
+over the network, tide talks to the sources you set up, the lyrics services (switchable in settings → playback → lyrics), and github once a day to check for updates. play reporting to youtube is off unless you enable it.
