@@ -35,6 +35,10 @@ sys.path.insert(0, str(HERE))
 
 from gestures import DETECTORS, SIDES, Hand, Sample, TripleClick, replay  # noqa: E402
 
+# legacy controller-state bits that could be a stick click on index
+# (k_EButton_Axis0..Axis4); the panel logs raw bits so the real one shows
+LEGACY_STICK_BITS = sum(1 << b for b in range(32, 37))
+
 # a native crash (vrclient, qt teardown) prints the python stack too
 faulthandler.enable()
 
@@ -188,7 +192,12 @@ class PanelLoop:
         self.tick_ms, self.upload_ms = Stats(), Stats()
         self.triple = TripleClick()
         self.visible = True
+        self.legacy: dict[str, int | None] = {side: None for side in SIDES}
+        self.stick_sources_seen = {"action": False, "legacy": False}
+        self._said_active = False
+        self._started = time.perf_counter()
         self.sticks = {side: False for side in SIDES}
+        self.action_sticks = {side: False for side in SIDES}
         self.focus_seen: list[str] = []
         self.on_tick = None
         self._last_tick = self._last_upload = self._last_status = time.perf_counter()
@@ -269,11 +278,28 @@ class PanelLoop:
                 self._log("scroll")
             self.dirty = True
 
-        sticks = {side: self.s.stick(side) for side in SIDES}
+        if not self._said_active and now - self._started >= 2.0:
+            self._said_active = True
+            active = {side: self.s.stick_active(side) for side in SIDES}
+            self._log("stick actions: " + ", ".join(
+                f"{side[0]} {'active' if a else 'inactive' if a is False else 'n/a'}"
+                for side, a in active.items()))
+        action = {side: self.s.stick(side) for side in SIDES}
+        sticks = dict(action)
         for side in SIDES:
-            if sticks[side] != self.sticks[side]:
-                self._log(f"stick {side[0]} {'down' if sticks[side] else 'up'}")
+            if action[side] != self.action_sticks[side]:
+                self._log(f"stick {side[0]} {'down' if action[side] else 'up'} (action)")
+                self.stick_sources_seen["action"] = True
+            bits = self.s.legacy_buttons(side)
+            if bits is not None and self.legacy[side] is not None and bits != self.legacy[side]:
+                self._log(f"legacy {side[0]} buttons {bits:#x}")
+                self.stick_sources_seen["legacy"] = True
+            self.legacy[side] = bits
+            # whichever source works counts for the triple-click; the log
+            # says which one it was
+            sticks[side] = sticks[side] or bool((bits or 0) & LEGACY_STICK_BITS)
         self.sticks = sticks
+        self.action_sticks = action
         if self.triple.feed(Sample(now, None, {}, sticks)):
             self.toggle()
 
@@ -337,6 +363,8 @@ class PanelLoop:
             "gl": self.s.gl.info if self.s.gl is not None else None,
             "input": "ok" if self.s.input is not None else f"failed: {self.s.input_error}",
             "focus_apps_seen": self.focus_seen,
+            "stick_sources_seen": self.stick_sources_seen,
+            "global_input": self.s.global_input,
             "attach": self.attach,
             "y_flipped": self.flip,
         }
@@ -384,7 +412,7 @@ def cmd_panel(args) -> None:
     from paths import out_dir
     from vrcore import Session
     _hidden(panel)
-    s = Session()
+    s = Session(global_input=args.global_input)
     if args.upload in ("raw", "file"):
         print(f"warning: {args.upload} uploads crashed vrcompositor before. re-test only")
     loop = PanelLoop(s, panel, key="panel", attach=args.attach, invert_clicks=args.invert_clicks,
@@ -581,7 +609,7 @@ def cmd_ring(args) -> None:
 
 def cmd_record(args) -> None:
     from vrcore import Session, out_dir
-    s = Session()
+    s = Session(global_input=args.global_input)
     if s.input is None:
         print(f"warning: input failed ({s.input_error}). no finger curl or stick clicks")
     hz = args.hz or s.display_hz()
@@ -621,7 +649,9 @@ def cmd_record(args) -> None:
                         tips=s.bone_tips(side),
                         apose=s.action_pose(side),
                     )
-                sample = Sample(now, s.hmd(), hands, {side: s.stick(side) for side in SIDES})
+                sticks = {side: s.stick(side) or bool((s.legacy_buttons(side) or 0) & LEGACY_STICK_BITS)
+                          for side in SIDES}
+                sample = Sample(now, s.hmd(), hands, sticks)
                 f.write(json.dumps(sample.to_json()) + "\n")
                 count += 1
                 if now - last_focus >= 5.0:
@@ -817,6 +847,12 @@ def cmd_score(args) -> None:
 
 # ---------- main ----------
 
+def _global_input_flag(p) -> None:
+    p.add_argument("--global-input", action="store_true",
+                   help="read buttons while a game has focus. needs steamvr settings → "
+                        "developer → experimental overlay input overrides")
+
+
 def _upload_flags(p) -> None:
     p.add_argument("--upload", choices=("gl", "file", "raw"), default="gl",
                    help="how frames reach steamvr: gl (default, an opengl texture), "
@@ -844,6 +880,7 @@ def main() -> None:
     p.add_argument("--attach", choices=SIDES, help="ride on a controller instead of floating")
     p.add_argument("--invert-clicks", action="store_true",
                    help="use if clicks land mirrored top to bottom")
+    _global_input_flag(p)
     p.add_argument("--preview", action="store_true", help="desktop window, no vr")
     p.add_argument("--snapshot", metavar="PNG", help="render the panel to a file, no vr")
     _upload_flags(p)
@@ -868,6 +905,7 @@ def main() -> None:
     p.add_argument("--seconds", type=float, default=60)
     p.add_argument("--delay", type=int, default=10, help="countdown before recording")
     p.add_argument("--hz", type=float, help="default: the headset's refresh rate")
+    _global_input_flag(p)
     p.set_defaults(func=cmd_record)
 
     p = sub.add_parser("replay", help="run the detectors over recordings")

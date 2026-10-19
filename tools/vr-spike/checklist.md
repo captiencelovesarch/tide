@@ -64,8 +64,16 @@ steamvr's compositor in testing; `raw` and `file` both did).
 - [ ] the bottom line shows `tick p95` and `upload` times
 - [ ] click both sticks together three times, fast: two short buzzes and
       the panel closes. do it again: one long buzz and it opens in front of
-      you. the terminal prints every `stick l down` / `stick r down`, so if
-      it doesn't fire, note whether those lines show up
+      you.
+- [ ] if it doesn't fire, look at the terminal:
+      - two seconds in it says `stick actions: l active, r active` or
+        `inactive`. note which
+      - every stick press should print `stick l down (action)` or
+        `legacy l buttons 0x...`. note which kind shows up, or none
+- [ ] if no presses show up at all: steamvr settings → developer → turn on
+      "experimental overlay input overrides" (exact wording may differ),
+      then `./run.sh panel --global-input` and try again. note whether the
+      sticks still do their normal thing in a game while it runs
 - [ ] when you close it the terminal ends with `teardown: qt events
       drained` and no segfault. if it crashes, copy the last lines
 

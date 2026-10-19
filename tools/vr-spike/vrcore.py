@@ -89,7 +89,8 @@ def spawn_in_front(hmd: np.ndarray, distance: float = 0.55, drop_deg: float = 15
 class Session:
     """openvr as an overlay app, plus our action set."""
 
-    def __init__(self, *, with_input: bool = True) -> None:
+    def __init__(self, *, with_input: bool = True, global_input: bool = False) -> None:
+        self.global_input = global_input
         if not openvr.isRuntimeInstalled():
             raise SystemExit("steamvr isn't installed")
         try:
@@ -124,6 +125,12 @@ class Session:
         self.sources = {side: inp.getInputSourceHandle(f"/user/hand/{side}") for side in SIDES}
         self.sets = (openvr.VRActiveActionSet_t * 1)()
         self.sets[0].ulActionSet = inp.getActionSetHandle("/actions/tide")
+        if self.global_input:
+            # overlay apps get no button input while a game (or nothing) has
+            # focus. a global-priority set can read buttons anyway, but only
+            # with steamvr settings → developer → "experimental overlay input
+            # overrides" on, and it overrides the game for those buttons
+            self.sets[0].nPriority = openvr.k_nActionSetOverlayGlobalPriorityMin
         self.bones = (openvr.VRBoneTransform_t * BONE_COUNT)()
         self.input = inp
 
@@ -180,11 +187,33 @@ class Session:
             self.input_errors[f"stick {side}"] = type(exc).__name__
             return False
         if not d.bActive:
-            # inactive = no binding drives it (yet)
-            self.input_errors[f"stick {side}"] = "not active (no binding loaded)"
+            # inactive = no binding drives it (yet), or no input focus
+            self.input_errors[f"stick {side}"] = "not active (no binding, or no input focus)"
         else:
             self.input_errors.pop(f"stick {side}", None)
         return bool(d.bActive and d.bState)
+
+    def stick_active(self, side: str) -> bool | None:
+        if self.input is None:
+            return None
+        try:
+            return bool(self.input.getDigitalActionData(
+                self.actions[f"stick_{side}"], NO_DEVICE).bActive)
+        except openvr.OpenVRError:
+            return None
+
+    def legacy_buttons(self, side: str) -> int | None:
+        """pressed-button bits from the old controller-state api. steamvr
+        enabled "legacy input" for us; this checks whether it hands over
+        presses the action system holds back."""
+        idx = self.controller_index(side)
+        if idx is None:
+            return None
+        try:
+            ok, state = self.system.getControllerState(idx)
+        except openvr.OpenVRError:
+            return None
+        return int(state.ulButtonPressed) if ok else None
 
     def curls(self, side: str) -> list[float] | None:
         """thumb, index, middle, ring, pinky. 0 = straight, 1 = fist."""

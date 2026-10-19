@@ -636,6 +636,16 @@ running log from `tools/vr-spike`. each one changes the plan above.
   flipped bounds already turn it top-down; flipping it again sent clicks to
   the mirror spot. the slider only worked because it sits at mid height.
   rule for the plugin: **flip the texture or the laser y, never both.**
+- **2026-10-19 · stick triple-click never fires (open):** click, hold and
+  drag work (they come through the overlay system), but no stick press
+  reaches us. steamvr only gives button input to the app with input focus,
+  which an overlay never has. finger curl and poses arrive anyway, so
+  **body gestures don't have this problem**. what's left to try: the old
+  controller-state api (steamvr enabled "legacy input" for us), and a
+  global-priority action set, which needs steamvr's "experimental overlay
+  input overrides" developer setting and takes those buttons away from the
+  game. if neither works without the developer setting, the stick backup
+  is out and the gestures carry summoning alone.
 - **2026-10-19 · laser input confirmed:** with only the texture flipped,
   click, hold and drag all work on the gl panel. the laser path (overlay
   mouse events → synthesized qt mouse events) is proven.
