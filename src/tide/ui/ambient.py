@@ -75,6 +75,10 @@ class AmbientController(QObject):
         # views that read the beat clock without driving the backdrop
         # (the visualizer's deck). they keep the clock and the map alive.
         self._watchers: set[str] = set()
+        # listeners that always get the pulse, whatever the backdrop
+        # setting says (plugins: the vr ring). the backdrop targets stay
+        # gated by adaptive_pulse.
+        self._listeners: list = []
         self._holding = False
         self._key: str | None = None
         self._generation = 0
@@ -164,6 +168,22 @@ class AmbientController(QObject):
             self._set_pulse(0.0, [central_bg])
             self._reconcile()
 
+    def add_listener(self, obj) -> None:
+        """``obj.set_pulse(level)`` gets every pulse frame while music
+        plays, even with the backdrop pulse off."""
+        if obj is not None and obj not in self._listeners:
+            self._listeners.append(obj)
+            self._reconcile()
+
+    def remove_listener(self, obj) -> None:
+        if obj in self._listeners:
+            self._listeners.remove(obj)
+            try:
+                obj.set_pulse(0.0)
+            except RuntimeError:
+                pass
+            self._reconcile()
+
     def is_enabled(self) -> bool:
         return self._enabled
 
@@ -187,14 +207,19 @@ class AmbientController(QObject):
             self._checkpoint()
         self._reconcile()
 
-    def _wants_pulse(self) -> bool:
+    def _backdrop_pulses(self) -> bool:
         return bool(self._targets) and (self._enabled or self._mini_active)
+
+    def _wants_pulse(self) -> bool:
+        return self._backdrop_pulses() or bool(self._listeners)
 
     def _wants_clock(self) -> bool:
         return self._wants_pulse() or bool(self._watchers)
 
     def _set_pulse(self, level: float, targets=None) -> None:
-        for target in (self._targets if targets is None else targets):
+        if targets is None:
+            targets = (self._targets if self._backdrop_pulses() else []) + self._listeners
+        for target in targets:
             try:
                 target.set_pulse(level)
             except RuntimeError:

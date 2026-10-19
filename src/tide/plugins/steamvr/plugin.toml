@@ -1,13 +1,13 @@
 [plugin]
 slug        = "steamvr"
 name        = "steamvr"
-description = "a watch on your wrist opens tide in vr. look away and it goes."
-version     = "0.1.0"
+description = "check the watch on your wrist and tide opens in vr. look away and it goes."
+version     = "0.2.0"
 api         = 1
 entry       = "plugin:SteamVr"
 # pyopenvr. on arch: the python-openvr package
 requires    = ["openvr"]
-uses        = ["playback", "vr", "ui"]
+uses        = ["playback", "queue", "lyrics", "vr", "ui"]
 default     = false
 
 [[setting]]
@@ -16,7 +16,14 @@ label   = "watch on"
 kind    = "choice"
 choices = [["left", "left wrist"], ["right", "right wrist"]]
 default = "left"
-tooltip = "raise that wrist and look at it. poke the watch with your other hand or point at it."
+tooltip = "turn that wrist toward your face to see the watch. poke it with your other index finger."
+
+[[setting]]
+key     = "open_by_looking"
+label   = "open by looking"
+kind    = "bool"
+default = true
+tooltip = "keep looking at the watch for a second and the panel opens. it swells as you look."
 
 [[setting]]
 key     = "size"
@@ -31,6 +38,28 @@ label   = "goes away after"
 kind    = "choice"
 choices = [[1.5, "1.5 s of looking away"], [2.5, "2.5 s of looking away"], [4.0, "4 s of looking away"], [6.0, "6 s of looking away"]]
 default = 2.5
+
+[[setting]]
+key     = "ring"
+label   = "ring"
+kind    = "choice"
+choices = [["off", "off"], ["kick", "on the kick"], ["breathing", "breathing"]]
+default = "off"
+tooltip = "a glow on the edge of your view that pulses with the music. never more than three flashes a second. needs motion on."
+
+[[setting]]
+key     = "ring_strength"
+label   = "ring strength"
+kind    = "choice"
+choices = [["subtle", "subtle"], ["normal", "normal"], ["loud", "loud"]]
+default = "normal"
+
+[[setting]]
+key     = "lyrics"
+label   = "lyrics"
+kind    = "bool"
+default = true
+tooltip = "the line before, the one being sung and the next one, under the title."
 
 [[setting]]
 key     = "haptics"

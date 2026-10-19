@@ -592,12 +592,18 @@ replaces phases 4 and 5 in `plugins.md`.
 
 `src/tide/plugins/steamvr/`, bundled, off by default, needs pyopenvr.
 
-- **opening:** the wrist watch from the spike (`run.sh watch`), poke or
-  laser. the headphones gesture, the glance card and the dashboard tab
-  come later.
-- **the panel:** cover, title, artist · album, seek, prev / play / next /
-  like, an x. themed from the current theme (both personalities), laser
-  input.
+- **opening:** the wrist watch: turn your wrist toward your face (not
+  while aiming), then poke it or keep looking for a second (it swells as
+  it fills). the headphones gesture, the glance card and the dashboard
+  tab come later.
+- **the panel (round 2, from the user's drawing):** cover, title, artist ·
+  album, next up, three lyric lines, seek with both times, volume,
+  shuffle / prev / play / next / repeat / like / ring, an x, and a tab bar
+  (now playing, search, library, settings). search and library are next.
+  the settings tab is built from plugin.toml as big segmented buttons.
+- **the ring:** built per connection from steamvr's lens outlines, pulsed
+  by tide's beat pulse (`ctx.beats`), tinted with the theme accent, at
+  most 3 flashes a second. not yet seen in a headset.
 - **going away:** the x, or the attention fade (look away for `linger`
   seconds, look back to keep it). motion off: no grow, no fade.
 - **threads:** every openvr call on the vr thread (`vr.py`); the gui
@@ -682,6 +688,15 @@ running log from `tools/vr-spike`. each one changes the plan above.
   overlay mouse layer, not our actions. free scrolling for the up next
   list and lyrics; nothing for summoning, since it only works while
   you're already pointing at the panel.
+- **2026-10-19 · the watch froze h3vr:** aiming puts your hand in front
+  of your face, which met "wrist close and in view", so the watch came up
+  mid-aim. it was an interactive overlay, and steamvr takes the
+  controllers from the game while the laser is on one. also, while an
+  interactive overlay is up our hand-skeleton reads stop, which is why
+  the watch run only ever opened by laser (closest fingertip 7 cm, from
+  the controller fallback). fix: the watch is never interactive (poke and
+  look-to-open only), and it needs the controller pointed well off your
+  gaze (aiming points along it).
 - **2026-10-19 · laser input confirmed:** with only the texture flipped,
   click, hold and drag all work on the gl panel. the laser path (overlay
   mouse events → synthesized qt mouse events) is proven.

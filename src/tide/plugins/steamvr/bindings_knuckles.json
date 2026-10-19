@@ -1,7 +1,7 @@
 {
   "controller_type": "knuckles",
   "name": "tide",
-  "description": "hand skeletons, raw hand poses and haptics for tide's vr panel",
+  "description": "hand skeletons and haptics for tide's vr panel",
   "bindings": {
     "/actions/tide": {
       "skeleton": [
@@ -12,16 +12,6 @@
         {
           "output": "/actions/tide/in/hand_right",
           "path": "/user/hand/right/input/skeleton/right"
-        }
-      ],
-      "poses": [
-        {
-          "output": "/actions/tide/in/pose_left",
-          "path": "/user/hand/left/pose/raw"
-        },
-        {
-          "output": "/actions/tide/in/pose_right",
-          "path": "/user/hand/right/pose/raw"
         }
       ],
       "haptics": [

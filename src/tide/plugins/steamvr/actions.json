@@ -23,14 +23,6 @@
       "skeleton": "/skeleton/hand/right"
     },
     {
-      "name": "/actions/tide/in/pose_left",
-      "type": "pose"
-    },
-    {
-      "name": "/actions/tide/in/pose_right",
-      "type": "pose"
-    },
-    {
       "name": "/actions/tide/out/haptic",
       "type": "vibration"
     }
@@ -41,8 +33,6 @@
       "/actions/tide": "tide",
       "/actions/tide/in/hand_left": "left hand",
       "/actions/tide/in/hand_right": "right hand",
-      "/actions/tide/in/pose_left": "left hand pose",
-      "/actions/tide/in/pose_right": "right hand pose",
       "/actions/tide/out/haptic": "haptics"
     }
   ]

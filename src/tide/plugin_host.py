@@ -343,6 +343,10 @@ class _Relay(QObject):
     ended = Signal()
     liked_changed = Signal(bool)
     queue_changed = Signal()
+    modes_changed = Signal()             # shuffle or repeat changed
+    lyrics_changed = Signal(object)      # (times, lines) or None
+    pulse = Signal(float)                # the bass envelope, 0..1, ~60 a second
+    lyric_line_changed = Signal(object)  # str or None
     theme_changed = Signal()
     settings_changed = Signal(object)    # set of keys
     job_done = Signal(int, object, object)
@@ -454,6 +458,115 @@ class _Queue:
         if tr is not None:
             self._h.call_window("_play_track", tr)
 
+    @property
+    def modes_changed(self):
+        return self._r.modes_changed
+
+    def up_next(self) -> TrackInfo | None:
+        q = self._h.queue
+        return track_info(q.peek_next()) if q is not None and hasattr(q, "peek_next") else None
+
+    def shuffle(self) -> bool:
+        return bool(getattr(self._h.queue, "shuffle_enabled", False))
+
+    def set_shuffle(self, on: bool) -> None:
+        # through the window, like the bar's button (it also says so in
+        # the status bar)
+        if self.shuffle() != bool(on):
+            self._h.call_window("_on_shuffle_clicked")
+
+    def repeat(self) -> str:
+        """off / all / one"""
+        mode = getattr(self._h.queue, "repeat_mode", None)
+        return str(getattr(mode, "value", mode) or "off")
+
+    def cycle_repeat(self) -> None:
+        """off → all → one → off, like the bar's button."""
+        self._h.call_window("_on_repeat_clicked")
+
+
+class _Lyrics:
+    """the current song's timed lyrics. nothing is fetched until a plugin
+    subscribes; the host shares one tracker between all subscribers."""
+
+    def __init__(self, ctx: "PluginContext") -> None:
+        self._ctx = ctx
+        self._on = False
+
+    @property
+    def changed(self):
+        """the whole timed sheet, (times, lines), or None."""
+        return self._ctx._relay.lyrics_changed
+
+    @property
+    def line_changed(self):
+        return self._ctx._relay.lyric_line_changed
+
+    def subscribe(self) -> None:
+        if not self._on:
+            self._on = True
+            self._ctx._host._lyrics_subscribe(self._ctx.slug)
+
+    def unsubscribe(self) -> None:
+        if self._on:
+            self._on = False
+            self._ctx._host._lyrics_unsubscribe(self._ctx.slug)
+
+    def sheet(self):
+        return self._ctx._host._lyric_sheet
+
+    def lines_around(self, position: float) -> tuple[str | None, str | None, str | None]:
+        """(the line before, the line being sung, the next line) at
+        ``position`` seconds. all None when there are no timed lyrics."""
+        sheet = self.sheet()
+        if not sheet:
+            return None, None, None
+        times, lines = sheet
+        from bisect import bisect_right
+        from . import lyric_timing
+        i = bisect_right(times, float(position) + lyric_timing.offset_s()) - 1
+
+        def at(k):
+            if 0 <= k < len(lines):
+                return lines[k].strip() or None
+            return None
+        return at(i - 1), at(i), at(i + 1)
+
+
+class _Beats:
+    """tide's bass pulse, the one the backdrop breathes with: beat maps
+    plus the live capture. flows while music plays and a plugin
+    subscribes, whether or not the backdrop pulse is on."""
+
+    def __init__(self, ctx: "PluginContext") -> None:
+        self._ctx = ctx
+        self._on = False
+
+    @property
+    def pulse(self):
+        return self._ctx._relay.pulse
+
+    def subscribe(self) -> None:
+        if not self._on:
+            self._on = True
+            self._ctx._host._pulse_subscribe(self._ctx.slug)
+
+    def unsubscribe(self) -> None:
+        if self._on:
+            self._on = False
+            self._ctx._host._pulse_unsubscribe(self._ctx.slug)
+
+
+class _PulseSink(QObject):
+    """what the ambient controller pushes to; fans out to the plugins."""
+
+    def __init__(self, host: "PluginHost") -> None:
+        super().__init__(host)
+        self._host = host
+
+    def set_pulse(self, level: float) -> None:
+        self._host._emit("pulse", float(level))
+
 
 class _Track:
     def __init__(self, ctx: "PluginContext") -> None:
@@ -512,6 +625,27 @@ class _Theme:
         """text in the theme's letter case, like tide's own labels."""
         from . import theming
         return theming.styled_case(text)
+
+    def icon(self, key: str, px: int, color: str = ""):
+        """one of tide's icons from the user's icon set, as a ``px``-square
+        QPixmap in ``color`` (default: the theme's fg). None for a key the
+        set doesn't have."""
+        from PySide6.QtCore import QByteArray, Qt
+        from PySide6.QtGui import QPainter, QPixmap
+        from PySide6.QtSvg import QSvgRenderer
+        from .ui import icon_sets
+        svg = icon_sets.svg_for(key)
+        if not svg:
+            return None
+        ink = color or self.token("fg", "#e6e6e6")
+        renderer = QSvgRenderer(QByteArray(svg.replace("currentColor", ink).encode("utf-8")))
+        pix = QPixmap(px, px)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        renderer.render(p)
+        p.end()
+        return pix
 
     def glyph(self, key: str) -> str:
         """one of tide's control glyphs (play, pause, prev, next, like_on,
@@ -656,6 +790,8 @@ class PluginContext:
         self.playback = _Playback(host, self._relay)
         self.queue = _Queue(host, self._relay)
         self.track = _Track(self)
+        self.lyrics = _Lyrics(self)
+        self.beats = _Beats(self)
         self.theme = _Theme(self._relay)
         self.motion = _Motion()
         self.jobs = _Jobs(self)
@@ -703,6 +839,8 @@ class PluginContext:
             except Exception:  # noqa: BLE001 - teardown keeps going
                 log.exception("%s: on_stop callback failed", self.slug)
         self._on_stop.clear()
+        self.lyrics.unsubscribe()
+        self.beats.unsubscribe()
         self.jobs._dispose()
         import shiboken6
         for obj in reversed(self._adopted):
@@ -773,6 +911,11 @@ class PluginHost(QObject):
         self.settings_dir = settings_dir or config.PLUGIN_SETTINGS_DIR
         self.stamp = stamp or config.PLUGIN_START_STAMP
         self.position = 0.0
+        self._lyric_tracker = None
+        self._lyric_subs: set[str] = set()
+        self._lyric_sheet = None
+        self._pulse_subs: set[str] = set()
+        self._pulse_sink: _PulseSink | None = None
         self._roots = roots
         self._hooks_installed = False
         self._prev_excepthook = None
@@ -831,6 +974,8 @@ class PluginHost(QObject):
             p.ended.connect(lambda: self._emit("ended"))
         if q is not None:
             q.current_changed.connect(lambda tr: self._emit("track_changed", track_info(tr)))
+            if hasattr(q, "modes_changed"):
+                q.modes_changed.connect(lambda: self._emit("modes_changed"))
             for sig in ("rowsInserted", "rowsRemoved", "rowsMoved", "modelReset"):
                 if hasattr(q, sig):
                     getattr(q, sig).connect(lambda *_: self._emit("queue_changed"))
@@ -849,6 +994,47 @@ class PluginHost(QObject):
         if rec is not None and rec.detail != text:
             rec.detail = text
             self.changed.emit(slug)
+
+    # ---- lyrics, shared ----
+
+    def _lyrics_subscribe(self, slug: str) -> None:
+        self._lyric_subs.add(slug)
+        if self._lyric_tracker is None and self.player is not None and self.queue is not None:
+            from .lyric_tracker import LyricTracker
+            t = LyricTracker(getattr(self.window, "api", None), self.player, self.queue, self)
+            t.start_wire()
+            t.timeline_changed.connect(self._on_lyric_sheet)
+            t.lyric_changed.connect(lambda line: self._emit("lyric_line_changed", line))
+            self._lyric_tracker = t
+        if self._lyric_tracker is not None:
+            self._lyric_tracker.set_enabled(True)
+
+    def _lyrics_unsubscribe(self, slug: str) -> None:
+        self._lyric_subs.discard(slug)
+        if not self._lyric_subs and self._lyric_tracker is not None:
+            self._lyric_tracker.set_enabled(False)
+
+    def _ambient(self):
+        return getattr(self.window, "_ambient", None)
+
+    def _pulse_subscribe(self, slug: str) -> None:
+        first = not self._pulse_subs
+        self._pulse_subs.add(slug)
+        amb = self._ambient()
+        if first and amb is not None:
+            if self._pulse_sink is None:
+                self._pulse_sink = _PulseSink(self)
+            amb.add_listener(self._pulse_sink)
+
+    def _pulse_unsubscribe(self, slug: str) -> None:
+        self._pulse_subs.discard(slug)
+        amb = self._ambient()
+        if not self._pulse_subs and amb is not None and self._pulse_sink is not None:
+            amb.remove_listener(self._pulse_sink)
+
+    def _on_lyric_sheet(self, sheet) -> None:
+        self._lyric_sheet = sheet
+        self._emit("lyrics_changed", sheet)
 
     def notify_liked(self, liked: bool) -> None:
         """the window calls this when the like state of the current song

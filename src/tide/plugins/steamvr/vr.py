@@ -10,6 +10,10 @@ thread. Learned in the spike (tools/vr-spike, design/steamvr.md):
   both.
 * overlays get no button input while a game has focus. tracking and laser
   clicks on our own overlays do arrive, so that's all this uses.
+* an interactive overlay (one the laser can click) takes the controllers
+  from the game while you point at it, and while one is up our hand
+  skeleton reads stop. so only the open panel is interactive; the watch
+  and the ring never are (h3vr froze when the watch came up mid-aim).
 
 The gui thread renders the qt panel and posts frames in; this thread
 posts what happened back out through VrBridge's signals.
@@ -26,6 +30,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QThread, Signal
 
 from . import geometry as geo
+from . import ring as ringmod
 
 log = logging.getLogger("tide.plugin.steamvr")
 
@@ -33,10 +38,13 @@ HERE = Path(__file__).resolve().parent
 RETRY_S = 10.0
 STALL_S = 0.5
 GROW_S = 0.25
-PANEL_PX = (900, 420)
+PANEL_PX = (1000, 640)
+PANEL_WIDTH_M = {"small": 0.34, "medium": 0.42, "large": 0.50}
 WATCH_PX = 256
 WATCH_WIDTH_M = 0.045
+WATCH_SWELL = 0.35         # how much bigger the watch grows as look-to-open fills
 SIDES = ("left", "right")
+INDEX_TIP_BONE = 10
 
 
 def to_np(m34) -> np.ndarray:
@@ -63,6 +71,7 @@ class VrBridge(QObject):
     panel_opened = Signal(str)                # how
     panel_closed = Signal(str)                # why
     watch_visible = Signal(bool)
+    lens = Signal(object)                     # each eye's outline, for the ring
 
 
 class _Gl:
@@ -108,18 +117,20 @@ class _Gl:
 
 
 class _Overlay:
-    def __init__(self, ov, gl: _Gl, key: str, name: str, width_m: float, px: tuple[int, int]) -> None:
+    def __init__(self, ov, gl: _Gl, key: str, name: str, width_m: float,
+                 px: tuple[int, int], *, interactive: bool = False) -> None:
         import openvr
         self.ov, self.gl = ov, gl
         self.h = ov.createOverlay(key, name)
         ov.setOverlayWidthInMeters(self.h, width_m)
-        ov.setOverlayInputMethod(self.h, openvr.VROverlayInputMethod_Mouse)
-        scale = openvr.HmdVector2_t()
-        scale.v[0], scale.v[1] = float(px[0]), float(px[1])
-        ov.setOverlayMouseScale(self.h, scale)
-        # steamvr draws its laser at our overlays outside the dashboard
-        ov.setOverlayFlag(self.h, openvr.VROverlayFlags_MakeOverlaysInteractiveIfVisible, True)
-        ov.setOverlayFlag(self.h, openvr.VROverlayFlags_SendVRSmoothScrollEvents, True)
+        if interactive:
+            ov.setOverlayInputMethod(self.h, openvr.VROverlayInputMethod_Mouse)
+            scale = openvr.HmdVector2_t()
+            scale.v[0], scale.v[1] = float(px[0]), float(px[1])
+            ov.setOverlayMouseScale(self.h, scale)
+            # steamvr draws its laser at it outside the dashboard
+            ov.setOverlayFlag(self.h, openvr.VROverlayFlags_MakeOverlaysInteractiveIfVisible, True)
+            ov.setOverlayFlag(self.h, openvr.VROverlayFlags_SendVRSmoothScrollEvents, True)
         bounds = openvr.VRTextureBounds_t()
         bounds.uMin, bounds.uMax, bounds.vMin, bounds.vMax = 0.0, 1.0, 1.0, 0.0
         ov.setOverlayTextureBounds(self.h, bounds)
@@ -142,6 +153,15 @@ class _Overlay:
     def place(self, pose: np.ndarray) -> None:
         import openvr
         self.ov.setOverlayTransformAbsolute(self.h, openvr.TrackingUniverseStanding, to_m34(pose))
+
+    def place_on(self, device: int, offset: np.ndarray) -> None:
+        self.ov.setOverlayTransformTrackedDeviceRelative(self.h, device, to_m34(offset))
+
+    def width(self, metres: float) -> None:
+        self.ov.setOverlayWidthInMeters(self.h, float(metres))
+
+    def alpha(self, a: float) -> None:
+        self.ov.setOverlayAlpha(self.h, float(a))
 
     def show(self, on: bool) -> None:
         if on == self.visible:
@@ -171,8 +191,9 @@ class _Lost(Exception):
 
 
 class VrThread(QThread):
-    """connects to steamvr when it's running, runs the watch and the panel,
-    reconnects after steamvr restarts. ``post`` is the only way in."""
+    """connects to steamvr when it's running, runs the watch, the panel and
+    the ring, reconnects after steamvr restarts. ``post`` is the only way
+    in."""
 
     def __init__(self, bridge: VrBridge, surface, settings: dict) -> None:
         super().__init__()
@@ -183,6 +204,10 @@ class VrThread(QThread):
         self._stop = False
         self.panel_open = False
         self.input = None
+        self.pulse = 0.0
+        self.playing = False
+        self.ring_color = (1.0, 0.83, 0.0)
+        self.rings: list[_Overlay] = []
         # one gl context for the thread's life: dropping it here would
         # destroy a qt object off the gui thread (the deadlock qthreads.py
         # describes). it goes with this QThread object, after run() ends.
@@ -249,39 +274,41 @@ class VrThread(QThread):
         except openvr.OpenVRError as exc:
             raise _Lost(f"couldn't connect: {exc}") from None
         overlays: list[_Overlay] = []
-        gl = None
         try:
             if self._gl is None:
                 self._gl = _Gl(self.surface)
-            gl = self._gl
-            ov = openvr.VROverlay()
-            self.panel = _Overlay(ov, gl, "tide.vr.panel", "tide", self._panel_width(), PANEL_PX)
-            self.watch = _Overlay(ov, gl, "tide.vr.watch", "tide watch", WATCH_WIDTH_M,
+            self.ov = openvr.VROverlay()
+            self.panel = _Overlay(self.ov, self._gl, "tide.vr.panel", "tide", self._panel_width(),
+                                  PANEL_PX, interactive=True)
+            self.watch = _Overlay(self.ov, self._gl, "tide.vr.watch", "tide watch", WATCH_WIDTH_M,
                                   (WATCH_PX, WATCH_PX))
             overlays = [self.panel, self.watch]
             self._input()
+            self.bridge.lens.emit(self._lens())
             self.bridge.status.emit("connected")
             self._loop()
         finally:
-            for o in overlays:
+            for o in overlays + self.rings:
                 o.destroy()
-            if gl is not None:
-                gl.release()
+            self.rings = []
+            if self._gl is not None:
+                self._gl.release()
             openvr.shutdown()
             if self.panel_open:
+                self.panel_open = False
                 self.bridge.panel_closed.emit("steamvr")
             self.bridge.watch_visible.emit(False)
 
     def _input(self) -> None:
-        """hand skeletons, raw hand poses, haptics. no buttons: an overlay
-        never gets them while a game has focus."""
+        """hand skeletons and haptics. no buttons: an overlay never gets
+        them while a game has focus."""
         import openvr
         self.input = None
         try:
             inp = openvr.VRInput()
             inp.setActionManifestPath(str(HERE / "actions.json"))
             self.act = {name: inp.getActionHandle(f"/actions/tide/in/{name}")
-                        for name in ("hand_left", "hand_right", "pose_left", "pose_right")}
+                        for name in ("hand_left", "hand_right")}
             self.haptic = inp.getActionHandle("/actions/tide/out/haptic")
             self.sources = {s: inp.getInputSourceHandle(f"/user/hand/{s}") for s in SIDES}
             self.sets = (openvr.VRActiveActionSet_t * 1)()
@@ -291,8 +318,32 @@ class VrThread(QThread):
         except openvr.OpenVRError as exc:
             log.warning("no hand input: %s", exc)
 
+    def _lens(self) -> dict:
+        """each eye's outline (viewport uv), projection and offset."""
+        import openvr
+        eyes = {}
+        for eye, name in ((openvr.Eye_Left, "left"), (openvr.Eye_Right, "right")):
+            uv = []
+            try:
+                mesh = self.system.getHiddenAreaMesh(eye, openvr.k_eHiddenAreaMesh_LineLoop)
+                n = int(mesh.unTriangleCount)
+                if n and mesh.pVertexData:
+                    uv = [(float(mesh.pVertexData[i].v[0]), float(mesh.pVertexData[i].v[1]))
+                          for i in range(n)]
+            except Exception:  # noqa: BLE001 - an ellipse will do
+                uv = []
+            eyes[name] = {
+                "uv": uv,
+                "proj": list(self.system.getProjectionRaw(eye)),
+                "eye_x": float(to_np(self.system.getEyeToHeadTransform(eye))[0, 3]),
+            }
+        return eyes
+
     def _panel_width(self) -> float:
-        return {"small": 0.28, "medium": 0.34, "large": 0.42}.get(self.settings.get("size"), 0.34)
+        return PANEL_WIDTH_M.get(self.settings.get("size"), PANEL_WIDTH_M["medium"])
+
+    def _animate(self) -> bool:
+        return not self.settings.get("motion_off", False)
 
     # ---- per tick ----
 
@@ -310,8 +361,10 @@ class VrThread(QThread):
         self.opened_at = 0.0
         self.last_touch = -1e9
         self.attention = geo.Attention(float(self.settings.get("linger", 2.5)),
-                                       animate=not self.settings.get("motion_off", False))
+                                       animate=self._animate())
         self.watch_shown = geo.Shown(geo.WATCH_SHOW_S, geo.WATCH_HIDE_S)
+        self.dwell = geo.Dwell()
+        self.flash = geo.FlashLimiter()
         frames: dict[str, object] = {}
         next_t = time.perf_counter()
         while not self._stop:
@@ -324,14 +377,15 @@ class VrThread(QThread):
                     self.input.updateActionState(self.sets)
                 except openvr.OpenVRError:
                     pass
-            self._commands(frames, now)
+            self._commands(frames)
             if self.panel_open:
                 self._panel_tick(now)
             else:
                 self._watch_tick(now)
+            self._ring_tick(now)
             for name, ov in (("panel", self.panel), ("watch", self.watch)):
                 img = frames.pop(name, None)
-                if img is not None and self._stall_check(ov.upload(img)):
+                if img is not None and ov.upload(img) > STALL_S:
                     raise _Lost("steamvr stopped answering")
             next_t += 1.0 / hz
             delay = next_t - time.perf_counter()
@@ -339,9 +393,6 @@ class VrThread(QThread):
                 time.sleep(delay)
             else:
                 next_t = time.perf_counter()
-
-    def _stall_check(self, seconds: float) -> bool:
-        return seconds > STALL_S
 
     def _events(self) -> None:
         import openvr
@@ -352,24 +403,34 @@ class VrThread(QThread):
                 self.system.acknowledgeQuit_Exiting()
                 raise _Lost("steamvr quit")
 
-    def _commands(self, frames: dict, now: float) -> None:
+    def _commands(self, frames: dict) -> None:
         while True:
             try:
                 cmd = self._cmds.get_nowait()
             except queue.Empty:
                 return
             kind = cmd[0]
-            if kind in ("panel_frame", "watch_frame"):
-                frames[kind.split("_")[0]] = cmd[1]      # newest wins
+            if kind == "panel_frame":
+                frames["panel"] = cmd[1]          # newest wins
+            elif kind == "watch_frame":
+                frames["watch"] = cmd[1]
             elif kind == "close":
                 self._close(cmd[1])
-            elif kind == "open":
-                self._open(cmd[1], now)
+            elif kind == "pulse":
+                self.pulse = float(cmd[1])
+            elif kind == "playing":
+                self.playing = bool(cmd[1])
+            elif kind == "ring_color":
+                self.ring_color = tuple(cmd[1])
+                for o in self.rings:
+                    self.ov.setOverlayColor(o.h, *self.ring_color)
+            elif kind == "ring_frames":
+                self._ring_setup(cmd[1], cmd[2])
             elif kind == "settings":
                 self.settings.update(cmd[1])
-                self.panel.ov.setOverlayWidthInMeters(self.panel.h, self._panel_width())
+                self.panel.width(self._panel_width())
                 self.attention.linger_s = float(self.settings.get("linger", 2.5))
-                self.attention.animate = not self.settings.get("motion_off", False)
+                self.attention.animate = self._animate()
 
     # ---- device reads ----
 
@@ -389,23 +450,24 @@ class VrThread(QThread):
         return to_np(p.mDeviceToAbsoluteTracking) if p.bPoseIsValid else None
 
     def _fingertip(self, side: str) -> np.ndarray | None:
+        """the index fingertip: the skeleton's tip bone on the controller's
+        pose (the spike's recordings: the skeleton root is the raw pose, and
+        that matches the tracked pose to half a millimetre), else a fixed
+        point on the controller."""
         import openvr
+        ctrl = self._controller(side)
+        if ctrl is None:
+            return None
         if self.input is not None:
             try:
-                pose = self.input.getPoseActionDataRelativeToNow(
-                    self.act[f"pose_{side}"], openvr.TrackingUniverseStanding, 0.0,
-                    openvr.k_ulInvalidInputValueHandle)
                 self.input.getSkeletalBoneData(
                     self.act[f"hand_{side}"], openvr.VRSkeletalTransformSpace_Model,
                     openvr.VRSkeletalMotionRange_WithoutController, self.bones)
-                if pose.bActive and pose.pose.bPoseIsValid:
-                    tip = self.bones[10].position.v       # index finger tip bone
-                    return geo.fingertip_from_skeleton(
-                        to_np(pose.pose.mDeviceToAbsoluteTracking), [tip[0], tip[1], tip[2]])
+                tip = self.bones[INDEX_TIP_BONE].position.v
+                return geo.fingertip_from_skeleton(ctrl, [tip[0], tip[1], tip[2]])
             except openvr.OpenVRError:
                 pass
-        ctrl = self._controller(side)
-        return geo.fingertip_from_controller(ctrl) if ctrl is not None else None
+        return geo.fingertip_from_controller(ctrl)
 
     def _buzz(self, seconds: float, freq: float, amp: float) -> None:
         if self.input is None or not self.settings.get("haptics", True):
@@ -420,27 +482,34 @@ class VrThread(QThread):
     # ---- watch ----
 
     def _watch_tick(self, now: float) -> None:
-        import openvr
         side = self.settings.get("watch_hand", "left")
         hmd, ctrl = self._hmd(), self._controller(side)
-        pos = geo.wrist_point(ctrl, side) if ctrl is not None else None
-        wanted = hmd is not None and pos is not None and geo.looking_at_wrist(hmd, pos)
+        wanted = hmd is not None and ctrl is not None and geo.checking_watch(hmd, ctrl, side)
         was = self.watch_shown.on
         shown = self.watch_shown.update(now, wanted)
         if shown != was:
             self.bridge.watch_visible.emit(shown)
+            self.dwell.reset()
+            self.watch.width(WATCH_WIDTH_M)
         self.watch.show(shown and self.watch.has_frame)
-        if not shown or pos is None:
+        if not shown or hmd is None or ctrl is None:
             return
+        pos = geo.wrist_point(ctrl, side)
         self.watch.place(geo.facing(pos, hmd[:3, 3]))
-        for kind, _x, _y in self.watch.events():
-            if kind == openvr.VREvent_MouseButtonDown:
-                self._open("watch", now)
+
+        if self.settings.get("open_by_looking", True):
+            ang, _d = geo.off_center_deg(hmd, pos)
+            fill = self.dwell.update(now, ang <= geo.DWELL_LOOK_DEG)
+            # it swells as you look, so you see it's about to open
+            self.watch.width(WATCH_WIDTH_M * (1.0 + WATCH_SWELL * fill))
+            if fill >= 1.0:
+                self._open("watch (looked)", now)
                 return
+
         other = "right" if side == "left" else "left"
         tip = self._fingertip(other)
         if tip is not None and float(np.linalg.norm(tip - pos)) <= geo.POKE_M:
-            self._open("watch", now)
+            self._open("watch (poked)", now)
 
     # ---- panel ----
 
@@ -457,10 +526,11 @@ class VrThread(QThread):
         self.last_touch = now
         self.attention.reset(now)
         self.watch_shown.reset()
+        self.dwell.reset()
         self.watch.show(False)
+        self.watch.width(WATCH_WIDTH_M)
         self.bridge.watch_visible.emit(False)
-        animate = not self.settings.get("motion_off", False)
-        self.panel.ov.setOverlayAlpha(self.panel.h, 0.0 if animate else 1.0)
+        self.panel.alpha(0.0 if self._animate() else 1.0)
         self.panel.show(True)
         self._buzz(0.08, 120, 0.9)
         self.bridge.panel_opened.emit(how)
@@ -494,9 +564,50 @@ class VrThread(QThread):
         # opening: the panel grows to size as it fades in
         grow = 1.0
         if self.attention.animate:
-            grow = 0.3 + 0.7 * geo.ease_out((now - self.opened_at) / GROW_S)
-            alpha = min(alpha, geo.ease_out((now - self.opened_at) / GROW_S))
-        self.panel.ov.setOverlayWidthInMeters(self.panel.h, self._panel_width() * grow)
-        self.panel.ov.setOverlayAlpha(self.panel.h, float(alpha))
+            t = geo.ease_out((now - self.opened_at) / GROW_S)
+            grow = 0.3 + 0.7 * t
+            alpha = min(alpha, t)
+        self.panel.width(self._panel_width() * grow)
+        self.panel.alpha(alpha)
         if close:
             self._close("looked away")
+
+    # ---- ring ----
+
+    def _ring_setup(self, images: list, width_m: float) -> None:
+        import openvr
+        for o in self.rings:
+            o.destroy()
+        self.rings = []
+        for i, img in enumerate(images):
+            o = _Overlay(self.ov, self._gl, f"tide.vr.ring{i}", f"tide ring {i}", width_m,
+                         (img.width(), img.height()))
+            # each eye gets its own half: its own lens outline
+            self.ov.setOverlayFlag(o.h, openvr.VROverlayFlags_SideBySide_Parallel, True)
+            o.upload(img)
+            o.place_on(openvr.k_unTrackedDeviceIndex_Hmd,
+                       geo.translate(0.0, 0.0, -ringmod.DISTANCE_M))
+            self.ov.setOverlayColor(o.h, *self.ring_color)
+            o.alpha(0.0)
+            self.rings.append(o)
+
+    def _ring_tick(self, now: float) -> None:
+        if not self.rings:
+            return
+        mode = self.settings.get("ring", "off")
+        if mode == "off" or not self._animate():
+            for o in self.rings:
+                o.show(False)
+            return
+        target = ringmod.level(mode, self.pulse, self.playing)
+        lvl = self.flash.update(now, target) * ringmod.STRENGTH.get(
+            self.settings.get("ring_strength", "normal"), 0.7)
+        # cross-fade the grain variants so the speckle shimmers
+        n = len(self.rings)
+        phase = (now * 3.0) % n
+        for i, o in enumerate(self.rings):
+            dist = min(abs(phase - i), n - abs(phase - i))
+            weight = max(0.0, 1.0 - dist) if n > 1 else 1.0
+            a = lvl * weight
+            o.show(a > 0.002)
+            o.alpha(a)

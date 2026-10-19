@@ -131,6 +131,94 @@ class AttentionTests(unittest.TestCase):
         self.assertAlmostEqual(t, 2.5, delta=2 / 90 + 1e-6)
 
 
+def rot_y(deg):
+    a = np.eye(4)
+    r = math.radians(deg)
+    a[0, 0], a[0, 2], a[2, 0], a[2, 2] = math.cos(r), math.sin(r), -math.sin(r), math.cos(r)
+    return a
+
+
+class WatchRuleTests(unittest.TestCase):
+    """h3vr: aiming brought the watch up and froze the game."""
+
+    def place_wrist(self, rotation):
+        # put the controller so its wrist point sits in view, 35 cm out
+        target = np.array([0.0, 1.55, -0.35])
+        c = rotation.copy()
+        off = (c[:3, :3] @ geo.WRIST_LEFT)
+        c[:3, 3] = target - off - np.array([0.0, geo.WATCH_LIFT_M, 0.0])
+        return c
+
+    def test_aiming_doesnt_count(self):
+        aiming = self.place_wrist(np.eye(4))          # pointing where you look
+        self.assertLess(geo.aim_deg(HEAD, aiming), 10)
+        self.assertFalse(geo.checking_watch(HEAD, aiming, "left"))
+
+    def test_forearm_across_you_counts(self):
+        across = self.place_wrist(rot_y(-90))         # pointing to your right
+        self.assertGreater(geo.aim_deg(HEAD, across), 80)
+        self.assertTrue(geo.checking_watch(HEAD, across, "left"))
+
+
+class DwellTests(unittest.TestCase):
+    def test_fills_in_a_second_and_drains_faster(self):
+        d = geo.Dwell(1.0)
+        t = 0.0
+        while d.update(t, True) < 1.0:
+            t += 1 / 90
+        self.assertAlmostEqual(t, 1.0, delta=0.03)
+        d2 = geo.Dwell(1.0)
+        for i in range(46):
+            d2.update(i / 90, True)                  # half full
+        for i in range(46, 70):
+            d2.update(i / 90, False)
+        self.assertEqual(d2.value, 0.0)
+
+
+class FlashLimiterTests(unittest.TestCase):
+    def test_at_most_three_flashes_a_second(self):
+        lim = geo.FlashLimiter()
+        flashes, prev = 0, 0.0
+        for i in range(90):                           # 1 s of 8 hits a second at 90 hz
+            t = i / 90
+            target = 1.0 if (i % 11) < 2 else 0.0
+            lvl = lim.update(t, target)
+            if lvl - prev >= 0.3:
+                flashes += 1
+            prev = lvl
+        self.assertLessEqual(flashes, 3)
+
+    def test_slow_music_passes_untouched(self):
+        lim = geo.FlashLimiter()
+        out = [lim.update(i / 90, 1.0 if i % 45 == 0 else 0.0) for i in range(90)]
+        self.assertEqual(out.count(1.0), 2)
+
+
+class RingTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("steamvr_ring", BUNDLED_DIR / "steamvr" / "ring.py")
+        self.ring = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.ring)
+
+    def test_levels(self):
+        lv = self.ring.level
+        self.assertEqual(lv("off", 1.0, True), 0.0)
+        self.assertEqual(lv("kick", 0.0, True), 0.0)
+        self.assertEqual(lv("kick", 0.8, True), 0.8)
+        self.assertEqual(lv("breathing", 0.0, True), 0.25)
+        self.assertEqual(lv("breathing", 1.0, False), 0.0)     # paused: nothing
+
+    def test_draws_one_texture_per_variant(self):
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        eye = {"uv": self.ring.ellipse_uv(), "proj": [-1.4, 1.2, -1.4, 1.4], "eye_x": -0.03}
+        images, width = self.ring.draw({"left": eye, "right": dict(eye, eye_x=0.03)}, variants=2)
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0].width(), 2 * self.ring.HALF_W)
+        self.assertLessEqual(images[0].height(), self.ring.MAX_TEX_H)
+        self.assertGreater(width, 4.0)
+
+
 class PluginLifecycleTests(unittest.TestCase):
     """the real plugin under the real host, steamvr kept out."""
 
@@ -161,7 +249,7 @@ class PluginLifecycleTests(unittest.TestCase):
             app.processEvents()
         self.assertEqual(host.record("steamvr").detail, "waiting for steamvr")
         img = plugin.panel.frame()
-        self.assertEqual((img.width(), img.height()), (900, 420))
+        self.assertEqual((img.width(), img.height()), (1000, 640))
         host.set_enabled("steamvr", False)
         # stopped, and every qt object it adopted is gone right away (not
         # left for python's exit, where deleting them crashed)

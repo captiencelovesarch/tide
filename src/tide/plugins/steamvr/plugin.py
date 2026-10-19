@@ -1,6 +1,6 @@
-"""tide in vr: a watch on your wrist that opens a now-playing panel in
-front of you. look away and it goes. design/steamvr.md is the plan; this
-is its first slice (the watch, the panel, laser input, the fade).
+"""tide in vr: a watch on your wrist opens a now-playing panel in front of
+you, look away and it goes; and the ring, tide's backdrop pulse on the
+edge of your view. design/steamvr.md is the plan.
 
 The gui half lives here: it keeps the qt panel up to date, renders it
 when something changed and posts the frames to the vr thread (vr.py),
@@ -9,13 +9,14 @@ which does everything that talks to steamvr.
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QOffscreenSurface, QSurfaceFormat
+from PySide6.QtGui import QColor, QOffscreenSurface, QSurfaceFormat
 
+from . import ring as ringmod
 from .panel import Forwarder, VrPanel, watch_face
 from .vr import VrBridge, VrThread
 
 FRAME_MS = 33          # at most ~30 redraws a second while open
-TICK_MS = 500          # progress and the watch ring move this often
+TICK_MS = 500          # times and the watch ring move this often
 
 
 class SteamVr:
@@ -23,6 +24,7 @@ class SteamVr:
         self.ctx = ctx
         self.panel_open = False
         self.watch_up = False
+        self._last_ring = "breathing"
         # every qt object here is handed to ctx.adopt: tide deletes them
         # right after stop(), while qt is still whole
         self.panel = ctx.adopt(VrPanel(ctx))
@@ -35,6 +37,7 @@ class SteamVr:
         self.bridge.panel_opened.connect(self._opened)
         self.bridge.panel_closed.connect(self._closed)
         self.bridge.watch_visible.connect(self._watch_visible)
+        self.bridge.lens.connect(self._lens)
 
         # qt wants offscreen surfaces made on the gui thread; the vr thread
         # makes its opengl context over this one
@@ -51,17 +54,27 @@ class SteamVr:
         self._tick.timeout.connect(self._on_tick)
         self._tick.start()
 
-        pb = ctx.playback
+        pb, q = ctx.playback, ctx.queue
         pb.track_changed.connect(lambda _t: self._refresh())
-        pb.state_changed.connect(lambda _s: self._refresh())
+        pb.state_changed.connect(self._state)
         pb.liked_changed.connect(lambda _l: self._refresh())
+        pb.position_changed.connect(self._position)
+        q.modes_changed.connect(self._refresh)
+        q.changed.connect(self._refresh)
+        ctx.lyrics.changed.connect(lambda _s: self._refresh())
+        ctx.beats.pulse.connect(self._pulse)
         ctx.theme.changed.connect(self._restyle)
-        ctx.settings_changed.connect(self._settings_changed)
+        ctx.settings_changed.connect(lambda _keys: self._apply_settings())
         self.panel.changed.connect(self._dirty)
         self.panel.close_requested.connect(lambda: self.thread.post("close", "x"))
+        self.panel.setting_changed.connect(self._set)
+        self.panel.now.ring.clicked.connect(self._toggle_ring)
 
-        self.thread = VrThread(self.bridge, self.surface, self._settings())
+        self.thread = VrThread(self.bridge, self.surface, self._vr_settings())
         self.thread.start()
+        self._apply_settings()
+        self.thread.post("playing", pb.state() == "playing")
+        self.thread.post("ring_color", self._accent())
         ctx.set_status("waiting for steamvr")
 
     def stop(self) -> None:
@@ -79,18 +92,45 @@ class SteamVr:
 
     # ---- settings ----
 
-    def _settings(self) -> dict:
+    def _vr_settings(self) -> dict:
         s = self.ctx.settings
         return {
             "watch_hand": s["watch_hand"],
+            "open_by_looking": s["open_by_looking"],
             "size": s["size"],
             "linger": float(s["linger"]),
             "haptics": s["haptics"],
+            "ring": s["ring"],
+            "ring_strength": s["ring_strength"],
             "motion_off": self.ctx.motion.off(),
         }
 
-    def _settings_changed(self, _keys) -> None:
-        self.thread.post("settings", self._settings())
+    def _apply_settings(self) -> None:
+        s = self.ctx.settings
+        self.thread.post("settings", self._vr_settings())
+        if s["ring"] != "off":
+            self._last_ring = s["ring"]
+            self.ctx.beats.subscribe()
+        else:
+            self.ctx.beats.unsubscribe()
+        if s["lyrics"]:
+            self.ctx.lyrics.subscribe()
+        else:
+            self.ctx.lyrics.unsubscribe()
+        self.panel.ring_on = s["ring"] != "off"
+        self.panel.lyrics_on = s["lyrics"]
+        self.panel.refresh()
+
+    def _set(self, key: str, value) -> None:
+        """a change made on the panel's own settings page."""
+        try:
+            self.ctx.settings.set(key, value)
+        except (KeyError, ValueError):
+            return
+        self._apply_settings()
+
+    def _toggle_ring(self) -> None:
+        self._set("ring", "off" if self.ctx.settings["ring"] != "off" else self._last_ring)
 
     # ---- from the vr thread ----
 
@@ -103,6 +143,7 @@ class SteamVr:
 
     def _opened(self, how: str) -> None:
         self.panel_open = True
+        self.panel.show_tab("now")
         self.panel.refresh()
         self._send_panel()
 
@@ -114,6 +155,30 @@ class SteamVr:
         if on:
             self._send_watch()
 
+    def _lens(self, eyes: dict) -> None:
+        """steamvr told us each eye's outline: draw the ring off the gui
+        thread, then hand it over once."""
+        self.ctx.jobs.run(lambda: ringmod.draw(eyes),
+                          on_done=lambda result: self.thread.post("ring_frames", *result))
+
+    # ---- from tide ----
+
+    def _state(self, state: str) -> None:
+        self.thread.post("playing", state == "playing")
+        self._refresh()
+
+    def _pulse(self, level: float) -> None:
+        self.thread.post("pulse", level)
+
+    def _position(self, _seconds: float) -> None:
+        # lyric lines turn over on position ticks, not just on the timer
+        if self.panel_open and self.panel.progress():
+            self._dirty()
+
+    def _accent(self) -> tuple[float, float, float]:
+        c = QColor(self.ctx.theme.token("accent", "#ffd400"))
+        return (c.redF(), c.greenF(), c.blueF())
+
     # ---- frames ----
 
     def _refresh(self) -> None:
@@ -121,6 +186,7 @@ class SteamVr:
 
     def _restyle(self) -> None:
         self.panel.restyle()
+        self.thread.post("ring_color", self._accent())
         if self.watch_up:
             self._send_watch()
 
@@ -138,9 +204,8 @@ class SteamVr:
         self.thread.post("watch_frame", watch_face(self.ctx, progress))
 
     def _on_tick(self) -> None:
-        pb = self.ctx.playback
         if self.panel_open:
-            self.panel.progress(pb.position(), pb.duration())
+            self.panel.progress()
             self._dirty()
         if self.watch_up:
             self._send_watch()

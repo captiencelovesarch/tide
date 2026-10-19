@@ -16,8 +16,15 @@ WRIST_LEFT = np.array([-0.034, 0.0365, 0.1647])
 WATCH_LIFT_M = 0.03        # above the wrist, not inside the forearm
 WATCH_NEAR_M = 0.6         # wrist at most this far from your head...
 WATCH_LOOK_DEG = 25.0      # ...and within this angle of your facing
-WATCH_SHOW_S = 0.15
-WATCH_HIDE_S = 0.5
+WATCH_SHOW_S = 0.3
+WATCH_HIDE_S = 0.4
+# aiming points the controller where you look (h3vr, 2026-10-19: aiming
+# brought the watch up and froze the game). checking a watch holds the
+# forearm across you, the controller pointing well off your gaze.
+WATCH_AIM_CLEAR_DEG = 55.0
+# look-to-open: keep the watch near the middle of your view this long
+DWELL_S = 1.0
+DWELL_LOOK_DEG = 15.0
 POKE_M = 0.025             # fingertip this close to the watch opens the panel
 # roughly where the index fingertip sits on a controller, for when the
 # hand skeleton isn't available
@@ -87,6 +94,71 @@ def looking_at_wrist(hmd: np.ndarray, point: np.ndarray) -> bool:
     ang, d = off_center_deg(hmd, point)
     return d <= WATCH_NEAR_M and ang <= WATCH_LOOK_DEG
 
+
+def aim_deg(hmd: np.ndarray, controller: np.ndarray) -> float:
+    """angle between where the controller points (its -z) and where you
+    look (the headset's -z). small means aiming down sights."""
+    a, b = -controller[:3, 2], -hmd[:3, 2]
+    cos = float(np.clip(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)), -1.0, 1.0))
+    return math.degrees(math.acos(cos))
+
+
+def checking_watch(hmd: np.ndarray, controller: np.ndarray, side: str) -> bool:
+    """wrist close and in view, and not aimed along your gaze."""
+    pos = wrist_point(controller, side)
+    return looking_at_wrist(hmd, pos) and aim_deg(hmd, controller) >= WATCH_AIM_CLEAR_DEG
+
+
+class Dwell:
+    """look-to-open: fills while you look near the middle of your view,
+    drains twice as fast when you don't. ``update`` returns 0..1."""
+
+    def __init__(self, seconds: float = DWELL_S) -> None:
+        self.seconds = seconds
+        self.value = 0.0
+        self._last: float | None = None
+
+    def reset(self) -> None:
+        self.value = 0.0
+        self._last = None
+
+    def update(self, now: float, looking: bool) -> float:
+        dt = 0.0 if self._last is None else max(0.0, min(0.1, now - self._last))
+        self._last = now
+        rate = dt / self.seconds if self.seconds > 0 else 1.0
+        self.value = min(1.0, self.value + rate) if looking else max(0.0, self.value - 2 * rate)
+        return self.value
+
+
+class FlashLimiter:
+    """no more than ``per_second`` flashes a second, whatever the music
+    does. a flash is the level jumping by ``jump`` or more; past the limit
+    the level may only rise slowly, so fast hits blur into a swell.
+    photosensitive seizure guidance draws the line at three a second, and
+    in a headset you can't look away from it. always on, not a setting."""
+
+    def __init__(self, per_second: int = 3, jump: float = 0.3, slow_rise_per_s: float = 1.5) -> None:
+        self.per_second, self.jump, self.slow = per_second, jump, slow_rise_per_s
+        self.level = 0.0
+        self._flashes: list[float] = []
+        self._last: float | None = None
+
+    def update(self, now: float, target: float) -> float:
+        dt = 0.0 if self._last is None else max(0.0, now - self._last)
+        self._last = now
+        self._flashes = [t for t in self._flashes if now - t < 1.0]
+        target = max(0.0, min(1.0, float(target)))
+        if target - self.level >= self.jump:
+            if len(self._flashes) < self.per_second:
+                self._flashes.append(now)
+                self.level = target
+            else:
+                self.level = min(target, self.level + self.slow * dt)
+        elif target > self.level:
+            self.level = target
+        else:
+            self.level = target          # falling is never a flash
+        return self.level
 
 def fingertip_from_controller(controller: np.ndarray) -> np.ndarray:
     return (controller @ np.append(FINGER_ON_CONTROLLER, 1.0))[:3]
