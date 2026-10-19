@@ -648,10 +648,13 @@ running log from `tools/vr-spike`. each one changes the plan above.
   (`steamvr/globalActionSetPriority`, off by default, advanced settings
   only) and takes those buttons away from the game. if neither works without the developer setting, the stick backup
   is out and the gestures carry summoning alone.
-- **2026-10-19 · global input, no game running:** with
+- **2026-10-19 · global input doesn't help, stick backup dropped:** with
   `steamvr/globalActionSetPriority` on and our action set at global
-  priority, the stick actions still read `inactive` with no game open.
-  still to test with vivecraft running, which is the case that matters.
+  priority, the stick actions read `inactive` with no game open and with
+  vivecraft running. button input is off the table for summoning.
+- **2026-10-19 · we can see which game has focus:** with vivecraft
+  running the panel read `org.jrbudda.vivecraft.steamvrinput`. pinned
+  spots per game will work.
 - **2026-10-19 · the laser takes the stick too:** while the laser points
   at the panel, steamvr turns a stick click into a mouse click (same as
   the trigger) and stick up/down into smooth scroll events. that's the
