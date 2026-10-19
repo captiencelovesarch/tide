@@ -21,6 +21,7 @@ output lands in ~/.cache/tide-vr-spike/.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import math
 import random
@@ -33,6 +34,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from gestures import DETECTORS, SIDES, Hand, Sample, TripleClick, replay  # noqa: E402
+
+# a native crash (vrclient, qt teardown) prints the python stack too
+faulthandler.enable()
 
 
 def _qt_app():
@@ -157,13 +161,17 @@ class PanelLoop:
     """one hidden qt panel in vr: placement, laser input, redraws, stats,
     and the stick triple-click (brings the panel back in front of you)."""
 
-    def __init__(self, s, widget, *, key: str, attach: str | None, flip: bool) -> None:
+    def __init__(self, s, widget, *, key: str, attach: str | None, flip: bool,
+                 upload: str = "file", gl_flip: bool = False) -> None:
         from PySide6.QtCore import QTimer, Qt
         from panels import Forwarder, H, W
         from vrcore import Overlay, Stats
         self.s, self.w, self.attach, self.flip = s, widget, attach, flip
         self.W, self.H = W, H
-        self.ov = Overlay(s, key, f"tide spike {key}", 0.40 if attach is None else 0.22)
+        self.ov = Overlay(s, key, f"tide spike {key}", 0.40 if attach is None else 0.22,
+                          upload=upload)
+        self.ov.gl_flip = gl_flip
+        self.upload_errors: list[str] = []
         self.ov.mouse_input(W, H)
         self.fwd = Forwarder(widget)
         self.dirty = True
@@ -178,7 +186,7 @@ class PanelLoop:
         widget.show()           # WA_DontShowOnScreen keeps it off the desktop
         self.respawn()
         self.ov.show()
-        self.timer = QTimer()
+        self.timer = QTimer(widget)     # parented: never outlives the panel
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self.tick)
         self.timer.start(max(1, int(1000 / self.hz)))
@@ -257,27 +265,41 @@ class PanelLoop:
                 self.w.focus_label.setText(f"focus: {focus}")
             if hasattr(self.w, "stats_label"):
                 t, u = self.tick_ms.summary(), self.upload_ms.summary()
-                mode = {True: "raw", False: "png", None: "?"}[self.ov.raw_ok]
                 self.w.stats_label.setText(
                     f"tick p95 {t.get('p95', 0)} ms · upload p50 {u.get('p50', 0)} "
-                    f"p95 {u.get('p95', 0)} ms · {mode}")
+                    f"p95 {u.get('p95', 0)} ms · {self.ov.mode}")
             self.dirty = True
 
-        if self.dirty and now - self._last_upload >= 1 / 30:
+        from vrcore import MAX_FPS
+        if self.dirty and now - self._last_upload >= 1 / MAX_FPS[self.ov.mode]:
             img = QImage(self.W, self.H, QImage.Format_RGBA8888)
             img.fill(Qt.transparent)
             self.w.render(img)
-            self.upload_ms.add(self.ov.upload(img))
+            try:
+                self.upload_ms.add(self.ov.upload(img))
+            except Exception as exc:  # noqa: BLE001 - any upload failure is a finding
+                msg = f"{self.ov.mode} upload failed: {type(exc).__name__}: {exc}"
+                self.upload_errors.append(msg)
+                print(msg, flush=True)
+                if self.ov.mode != "file":
+                    self.ov.mode = "file"
+                    self._log("switched to file uploads")
             self._last_upload = now
             self.dirty = False
+
+    def close(self) -> None:
+        """stop ticking and take the overlay down, before openvr shuts down."""
+        self.timer.stop()
+        self.ov.destroy()
 
     def report(self) -> dict:
         return {
             "display_hz": self.hz,
             "tick_interval_ms": self.tick_ms.summary(),
             "upload_ms": self.upload_ms.summary(),
-            "upload_mode": {True: "raw", False: "png file", None: "none"}[self.ov.raw_ok],
-            "raw_error": self.ov.raw_error,
+            "upload_mode": self.ov.mode,
+            "upload_errors": self.upload_errors[:5],
+            "gl": self.s.gl.info if self.s.gl is not None else None,
             "input": "ok" if self.s.input is not None else f"failed: {self.s.input_error}",
             "focus_apps_seen": self.focus_seen,
             "attach": self.attach,
@@ -288,6 +310,26 @@ class PanelLoop:
 def _hidden(widget) -> None:
     from PySide6.QtCore import Qt
     widget.setAttribute(Qt.WA_DontShowOnScreen, True)
+
+
+def _teardown(loop, session, widget) -> None:
+    """the panel run once segfaulted in pyside's exit cleanup, after
+    openvr.shutdown(). so: overlays down, openvr off, then our qt objects
+    deleted by hand while the app still exists. each step prints, so if it
+    still crashes the last line says where."""
+    import shiboken6
+    from PySide6.QtWidgets import QApplication
+    steps = (
+        ("overlay down", loop.close if loop is not None else None),
+        ("openvr shutdown", session.shutdown if session is not None else None),
+        ("qt objects deleted", lambda: shiboken6.isValid(widget) and shiboken6.delete(widget)),
+        ("qt events drained", QApplication.processEvents),
+    )
+    for name, step in steps:
+        if step is None:
+            continue
+        step()
+        print(f"teardown: {name}", flush=True)
 
 
 def cmd_panel(args) -> None:
@@ -308,7 +350,10 @@ def cmd_panel(args) -> None:
     from vrcore import Session
     _hidden(panel)
     s = Session()
-    loop = PanelLoop(s, panel, key="panel", attach=args.attach, flip=not args.no_flip)
+    if args.upload == "raw":
+        print("warning: raw uploads crashed vrcompositor on 2026-10-18. here to re-test only")
+    loop = PanelLoop(s, panel, key="panel", attach=args.attach, flip=not args.no_flip,
+                     upload=args.upload, gl_flip=args.gl_flip)
     panel.log("point the laser here and pull the trigger")
     if s.input is None:
         panel.log(f"input failed: {s.input_error}")
@@ -317,8 +362,7 @@ def cmd_panel(args) -> None:
     report["clicks"] = panel.clicks
     print(json.dumps(report, indent=2))
     _write_json(out_dir() / f"panel-{time.strftime('%Y%m%d-%H%M%S')}.json", report)
-    loop.ov.destroy()
-    s.shutdown()
+    _teardown(loop, s, panel)
 
 
 # ---------- ring ----------
@@ -447,12 +491,14 @@ def cmd_ring(args) -> None:
 
     overlays = []
     for i, img in enumerate(images):
-        ov = Overlay(s, f"ring{i}", f"tide spike ring {i}", width_m)
+        # static images: one upload each, by file (raw would crash the
+        # compositor at this size)
+        ov = Overlay(s, f"ring{i}", f"tide spike ring {i}", width_m, upload="file")
         ov.flag(openvr.VROverlayFlags_SideBySide_Crossed if args.crossed
                 else openvr.VROverlayFlags_SideBySide_Parallel)
         ms = ov.upload(img)
         print(f"ring texture {i}: {img.width()}x{img.height()} in {ms:.0f} ms "
-              f"({'raw' if ov.raw_ok else 'png file'})")
+              f"(file)")
         ov.place_on(openvr.k_unTrackedDeviceIndex_Hmd, translate(0, 0, -args.distance))
         r, g, b = (int(args.color[k:k + 2], 16) / 255 for k in (1, 3, 5))
         ov.color(r, g, b)
@@ -485,7 +531,7 @@ def cmd_ring(args) -> None:
     except KeyboardInterrupt:
         pass
     report = {"alpha_calls_per_tick_ms": call_ms.summary(), "overlays": len(overlays),
-              "upload": "raw" if overlays and overlays[0].raw_ok else "png file",
+              "upload": "file",
               "outline_from_headset": {n: e["from_headset"] for n, e in eyes.items()}}
     print(json.dumps(report, indent=2))
     _write_json(out_dir() / f"ring-{time.strftime('%Y%m%d-%H%M%S')}.json", report)
@@ -682,13 +728,14 @@ def cmd_voice(args) -> None:
         from vrcore import Session
         _hidden(panel)
         session = Session()
-        loop = PanelLoop(session, panel, key="voice", attach=None, flip=not args.no_flip)
+        loop = PanelLoop(session, panel, key="voice", attach=None, flip=not args.no_flip,
+                         upload=args.upload, gl_flip=args.gl_flip)
         panel.log("point at the mic button, hold the trigger, talk, let go")
         app.exec()
-        loop.ov.destroy()
-        session.shutdown()
     if state["talking"]:
         mic.stop()
+    if loop is not None:
+        _teardown(loop, session, panel)
     print(f"{len(saved)} clips in {clips}")
 
 
@@ -733,6 +780,14 @@ def cmd_score(args) -> None:
 
 # ---------- main ----------
 
+def _upload_flags(p) -> None:
+    p.add_argument("--upload", choices=("file", "gl", "raw"), default="file",
+                   help="how frames reach steamvr: file (default, safe), gl (an opengl "
+                        "texture, what the plugin wants), raw (crashed the compositor)")
+    p.add_argument("--gl-flip", action="store_true",
+                   help="with --upload gl: use if the panel shows upside down")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="run.sh", description="tide vr spike (design/steamvr.md, vr 0)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -752,6 +807,7 @@ def main() -> None:
                    help="use if clicks land mirrored top to bottom")
     p.add_argument("--preview", action="store_true", help="desktop window, no vr")
     p.add_argument("--snapshot", metavar="PNG", help="render the panel to a file, no vr")
+    _upload_flags(p)
     p.set_defaults(func=cmd_panel)
 
     p = sub.add_parser("ring", help="the lens-shaped ring")
@@ -783,6 +839,7 @@ def main() -> None:
     p.add_argument("--device", help="parec source name (default: system default input)")
     p.add_argument("--prompts", default=str(HERE / "prompts.txt"))
     p.add_argument("--no-flip", action="store_true")
+    _upload_flags(p)
     p.set_defaults(func=cmd_voice)
 
     p = sub.add_parser("score", help="transcribe the clips and search")

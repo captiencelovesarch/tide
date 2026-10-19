@@ -6,6 +6,7 @@ a vr thread from the gui thread; the spike measures whether it has to.
 from __future__ import annotations
 
 import ctypes
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -100,6 +101,7 @@ class Session:
         self.quit = False
         self.input = None
         self.input_error = ""
+        self.gl: "GlUploader | None" = None
         # last error per input read ("curl left": "InputError_NoData"), so a
         # null in a report comes with a reason
         self.input_errors: dict[str, str] = {}
@@ -142,6 +144,9 @@ class Session:
                 pass
 
     def shutdown(self) -> None:
+        if self.gl is not None:
+            self.gl.release()
+            self.gl = None
         openvr.shutdown()
 
     # ---- reading ----
@@ -262,15 +267,80 @@ class Session:
 
 # ---------- overlays ----------
 
+# how a QImage gets to steamvr:
+#   file  setOverlayFromFile on a png. what `png` proved works.
+#   gl    an opengl texture handed over with setOverlayTexture. what the
+#         plugin should use, if linux steamvr takes it.
+#   raw   setOverlayRaw. crashed vrcompositor on linux (2026-10-18:
+#         "Vulkan transfer ring buffer overflow; transfer size 2315040")
+#         with 800x480 frames a few times a second. kept only to re-test.
+UPLOAD_MODES = ("file", "gl", "raw")
+MAX_FPS = {"file": 10, "gl": 30, "raw": 2}
+
+
+class GlUploader:
+    """one offscreen opengl context per session, kept current on this thread."""
+
+    def __init__(self) -> None:
+        from PySide6.QtGui import QGuiApplication, QOffscreenSurface, QOpenGLContext
+        self.ctx = QOpenGLContext()
+        if not self.ctx.create():
+            raise RuntimeError("couldn't create an opengl context")
+        self.surface = QOffscreenSurface()
+        self.surface.setFormat(self.ctx.format())
+        self.surface.create()
+        if not self.ctx.makeCurrent(self.surface):
+            raise RuntimeError("couldn't make the opengl context current")
+        fmt = self.ctx.format()
+        self.info = (f"{QGuiApplication.platformName()} · "
+                     f"{'gles' if self.ctx.isOpenGLES() else 'gl'} "
+                     f"{fmt.majorVersion()}.{fmt.minorVersion()}")
+        self.textures: list = []
+
+    def texture(self, img, old=None):
+        """upload ``img`` into ``old`` (same size) or a new texture."""
+        from PySide6.QtGui import QImage
+        from PySide6.QtOpenGL import QOpenGLTexture
+        self.ctx.makeCurrent(self.surface)
+        img = img.convertToFormat(QImage.Format_RGBA8888)
+        tex = old
+        if tex is None or tex.width() != img.width() or tex.height() != img.height():
+            if tex is not None:
+                tex.destroy()
+            tex = QOpenGLTexture(QOpenGLTexture.Target2D)
+            tex.setMinMagFilters(QOpenGLTexture.Linear, QOpenGLTexture.Linear)
+            tex.setWrapMode(QOpenGLTexture.ClampToEdge)
+            self.textures.append(tex)
+        tex.setData(img, QOpenGLTexture.DontGenerateMipMaps)
+        self.ctx.functions().glFlush()
+        return tex
+
+    def release(self) -> None:
+        if self.ctx.makeCurrent(self.surface):
+            for tex in self.textures:
+                tex.destroy()
+            self.ctx.doneCurrent()
+        self.textures.clear()
+
+
 class Overlay:
-    def __init__(self, session: Session, key: str, name: str, width_m: float) -> None:
+    def __init__(self, session: Session, key: str, name: str, width_m: float,
+                 upload: str = "file") -> None:
+        if upload not in UPLOAD_MODES:
+            raise ValueError(upload)
         self.s = session
         self.ov = session.overlay
         self.h = self.ov.createOverlay(f"tide.spike.{key}", name)
         self.ov.setOverlayWidthInMeters(self.h, width_m)
-        self.raw_ok: bool | None = None
-        self.raw_error = ""
-        self._tmp = Path(tempfile.gettempdir()) / f"tide-spike-{key}.png"
+        self.mode = upload
+        self.error = ""
+        self._tex = None
+        self._flip_set = False
+        self.gl_flip = False
+        # two files, alternated, so steamvr never reads one we're rewriting
+        self._files = [Path(tempfile.gettempdir()) / f"tide-spike-{os.getpid()}-{key}-{n}.png"
+                       for n in (0, 1)]
+        self._n = 0
 
     def show(self) -> None:
         self.ov.showOverlay(self.h)
@@ -300,26 +370,43 @@ class Overlay:
         self.ov.setOverlayFromFile(self.h, str(Path(path).resolve()))
 
     def upload(self, img) -> float:
-        """push a QImage. tries setOverlayRaw, falls back to a png file if
-        steamvr refuses the size. returns milliseconds spent."""
-        from PySide6.QtGui import QImage
+        """push a QImage the way ``self.mode`` says. returns milliseconds
+        spent on our side (steamvr's own copy isn't in it)."""
         t0 = time.perf_counter()
-        if self.raw_ok is not False:
-            rgba = img.convertToFormat(QImage.Format_RGBA8888)
-            data = bytes(rgba.constBits())
-            buf = (ctypes.c_char * len(data)).from_buffer_copy(data)
-            try:
-                self.ov.setOverlayRaw(self.h, buf, rgba.width(), rgba.height(), 4)
-                self.raw_ok = True
-                return (time.perf_counter() - t0) * 1000.0
-            except openvr.OpenVRError as exc:
-                self.raw_ok = False
-                self.raw_error = str(exc)
-                print(f"setOverlayRaw refused {rgba.width()}x{rgba.height()}: {exc}. "
-                      "using png files from here on")
-        img.save(str(self._tmp))
-        self.from_file(self._tmp)
+        if self.mode == "gl":
+            self._upload_gl(img)
+        elif self.mode == "raw":
+            self._upload_raw(img)
+        else:
+            path = self._files[self._n % 2]
+            self._n += 1
+            # png "quality" is compression in qt: 100 = none, fastest
+            img.save(str(path), "PNG", 100)
+            self.from_file(path)
         return (time.perf_counter() - t0) * 1000.0
+
+    def _upload_gl(self, img) -> None:
+        if self.s.gl is None:
+            self.s.gl = GlUploader()
+            print(f"opengl uploads: {self.s.gl.info}")
+        self._tex = self.s.gl.texture(img, self._tex)
+        t = openvr.Texture_t()
+        t.handle = int(self._tex.textureId())
+        t.eType = openvr.TextureType_OpenGL
+        t.eColorSpace = openvr.ColorSpace_Auto
+        self.ov.setOverlayTexture(self.h, t)
+        if self.gl_flip and not self._flip_set:
+            bounds = openvr.VRTextureBounds_t()
+            bounds.uMin, bounds.uMax, bounds.vMin, bounds.vMax = 0.0, 1.0, 1.0, 0.0
+            self.ov.setOverlayTextureBounds(self.h, bounds)
+            self._flip_set = True
+
+    def _upload_raw(self, img) -> None:
+        from PySide6.QtGui import QImage
+        rgba = img.convertToFormat(QImage.Format_RGBA8888)
+        data = bytes(rgba.constBits())
+        buf = (ctypes.c_char * len(data)).from_buffer_copy(data)
+        self.ov.setOverlayRaw(self.h, buf, rgba.width(), rgba.height(), 4)
 
     def mouse_input(self, w: int, h: int) -> None:
         self.ov.setOverlayInputMethod(self.h, openvr.VROverlayInputMethod_Mouse)
@@ -346,6 +433,8 @@ class Overlay:
             self.ov.destroyOverlay(self.h)
         except openvr.OpenVRError:
             pass
+        for path in self._files:
+            path.unlink(missing_ok=True)
 
 
 class Stats:

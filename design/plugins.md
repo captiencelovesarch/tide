@@ -491,14 +491,16 @@ tooltips: those open real desktop windows, invisible in vr.
 **drawing it.** `panel.render(qimage)` on the GUI thread, then hand it to
 steamvr:
 
-1. *phase 1:* `IVROverlay.setOverlayRaw(handle, bytes, w, h, 4)` with an
-   rgba `QImage`. simple, cpu copy. only redraw when something changed (song,
-   state, lyric line, a press), capped at 30 fps while a lyric sweep runs and
-   ~2 fps otherwise. valve calls raw slow; at these rates it should be fine,
-   measure in the spike.
-2. *phase 2, if needed:* a `QOpenGLContext` + `QOffscreenSurface`, upload
-   to a gl texture, `setOverlayTexture` with `TextureType_OpenGL`. steamvr
-   on linux accepts gl overlay textures (OVR Advanced Settings does this).
+1. **not `setOverlayRaw`.** the spike (2026-10-18) crashed steamvr's
+   compositor with it: 800×480 frames a few times a second hit
+   `ASSERT: "Vulkan transfer ring buffer overflow"` and vrcompositor
+   aborted. our side reported success the whole time.
+2. *the plan:* a `QOpenGLContext` + `QOffscreenSurface`, upload to a gl
+   texture, `setOverlayTexture` with `TextureType_OpenGL`. ~1 ms per frame
+   on our side (wayland, gl 4.6). whether steamvr takes a texture from a
+   wayland (egl) context is the spike's next question.
+3. *fallback:* `setOverlayFromFile` with a png per change, ~8 ms per frame
+   on our side, capped at 10 fps. proven safe for a static card.
 
 **placing it.**
 

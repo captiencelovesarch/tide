@@ -586,7 +586,22 @@ replaces phases 4 and 5 in `plugins.md`.
 - [ ] brightness that follows the game's frame
 - [ ] "feel the kick" haptics
 - [ ] streaming speech (words while you talk) if the first engine can't
-- [ ] gl texture upload if raw uploads are too slow with this many overlays
+- [ ] (moved: gl textures are the default now, see spike findings)
+
+## spike findings
+
+running log from `tools/vr-spike`. each one changes the plan above.
+
+- **2026-10-18 · `check`:** index at 144 hz, input bindings load (after a
+  few seconds the first time), finger curl and bone tips live on both
+  hands, 27-point lens outline per eye. pinky reads 0.45–0.6 curled while
+  middle and ring read ~0, so the "open hand" rule may need to skip the
+  pinky.
+- **2026-10-18 · `panel`:** `setOverlayRaw` crashed vrcompositor
+  (`Vulkan transfer ring buffer overflow`) two seconds in. raw uploads are
+  out; gl textures are the plan. one thread ticked steadily at 144 hz
+  (6.24 ms, p95 6.31). a separate pyside teardown segfault at exit led to
+  an explicit shutdown order (overlays, openvr, then qt objects).
 
 ## risks, on top of plugins.md
 
@@ -600,7 +615,7 @@ replaces phases 4 and 5 in `plugins.md`.
 | photosensitivity | the 3-flashes-a-second cap is not a setting, it's always on |
 | wav2vec2 transcripts too rough to search with | the spike measures it. sherpa-onnx whisper is the fallback |
 | the mic hears the game | push to talk keeps clips short, music ducks. game audio can't be ducked by tide |
-| 25 overlays × raw uploads too slow | most are tiny and rarely change, the ring never re-uploads. measure in vr 1, gl textures in vr 6 if needed |
+| raw uploads crash the compositor (seen in the spike) | never use `setOverlayRaw`. gl textures, png files as the fallback. the ring uploads once by file |
 | flicks and throws feel wrong | velocity comes straight from steamvr (`vVelocity` on each pose). thresholds are tuned against recordings |
 | motion sickness | nothing big is head-locked (the ring stays at the edge, like a comfort vignette), soft pulse by default, intensity off means no motion at all |
 

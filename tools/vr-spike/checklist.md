@@ -54,10 +54,25 @@ the "tide vr spike" binding.
       the **drag** slider follows the laser
 - [ ] if clicks land upside down (you point at the top, the bottom reacts),
       rerun with `--no-flip` and note it
-- [ ] the bottom line shows `tick p95` and `upload` times. note the upload
-      mode (`raw` or `png`)
+- [ ] the bottom line shows `tick p95` and `upload` times (`file` mode)
 - [ ] click both sticks together three times, fast: both hands buzz and the
       panel jumps back in front of you
+
+now the upload the plugin actually wants, an opengl texture:
+
+```
+./run.sh panel --upload gl
+```
+
+- [ ] the panel shows up and clicks still work
+- [ ] upside down → rerun with `--upload gl --gl-flip`
+- [ ] if it's blank or steamvr hiccups, note it. the terminal prints
+      `gl upload failed: ...` and the panel falls back to files on its own
+- [ ] when you close it the terminal ends with `teardown: qt events
+      drained` and no segfault. if it crashes, copy the last lines
+
+(`--upload raw` is still there but don't use it: on 2026-10-18 it crashed
+steamvr's compositor within two seconds.)
 
 then with a game (vivecraft):
 
