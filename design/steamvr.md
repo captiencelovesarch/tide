@@ -624,6 +624,12 @@ running log from `tools/vr-spike`. each one changes the plan above.
   one gotcha: re-uploading with `QOpenGLTexture.setData(QImage)` re-runs
   texture setup and throws a warning plus `GL_INVALID_OPERATION` per frame
   (pixels still land). redraws use `setData(RGBA, UInt8, bits)` instead.
+- **2026-10-19 · gl textures come out upside down:** qimage rows run
+  top-down, gl reads them bottom-up, steamvr shows gl textures the gl way.
+  it also hid the clicks: the laser maps to where a button really is, so
+  clicking where the flipped picture showed it hit empty space. the fix is
+  free: flip the texture bounds (`setOverlayTextureBounds`, v 1→0), on by
+  default now. mouse coordinates don't change with it.
 
 ## risks, on top of plugins.md
 
