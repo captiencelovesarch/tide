@@ -195,6 +195,8 @@ class PanelLoop:
         self.legacy: dict[str, int | None] = {side: None for side in SIDES}
         self.stick_sources_seen = {"action": False, "legacy": False}
         self._said_active = False
+        self._scrolls = 0
+        self._last_scroll = 0.0
         self._started = time.perf_counter()
         self.sticks = {side: False for side in SIDES}
         self.action_sticks = {side: False for side in SIDES}
@@ -275,9 +277,14 @@ class PanelLoop:
                 self.fwd.release()
                 self._log("laser up")
             elif kind == openvr.VREvent_ScrollSmooth:
-                self._log("scroll")
+                # the stick sends dozens a second; one line per burst
+                self._scrolls += 1
+                self._last_scroll = now
             self.dirty = True
 
+        if self._scrolls and now - self._last_scroll > 0.3:
+            self._log(f"scroll ×{self._scrolls}")
+            self._scrolls = 0
         if not self._said_active and now - self._started >= 2.0:
             self._said_active = True
             active = {side: self.s.stick_active(side) for side in SIDES}

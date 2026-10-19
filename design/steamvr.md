@@ -648,6 +648,16 @@ running log from `tools/vr-spike`. each one changes the plan above.
   (`steamvr/globalActionSetPriority`, off by default, advanced settings
   only) and takes those buttons away from the game. if neither works without the developer setting, the stick backup
   is out and the gestures carry summoning alone.
+- **2026-10-19 · global input, no game running:** with
+  `steamvr/globalActionSetPriority` on and our action set at global
+  priority, the stick actions still read `inactive` with no game open.
+  still to test with vivecraft running, which is the case that matters.
+- **2026-10-19 · the laser takes the stick too:** while the laser points
+  at the panel, steamvr turns a stick click into a mouse click (same as
+  the trigger) and stick up/down into smooth scroll events. that's the
+  overlay mouse layer, not our actions. free scrolling for the up next
+  list and lyrics; nothing for summoning, since it only works while
+  you're already pointing at the panel.
 - **2026-10-19 · laser input confirmed:** with only the texture flipped,
   click, hold and drag all work on the gl panel. the laser path (overlay
   mouse events → synthesized qt mouse events) is proven.
