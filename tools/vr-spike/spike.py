@@ -55,9 +55,20 @@ def cmd_check(args) -> None:
     import openvr
     from vrcore import Session, out_dir, to_np
     s = Session()
-    for _ in range(30):         # a few ticks so action state is live
+    # the first time steamvr sees our action manifest it takes a few seconds
+    # to load the default index binding. wait for finger data on every hand
+    # that's switched on, up to args.wait seconds.
+    print(f"waiting up to {args.wait:.0f} s for controller input", end="", flush=True)
+    deadline = time.monotonic() + args.wait
+    while True:
         s.update()
-        time.sleep(0.02)
+        hands = [side for side in SIDES if s.controller_index(side) is not None]
+        ready = all(s.curls(side) is not None for side in hands)
+        if (ready and hands) or time.monotonic() >= deadline or s.input is None:
+            break
+        print(".", end="", flush=True)
+        time.sleep(0.25)
+    print()
     report = {
         "hmd": s.hmd_model(),
         "display_hz": s.display_hz(),
@@ -79,6 +90,10 @@ def cmd_check(args) -> None:
             "bone_tips": s.bone_tips(side),
             "stick_clicked": s.stick(side),
         }
+    for side in SIDES:
+        if report["controllers"][side] is None:
+            report["controllers"][side] = "not found: switched off, asleep, or out of view?"
+    report["input_errors"] = dict(s.input_errors)
     for eye, name in ((openvr.Eye_Left, "left"), (openvr.Eye_Right, "right")):
         mesh = s.system.getHiddenAreaMesh(eye, openvr.k_eHiddenAreaMesh_LineLoop)
         report["eyes"][name] = {
@@ -722,7 +737,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="run.sh", description="tide vr spike (design/steamvr.md, vr 0)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("check", help="what steamvr reports about your setup").set_defaults(func=cmd_check)
+    p = sub.add_parser("check", help="what steamvr reports about your setup")
+    p.add_argument("--wait", type=float, default=8.0, help="seconds to wait for finger data")
+    p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("png", help="a static picture in front of you")
     p.add_argument("file", nargs="?")

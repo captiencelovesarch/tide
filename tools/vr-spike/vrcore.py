@@ -100,6 +100,9 @@ class Session:
         self.quit = False
         self.input = None
         self.input_error = ""
+        # last error per input read ("curl left": "InputError_NoData"), so a
+        # null in a report comes with a reason
+        self.input_errors: dict[str, str] = {}
         if with_input:
             try:
                 self._init_input()
@@ -168,8 +171,14 @@ class Session:
             return False
         try:
             d = self.input.getDigitalActionData(self.actions[f"stick_{side}"], NO_DEVICE)
-        except openvr.OpenVRError:
+        except openvr.OpenVRError as exc:
+            self.input_errors[f"stick {side}"] = type(exc).__name__
             return False
+        if not d.bActive:
+            # inactive = no binding drives it (yet)
+            self.input_errors[f"stick {side}"] = "not active (no binding loaded)"
+        else:
+            self.input_errors.pop(f"stick {side}", None)
         return bool(d.bActive and d.bState)
 
     def curls(self, side: str) -> list[float] | None:
@@ -179,8 +188,10 @@ class Session:
         try:
             s = self.input.getSkeletalSummaryData(
                 self.actions[f"hand_{side}"], openvr.VRSummaryType_FromDevice)
-        except openvr.OpenVRError:
+        except openvr.OpenVRError as exc:
+            self.input_errors[f"curl {side}"] = type(exc).__name__
             return None
+        self.input_errors.pop(f"curl {side}", None)
         return [round(float(c), 3) for c in s.flFingerCurl]
 
     def action_pose(self, side: str) -> np.ndarray | None:
@@ -207,8 +218,10 @@ class Session:
             self.input.getSkeletalBoneData(
                 self.actions[f"hand_{side}"], openvr.VRSkeletalTransformSpace_Model,
                 openvr.VRSkeletalMotionRange_WithoutController, self.bones)
-        except openvr.OpenVRError:
+        except openvr.OpenVRError as exc:
+            self.input_errors[f"bones {side}"] = type(exc).__name__
             return None
+        self.input_errors.pop(f"bones {side}", None)
         out = {}
         for name, i in (("wrist", BONE_WRIST), ("thumb", BONE_THUMB_TIP), ("index", BONE_INDEX_TIP)):
             v = self.bones[i].position.v

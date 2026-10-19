@@ -21,7 +21,11 @@ every step except `replay`, `score` and the `--desktop` / `--preview` modes.
 ./run.sh check
 ```
 
-- [ ] `input` says `ok`
+both controllers on and in your hands (finger tracking needs hands on the
+grips). it waits up to 8 s for finger data the first time; `--wait 20` if
+that's not enough.
+
+- [ ] `input` says `ok` and `input_errors` is empty
 - [ ] both controllers show `"type": "knuckles"` and a `finger_curl` list
 - [ ] `outline_points` is more than 0 for both eyes (index has a nose cut,
       so expect a few dozen)
