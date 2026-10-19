@@ -268,14 +268,22 @@ class Session:
 # ---------- overlays ----------
 
 # how a QImage gets to steamvr:
-#   file  setOverlayFromFile on a png. what `png` proved works.
-#   gl    an opengl texture handed over with setOverlayTexture. what the
-#         plugin should use, if linux steamvr takes it.
-#   raw   setOverlayRaw. crashed vrcompositor on linux (2026-10-18:
-#         "Vulkan transfer ring buffer overflow; transfer size 2315040")
-#         with 800x480 frames a few times a second. kept only to re-test.
-UPLOAD_MODES = ("file", "gl", "raw")
-MAX_FPS = {"file": 10, "gl": 30, "raw": 2}
+#   gl    an opengl texture handed over with setOverlayTexture. vrclient
+#         copies it into a shared vulkan image in our process
+#         (CVRSharedGLTexture, GL_EXT_memory_object_fd), the path wayvr's
+#         constant 2560x1440 updates take without trouble. the plan.
+#   file  setOverlayFromFile on a png. one upload is fine (`png`), but at
+#         10 fps it wrapped the compositor's transfer ring and vrcompositor
+#         segfaulted (2026-10-19). capped at 1 fps, ask for it explicitly.
+#   raw   setOverlayRaw. crashed vrcompositor on the first panel run
+#         (2026-10-18, "Vulkan transfer ring buffer overflow"). re-test only.
+UPLOAD_MODES = ("gl", "file", "raw")
+MAX_FPS = {"gl": 30, "file": 1, "raw": 1}
+# an upload that blocks this long means the compositor is gone: after it
+# crashed, every setOverlayFromFile waited ~1 s for a reply that never came
+STALL_S = 0.5
+GL_INTEROP_EXTENSIONS = ("GL_EXT_memory_object", "GL_EXT_memory_object_fd",
+                         "GL_EXT_semaphore", "GL_EXT_semaphore_fd")
 
 
 class GlUploader:
@@ -295,6 +303,11 @@ class GlUploader:
         self.info = (f"{QGuiApplication.platformName()} · "
                      f"{'gles' if self.ctx.isOpenGLES() else 'gl'} "
                      f"{fmt.majorVersion()}.{fmt.minorVersion()}")
+        # vrclient needs these to share our texture with its vulkan side;
+        # without them it falls back or fails (see CVRSharedGLTexture)
+        self.missing = [e for e in GL_INTEROP_EXTENSIONS if not self.ctx.hasExtension(e.encode())]
+        if self.missing:
+            self.info += f" · missing {', '.join(self.missing)}"
         self.textures: list = []
 
     def texture(self, img, old=None):
@@ -325,7 +338,7 @@ class GlUploader:
 
 class Overlay:
     def __init__(self, session: Session, key: str, name: str, width_m: float,
-                 upload: str = "file") -> None:
+                 upload: str = "gl") -> None:
         if upload not in UPLOAD_MODES:
             raise ValueError(upload)
         self.s = session

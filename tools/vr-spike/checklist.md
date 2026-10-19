@@ -45,34 +45,31 @@ the "tide vr spike" binding.
 
 ## 3. laser on a real qt panel (15 min)
 
+if steamvr crashed last time, restart it first.
+
 ```
 ./run.sh panel
 ```
 
+the panel goes up as an opengl texture (the only upload that didn't crash
+steamvr's compositor in testing; `raw` and `file` both did).
+
+- [ ] the panel shows up and stays up for a couple of minutes
+- [ ] upside down → rerun with `--gl-flip`
 - [ ] steamvr's laser shows up when you point at the panel
 - [ ] **click** counts up, the **hold** log says how long you held it,
       the **drag** slider follows the laser
 - [ ] if clicks land upside down (you point at the top, the bottom reacts),
       rerun with `--no-flip` and note it
-- [ ] the bottom line shows `tick p95` and `upload` times (`file` mode)
+- [ ] the bottom line shows `tick p95` and `upload` times
 - [ ] click both sticks together three times, fast: both hands buzz and the
       panel jumps back in front of you
-
-now the upload the plugin actually wants, an opengl texture:
-
-```
-./run.sh panel --upload gl
-```
-
-- [ ] the panel shows up and clicks still work
-- [ ] upside down → rerun with `--upload gl --gl-flip`
-- [ ] if it's blank or steamvr hiccups, note it. the terminal prints
-      `gl upload failed: ...` and the panel falls back to files on its own
 - [ ] when you close it the terminal ends with `teardown: qt events
       drained` and no segfault. if it crashes, copy the last lines
 
-(`--upload raw` is still there but don't use it: on 2026-10-18 it crashed
-steamvr's compositor within two seconds.)
+if the terminal says `stopping uploads: ...`, the spike noticed a problem
+and stopped feeding steamvr. copy that line. it never falls back to another
+upload method on its own.
 
 then with a game (vivecraft):
 
@@ -97,6 +94,9 @@ then with a game (vivecraft):
 ```
 ./run.sh ring
 ```
+
+(uses opengl textures too. if the panel needed `--gl-flip`, the ring does
+as well.)
 
 a yellow grainy ring at the edge of your view pulsing at 120 bpm. the thin
 white line is the exact outline steamvr reports for each eye, the small

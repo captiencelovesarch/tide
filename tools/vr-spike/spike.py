@@ -162,7 +162,7 @@ class PanelLoop:
     and the stick triple-click (brings the panel back in front of you)."""
 
     def __init__(self, s, widget, *, key: str, attach: str | None, flip: bool,
-                 upload: str = "file", gl_flip: bool = False) -> None:
+                 upload: str = "gl", gl_flip: bool = False) -> None:
         from PySide6.QtCore import QTimer, Qt
         from panels import Forwarder, H, W
         from vrcore import Overlay, Stats
@@ -172,6 +172,7 @@ class PanelLoop:
                           upload=upload)
         self.ov.gl_flip = gl_flip
         self.upload_errors: list[str] = []
+        self.uploads_stopped = ""
         self.ov.mouse_input(W, H)
         self.fwd = Forwarder(widget)
         self.dirty = True
@@ -270,22 +271,32 @@ class PanelLoop:
                     f"p95 {u.get('p95', 0)} ms · {self.ov.mode}")
             self.dirty = True
 
-        from vrcore import MAX_FPS
-        if self.dirty and now - self._last_upload >= 1 / MAX_FPS[self.ov.mode]:
+        from vrcore import MAX_FPS, STALL_S
+        if (self.dirty and not self.uploads_stopped
+                and now - self._last_upload >= 1 / MAX_FPS[self.ov.mode]):
             img = QImage(self.W, self.H, QImage.Format_RGBA8888)
             img.fill(Qt.transparent)
             self.w.render(img)
             try:
-                self.upload_ms.add(self.ov.upload(img))
+                ms = self.ov.upload(img)
             except Exception as exc:  # noqa: BLE001 - any upload failure is a finding
-                msg = f"{self.ov.mode} upload failed: {type(exc).__name__}: {exc}"
-                self.upload_errors.append(msg)
-                print(msg, flush=True)
-                if self.ov.mode != "file":
-                    self.ov.mode = "file"
-                    self._log("switched to file uploads")
+                # no fallback to another mode: falling back to files is
+                # what took the compositor down on 2026-10-19
+                self._stop_uploads(f"{self.ov.mode} upload failed: {type(exc).__name__}: {exc}")
+            else:
+                self.upload_ms.add(ms)
+                if ms / 1000.0 > STALL_S:
+                    self._stop_uploads(f"an upload took {ms:.0f} ms: steamvr's compositor "
+                                       "stopped answering (crashed?)")
+                    QApplication.quit()
             self._last_upload = now
             self.dirty = False
+
+    def _stop_uploads(self, why: str) -> None:
+        self.uploads_stopped = why
+        self.upload_errors.append(why)
+        print(f"stopping uploads: {why}", flush=True)
+        self._log("uploads stopped, see terminal")
 
     def close(self) -> None:
         """stop ticking and take the overlay down, before openvr shuts down."""
@@ -298,6 +309,7 @@ class PanelLoop:
             "tick_interval_ms": self.tick_ms.summary(),
             "upload_ms": self.upload_ms.summary(),
             "upload_mode": self.ov.mode,
+            "uploads_stopped": self.uploads_stopped,
             "upload_errors": self.upload_errors[:5],
             "gl": self.s.gl.info if self.s.gl is not None else None,
             "input": "ok" if self.s.input is not None else f"failed: {self.s.input_error}",
@@ -350,8 +362,8 @@ def cmd_panel(args) -> None:
     from vrcore import Session
     _hidden(panel)
     s = Session()
-    if args.upload == "raw":
-        print("warning: raw uploads crashed vrcompositor on 2026-10-18. here to re-test only")
+    if args.upload in ("raw", "file"):
+        print(f"warning: {args.upload} uploads crashed vrcompositor before. re-test only")
     loop = PanelLoop(s, panel, key="panel", attach=args.attach, flip=not args.no_flip,
                      upload=args.upload, gl_flip=args.gl_flip)
     panel.log("point the laser here and pull the trigger")
@@ -491,14 +503,15 @@ def cmd_ring(args) -> None:
 
     overlays = []
     for i, img in enumerate(images):
-        # static images: one upload each, by file (raw would crash the
-        # compositor at this size)
-        ov = Overlay(s, f"ring{i}", f"tide spike ring {i}", width_m, upload="file")
+        # static images, uploaded once each. gl by default: four big png
+        # loads at once is the burst that wrapped the compositor's ring
+        ov = Overlay(s, f"ring{i}", f"tide spike ring {i}", width_m, upload=args.upload)
+        ov.gl_flip = args.gl_flip
         ov.flag(openvr.VROverlayFlags_SideBySide_Crossed if args.crossed
                 else openvr.VROverlayFlags_SideBySide_Parallel)
         ms = ov.upload(img)
         print(f"ring texture {i}: {img.width()}x{img.height()} in {ms:.0f} ms "
-              f"(file)")
+              f"({args.upload})")
         ov.place_on(openvr.k_unTrackedDeviceIndex_Hmd, translate(0, 0, -args.distance))
         r, g, b = (int(args.color[k:k + 2], 16) / 255 for k in (1, 3, 5))
         ov.color(r, g, b)
@@ -531,7 +544,8 @@ def cmd_ring(args) -> None:
     except KeyboardInterrupt:
         pass
     report = {"alpha_calls_per_tick_ms": call_ms.summary(), "overlays": len(overlays),
-              "upload": "file",
+              "upload": args.upload,
+              "gl": s.gl.info if s.gl is not None else None,
               "outline_from_headset": {n: e["from_headset"] for n, e in eyes.items()}}
     print(json.dumps(report, indent=2))
     _write_json(out_dir() / f"ring-{time.strftime('%Y%m%d-%H%M%S')}.json", report)
@@ -781,9 +795,10 @@ def cmd_score(args) -> None:
 # ---------- main ----------
 
 def _upload_flags(p) -> None:
-    p.add_argument("--upload", choices=("file", "gl", "raw"), default="file",
-                   help="how frames reach steamvr: file (default, safe), gl (an opengl "
-                        "texture, what the plugin wants), raw (crashed the compositor)")
+    p.add_argument("--upload", choices=("gl", "file", "raw"), default="gl",
+                   help="how frames reach steamvr: gl (default, an opengl texture), "
+                        "file (png, 1 fps; at 10 fps it crashed the compositor), "
+                        "raw (crashed the compositor)")
     p.add_argument("--gl-flip", action="store_true",
                    help="with --upload gl: use if the panel shows upside down")
 
@@ -821,6 +836,7 @@ def main() -> None:
     p.add_argument("--flip-y", action="store_true", help="use if the nose cut shows at the top")
     p.add_argument("--crossed", action="store_true", help="use if each eye shows the other's ring")
     p.add_argument("--no-guide", action="store_true", help="hide the outline line and center cross")
+    _upload_flags(p)
     p.set_defaults(func=cmd_ring)
 
     p = sub.add_parser("record", help="record poses with live detectors")

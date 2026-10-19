@@ -602,6 +602,18 @@ running log from `tools/vr-spike`. each one changes the plan above.
   out; gl textures are the plan. one thread ticked steadily at 144 hz
   (6.24 ms, p95 6.31). a separate pyside teardown segfault at exit led to
   an explicit shutdown order (overlays, openvr, then qt objects).
+- **2026-10-19 · `panel`, file uploads:** `setOverlayFromFile` at 10 fps
+  wrapped the compositor's transfer ring (`Ring Buffer Wrapped!`) and
+  vrcompositor segfaulted 17 s in. after that every call from our side
+  blocked ~1 s waiting for a reply: **openvr calls must stay off tide's gui
+  thread, and the plugin must notice a dead compositor** (the spike now
+  stops when an upload takes over 0.5 s).
+- **2026-10-19 · the path that should work:** wayvr updates 2560×1440
+  overlays constantly through vrclient's shared vulkan images. vrclient
+  takes an opengl texture the same way (`CVRSharedGLTexture`, needs
+  `GL_EXT_memory_object_fd` + `GL_EXT_semaphore_fd`; the rx 9070 /
+  radeonsi has both under wayland). **gl textures are the only upload the
+  plugin uses.** file uploads only for one-off static images, if at all.
 
 ## risks, on top of plugins.md
 
