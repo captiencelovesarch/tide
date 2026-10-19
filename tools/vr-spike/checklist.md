@@ -55,7 +55,7 @@ the panel goes up as an opengl texture (the only upload that didn't crash
 steamvr's compositor in testing; `raw` and `file` both did).
 
 - [ ] the panel shows up and stays up for a couple of minutes
-- [ ] upside down → rerun with `--gl-flip`
+- [ ] upside down → rerun with `--no-gl-flip` and tell me
 - [ ] steamvr's laser shows up when you point at the panel
 - [ ] **click** counts up, the **hold** log says how long you held it,
       the **drag** slider follows the laser
@@ -95,8 +95,8 @@ then with a game (vivecraft):
 ./run.sh ring
 ```
 
-(uses opengl textures too. if the panel needed `--gl-flip`, the ring does
-as well.)
+(uses opengl textures too. if the panel needed `--no-gl-flip`, the ring
+does as well.)
 
 a yellow grainy ring at the edge of your view pulsing at 120 bpm. the thin
 white line is the exact outline steamvr reports for each eye, the small

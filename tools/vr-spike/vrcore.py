@@ -354,7 +354,10 @@ class Overlay:
         self.error = ""
         self._tex = None
         self._flip_set = False
-        self.gl_flip = False
+        # qimage rows run top-down, a gl texture's bottom-up; steamvr shows
+        # gl textures the gl way, so unflipped the panel came out upside
+        # down (2026-10-19). flipping the texture bounds costs nothing.
+        self.gl_flip = True
         # two files, alternated, so steamvr never reads one we're rewriting
         self._files = [Path(tempfile.gettempdir()) / f"tide-spike-{os.getpid()}-{key}-{n}.png"
                        for n in (0, 1)]

@@ -162,7 +162,7 @@ class PanelLoop:
     and the stick triple-click (brings the panel back in front of you)."""
 
     def __init__(self, s, widget, *, key: str, attach: str | None, flip: bool,
-                 upload: str = "gl", gl_flip: bool = False) -> None:
+                 upload: str = "gl", gl_flip: bool = True) -> None:
         from PySide6.QtCore import QTimer, Qt
         from panels import Forwarder, H, W
         from vrcore import Overlay, Stats
@@ -365,7 +365,7 @@ def cmd_panel(args) -> None:
     if args.upload in ("raw", "file"):
         print(f"warning: {args.upload} uploads crashed vrcompositor before. re-test only")
     loop = PanelLoop(s, panel, key="panel", attach=args.attach, flip=not args.no_flip,
-                     upload=args.upload, gl_flip=args.gl_flip)
+                     upload=args.upload, gl_flip=not args.no_gl_flip)
     panel.log("point the laser here and pull the trigger")
     if s.input is None:
         panel.log(f"input failed: {s.input_error}")
@@ -506,7 +506,7 @@ def cmd_ring(args) -> None:
         # static images, uploaded once each. gl by default: four big png
         # loads at once is the burst that wrapped the compositor's ring
         ov = Overlay(s, f"ring{i}", f"tide spike ring {i}", width_m, upload=args.upload)
-        ov.gl_flip = args.gl_flip
+        ov.gl_flip = not args.no_gl_flip
         ov.flag(openvr.VROverlayFlags_SideBySide_Crossed if args.crossed
                 else openvr.VROverlayFlags_SideBySide_Parallel)
         ms = ov.upload(img)
@@ -743,7 +743,7 @@ def cmd_voice(args) -> None:
         _hidden(panel)
         session = Session()
         loop = PanelLoop(session, panel, key="voice", attach=None, flip=not args.no_flip,
-                         upload=args.upload, gl_flip=args.gl_flip)
+                         upload=args.upload, gl_flip=not args.no_gl_flip)
         panel.log("point at the mic button, hold the trigger, talk, let go")
         app.exec()
     if state["talking"]:
@@ -799,8 +799,9 @@ def _upload_flags(p) -> None:
                    help="how frames reach steamvr: gl (default, an opengl texture), "
                         "file (png, 1 fps; at 10 fps it crashed the compositor), "
                         "raw (crashed the compositor)")
-    p.add_argument("--gl-flip", action="store_true",
-                   help="with --upload gl: use if the panel shows upside down")
+    p.add_argument("--no-gl-flip", action="store_true",
+                   help="with --upload gl: use if the panel shows upside down "
+                        "(gl textures are flipped by default)")
 
 
 def main() -> None:
