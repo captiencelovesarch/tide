@@ -28,6 +28,7 @@ QPushButton {
 QPushButton:hover { background: #3a3a3a; }
 QPushButton:pressed { background: #ffd400; color: #101010; }
 QPushButton#mic { min-height: 120px; border-width: 4px; }
+QPushButton#close { min-width: 64px; max-width: 64px; min-height: 64px; max-height: 64px; padding: 0; }
 QPushButton#mic:pressed { background: #e0312b; color: #ffffff; }
 QSlider::groove:horizontal { height: 10px; background: #3a3a3a; }
 QSlider::handle:horizontal { width: 36px; margin: -16px 0; background: #ffd400; }
@@ -121,7 +122,10 @@ class _Base(QWidget):
 
 
 class SpikePanel(_Base):
-    """buttons to click, one to hold, a slider to drag, a live log."""
+    """buttons to click, one to hold, a slider to drag, a live log, and an
+    x that closes it."""
+
+    close_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -131,6 +135,14 @@ class SpikePanel(_Base):
         title = QLabel("tide · vr spike")
         title.setObjectName("big")
         title.setFont(_font(34, bold=True))
+        self.close_btn = QPushButton("x")
+        self.close_btn.setObjectName("close")
+        self.close_btn.setFont(_font(28, bold=True))
+        # a big target (sized in QSS): a laser at arm's length wobbles
+        self.close_btn.clicked.connect(self.close_requested)
+        top = QHBoxLayout()
+        top.addWidget(title, 1)
+        top.addWidget(self.close_btn, 0, Qt.AlignTop)
         self.focus_label = QLabel("focus: ?")
         self.focus_label.setObjectName("dim")
         self.focus_label.setFont(_font(18))
@@ -167,7 +179,7 @@ class SpikePanel(_Base):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 18, 24, 14)
         lay.setSpacing(10)
-        lay.addWidget(title)
+        lay.addLayout(top)
         lay.addWidget(self.focus_label)
         lay.addLayout(row)
         lay.addLayout(srow)

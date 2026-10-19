@@ -6,6 +6,7 @@ pyopenvr. checklist.md says what to do in the headset and what to note.
     ./run.sh png [file.png]             a static picture floating in front of you
     ./run.sh panel                      a live qt panel: laser click, hold, drag
     ./run.sh panel --attach left        the same panel riding on your left hand
+    ./run.sh watch                      a watch on your wrist that opens the panel
     ./run.sh ring                       the lens-shaped ring, pulsing at 120 bpm
     ./run.sh record --label headphones  record poses (+ live gesture detectors)
     ./run.sh replay [files or dirs]     run the detectors over recordings
@@ -167,7 +168,7 @@ class PanelLoop:
     you, the summon backup from design/steamvr.md)."""
 
     def __init__(self, s, widget, *, key: str, attach: str | None, invert_clicks: bool = False,
-                 upload: str = "gl", gl_flip: bool = True) -> None:
+                 upload: str = "gl", gl_flip: bool = True, start_open: bool = True) -> None:
         from PySide6.QtCore import QTimer, Qt
         from panels import Forwarder, H, W
         from vrcore import Overlay, Stats
@@ -191,8 +192,10 @@ class PanelLoop:
         widget.dirty.connect(self._mark)
         self.tick_ms, self.upload_ms = Stats(), Stats()
         self.triple = TripleClick()
-        self.visible = True
+        self.visible = start_open
         self.legacy: dict[str, int | None] = {side: None for side in SIDES}
+        self.opened: list[str] = []
+        self.closed: list[str] = []
         self.stick_sources_seen = {"action": False, "legacy": False}
         self._said_active = False
         self._scrolls = 0
@@ -205,8 +208,11 @@ class PanelLoop:
         self._last_tick = self._last_upload = self._last_status = time.perf_counter()
         self.hz = s.display_hz()
         widget.show()           # WA_DontShowOnScreen keeps it off the desktop
-        self.respawn()
-        self.ov.show()
+        if start_open:
+            self.respawn()
+            self.ov.show()
+        if hasattr(widget, "close_requested"):
+            widget.close_requested.connect(lambda: self.close_panel("x"))
         self.timer = QTimer(widget)     # parented: never outlives the panel
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self.tick)
@@ -231,21 +237,40 @@ class PanelLoop:
             self.ov.place(spawn_in_front(hmd))
 
     def toggle(self) -> None:
-        """the stick triple-click: open in front of you, or close."""
-        self.visible = not self.visible
+        """the stick triple-click (which never reaches an overlay, see the
+        spike findings; kept for the record)."""
         if self.visible:
-            self.respawn()
-            self.ov.show()
-            self.dirty = True
-            for side in SIDES:
-                self.s.buzz(side, 0.08, 120, 0.9)
+            self.close_panel("stick triple-click")
         else:
-            self.ov.hide()
-            self.fwd.leave()
-            # two short buzzes for closing, one long for opening
-            for side in SIDES:
-                self.s.buzz(side, 0.03, 200, 0.7)
-        self._log(f"stick triple-click: panel {'open' if self.visible else 'closed'}")
+            self.open_panel("stick triple-click")
+
+    def open_panel(self, how: str, at=None) -> None:
+        """show it: in front of you, or at a given pose."""
+        if self.visible:
+            return
+        self.visible = True
+        if at is not None:
+            self.ov.place(at)
+        else:
+            self.respawn()
+        self.ov.show()
+        self.dirty = True
+        for side in SIDES:
+            self.s.buzz(side, 0.08, 120, 0.9)
+        self.opened.append(how)
+        self._log(f"panel opened by {how}")
+
+    def close_panel(self, how: str) -> None:
+        if not self.visible:
+            return
+        self.visible = False
+        self.ov.hide()
+        self.fwd.leave()
+        # two short buzzes for closing, one long for opening
+        for side in SIDES:
+            self.s.buzz(side, 0.03, 200, 0.7)
+        self.closed.append(how)
+        print(f"{time.strftime('%H:%M:%S')} panel closed by {how}", flush=True)
 
     def _log(self, text: str) -> None:
         log = getattr(self.w, "log", None)
@@ -371,6 +396,8 @@ class PanelLoop:
             "input": "ok" if self.s.input is not None else f"failed: {self.s.input_error}",
             "focus_apps_seen": self.focus_seen,
             "stick_sources_seen": self.stick_sources_seen,
+            "opened_by": self.opened,
+            "closed_by": self.closed,
             "global_input": self.s.global_input,
             "attach": self.attach,
             "y_flipped": self.flip,
@@ -432,6 +459,30 @@ def cmd_panel(args) -> None:
     report["clicks"] = panel.clicks
     print(json.dumps(report, indent=2))
     _write_json(out_dir() / f"panel-{time.strftime('%Y%m%d-%H%M%S')}.json", report)
+    _teardown(loop, s, panel)
+
+
+# ---------- watch ----------
+
+def cmd_watch(args) -> None:
+    app = _qt_app()
+    from panels import SpikePanel
+    from paths import out_dir
+    from vrcore import Session
+    from watch import Watch
+    panel = SpikePanel()
+    _hidden(panel)
+    s = Session()
+    loop = PanelLoop(s, panel, key="panel", attach=None, start_open=False)
+    watch = Watch(s, loop, args.hand)
+    loop.on_tick = watch.tick
+    print(f"raise your {args.hand} wrist and look at it. poke the watch with your other "
+          "index finger or laser it. the x closes the panel. ctrl-c ends it", flush=True)
+    app.exec()
+    report = loop.report() | watch.report()
+    print(json.dumps(report, indent=2))
+    _write_json(out_dir() / f"watch-{time.strftime('%Y%m%d-%H%M%S')}.json", report)
+    watch.ov.destroy()
     _teardown(loop, s, panel)
 
 
@@ -633,6 +684,9 @@ def cmd_record(args) -> None:
     print(f"recording for {args.seconds} s at {hz:.0f} hz → {path}")
 
     count = 0
+    with_curl = {side: 0 for side in SIDES}
+    with_pose = {side: 0 for side in SIDES}
+    focus_seen: list[str] = []
     t0 = time.perf_counter()
     next_t = t0
     last_focus = 0.0
@@ -661,9 +715,17 @@ def cmd_record(args) -> None:
                 sample = Sample(now, s.hmd(), hands, sticks)
                 f.write(json.dumps(sample.to_json()) + "\n")
                 count += 1
+                for side in SIDES:
+                    if hands[side].curl is not None:
+                        with_curl[side] += 1
+                    if hands[side].pose is not None:
+                        with_pose[side] += 1
                 if now - last_focus >= 5.0:
                     last_focus = now
-                    f.write(json.dumps({"focus": s.focus_app(), "at": round(now - t0, 2)}) + "\n")
+                    focus = s.focus_app()
+                    if focus not in focus_seen:
+                        focus_seen.append(focus)
+                    f.write(json.dumps({"focus": focus, "at": round(now - t0, 2)}) + "\n")
                 for det in detectors:
                     if det.feed(sample):
                         at = round(now - t0, 2)
@@ -681,6 +743,13 @@ def cmd_record(args) -> None:
         time.sleep(0.25)
     duration = time.perf_counter() - t0
     print(f"\n{count} samples over {duration:.0f} s ({count / max(duration, 1e-6):.0f} hz)")
+    print(f"  focus: {', '.join(focus_seen) or '?'}")
+    for side in SIDES:
+        n = max(count, 1)
+        print(f"  {side} hand: position in {100 * with_pose[side] / n:.0f}% of samples, "
+              f"finger tracking in {100 * with_curl[side] / n:.0f}%")
+    if s.input_errors:
+        print(f"  input errors: {s.input_errors}")
     for name, times in fires.items():
         print(f"  {name}: fired {len(times)}×")
     print(f"saved {path}")
@@ -892,6 +961,10 @@ def main() -> None:
     p.add_argument("--snapshot", metavar="PNG", help="render the panel to a file, no vr")
     _upload_flags(p)
     p.set_defaults(func=cmd_panel)
+
+    p = sub.add_parser("watch", help="a watch on your wrist that opens the panel")
+    p.add_argument("--hand", choices=SIDES, default="left", help="which wrist (default left)")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("ring", help="the lens-shaped ring")
     p.add_argument("--distance", type=float, default=2.0, help="meters out (default 2)")

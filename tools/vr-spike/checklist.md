@@ -100,6 +100,40 @@ then with a game (vivecraft):
 - [ ] the panel rides on your left controller. still clickable with the
       right hand's laser?
 
+## 3b. opening it without buttons (15 min)
+
+stick clicks never reach an overlay while a game has focus, so the panel
+opens from things that do: tracking, and laser clicks on our own overlays.
+
+first, does finger tracking reach us inside a game? with vivecraft
+running and focused:
+
+```
+./run.sh record --label probe --seconds 20
+```
+
+- [ ] the summary at the end says `finger tracking in N%` per hand. near
+      100% means the headphones gesture can check for an open hand in
+      game; 0% means it has to work from position alone
+
+then the watch:
+
+```
+./run.sh watch
+```
+
+- [ ] raise your left wrist and look at it: a small round "tide" watch
+      appears on it within a moment, and goes when you look away
+- [ ] poke it with your right index finger: the panel opens in front of
+      you. the terminal says `panel opened by watch poke (skeleton)` or
+      `(controller)`
+- [ ] the x in the panel's corner closes it; the watch is back next time
+      you look at your wrist
+- [ ] laser-click the watch instead of poking: opens too
+- [ ] the terminal prints how far your fingertip is from the watch once a
+      second. if a poke right on it doesn't open, note the closest number
+- [ ] try it with vivecraft running too
+
 ## 4. the ring (10 min)
 
 ```
