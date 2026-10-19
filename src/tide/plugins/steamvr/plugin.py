@@ -25,11 +25,15 @@ class SteamVr:
         self.panel_open = False
         self.watch_up = False
         self._last_ring = "breathing"
+        self._eyes = None                 # steamvr's lens outlines, once connected
+        self._ring_colors = None          # from the current cover
+        self._ring_art = ""
+        self._ring_drawn = False
         # every qt object here is handed to ctx.adopt: tide deletes them
         # right after stop(), while qt is still whole
         self.panel = ctx.adopt(VrPanel(ctx))
         self.panel.show()          # WA_DontShowOnScreen keeps it off the desktop
-        self.fwd = Forwarder(self.panel)
+        self.fwd = Forwarder(self.panel, on_change=self._dirty)
 
         self.bridge = ctx.adopt(VrBridge())
         self.bridge.status.connect(self._status)
@@ -38,6 +42,10 @@ class SteamVr:
         self.bridge.panel_closed.connect(self._closed)
         self.bridge.watch_visible.connect(self._watch_visible)
         self.bridge.lens.connect(self._lens)
+        self.bridge.panel_scroll.connect(self.fwd.scroll)
+        self.bridge.keyboard_text.connect(self.panel.search.typing)
+        self.bridge.keyboard_done.connect(self.panel.search.submit)
+        self.bridge.keyboard_closed.connect(lambda: self.panel.search.typing(self.panel.search.query))
 
         # qt wants offscreen surfaces made on the gui thread; the vr thread
         # makes its opengl context over this one
@@ -49,13 +57,16 @@ class SteamVr:
         self._redraw.setSingleShot(True)
         self._redraw.setInterval(FRAME_MS)
         self._redraw.timeout.connect(self._send_panel)
+        self._listen_tick = ctx.adopt(QTimer())
+        self._listen_tick.setInterval(250)
+        self._listen_tick.timeout.connect(self._listening)
         self._tick = ctx.adopt(QTimer())
         self._tick.setInterval(TICK_MS)
         self._tick.timeout.connect(self._on_tick)
         self._tick.start()
 
         pb, q = ctx.playback, ctx.queue
-        pb.track_changed.connect(lambda _t: self._refresh())
+        pb.track_changed.connect(self._track_changed)
         pb.state_changed.connect(self._state)
         pb.liked_changed.connect(lambda _l: self._refresh())
         pb.position_changed.connect(self._position)
@@ -69,12 +80,14 @@ class SteamVr:
         self.panel.close_requested.connect(lambda: self.thread.post("close", "x"))
         self.panel.setting_changed.connect(self._set)
         self.panel.now.ring.clicked.connect(self._toggle_ring)
+        self.panel.search.wants_keyboard.connect(lambda text: self.thread.post("keyboard", text))
+        self.panel.search.mic_down.connect(self._mic_down)
+        self.panel.search.mic_up.connect(self._mic_up)
 
         self.thread = VrThread(self.bridge, self.surface, self._vr_settings())
         self.thread.start()
         self._apply_settings()
         self.thread.post("playing", pb.state() == "playing")
-        self.thread.post("ring_color", self._accent())
         ctx.set_status("waiting for steamvr")
 
     def stop(self) -> None:
@@ -111,6 +124,9 @@ class SteamVr:
         if s["ring"] != "off":
             self._last_ring = s["ring"]
             self.ctx.beats.subscribe()
+            if not self._ring_drawn:
+                self._ring_drawn = True
+                self._draw_ring()
         else:
             self.ctx.beats.unsubscribe()
         if s["lyrics"]:
@@ -128,6 +144,37 @@ class SteamVr:
         except (KeyError, ValueError):
             return
         self._apply_settings()
+
+    # ---- voice search: hold the mic, talk, let go ----
+
+    def _mic_down(self) -> None:
+        ok, why = self.ctx.speech.available()
+        if not ok:
+            self.panel.search.say(why)
+            return
+        self.ctx.playback.duck(0.3)
+        self.ctx.speech.listen()
+        self.panel.search.say("listening")
+        self._listen_tick.start()
+
+    def _mic_up(self) -> None:
+        self._listen_tick.stop()
+        if not self.ctx.speech.listening():
+            return
+        self.ctx.playback.unduck()
+        self.panel.search.say("…")
+
+        def heard(text: str) -> None:
+            text = _strip_command(text)
+            if text:
+                self.panel.search.submit(text)
+            else:
+                self.panel.search.say("didn't catch that. hold the mic while you talk")
+
+        self.ctx.speech.finish(heard, lambda exc: self.panel.search.say(f"voice failed: {exc}"[:110]))
+
+    def _listening(self) -> None:
+        self.panel.search.say(f"listening · {self.ctx.speech.seconds():.1f} s")
 
     def _toggle_ring(self) -> None:
         self._set("ring", "off" if self.ctx.settings["ring"] != "off" else self._last_ring)
@@ -156,10 +203,40 @@ class SteamVr:
             self._send_watch()
 
     def _lens(self, eyes: dict) -> None:
-        """steamvr told us each eye's outline: draw the ring off the gui
-        thread, then hand it over once."""
-        self.ctx.jobs.run(lambda: ringmod.draw(eyes),
+        """steamvr told us each eye's outline: the ring can be drawn."""
+        self._eyes = eyes
+        self._draw_ring()
+
+    def _draw_ring(self) -> None:
+        """draw the ring off the gui thread (half a second of numpy) and
+        hand it over. per song: the colours come from the cover."""
+        if self._eyes is None or self.ctx.settings["ring"] == "off":
+            return
+        eyes = self._eyes
+        a, b = self._ring_colors or (self._accent(), self._accent(0.75))
+        style = self.ctx.theme.aesthetic()
+        self.ctx.jobs.run(lambda: ringmod.draw(eyes, (a, b), style),
                           on_done=lambda result: self.thread.post("ring_frames", *result))
+
+    def _track_changed(self, track) -> None:
+        self._refresh()
+        url = getattr(track, "art_url", "") if track is not None else ""
+        if url == self._ring_art:
+            return
+        self._ring_art = url
+        if not url:
+            self._ring_colors = None
+            self._draw_ring()
+            return
+        self.ctx.track.art(url, lambda img, u=url: self._ring_cover(u, img))
+
+    def _ring_cover(self, url: str, img) -> None:
+        if url != self._ring_art:
+            return
+        colors = ringmod.cover_colors(img)
+        if colors != self._ring_colors:
+            self._ring_colors = colors
+            self._draw_ring()
 
     # ---- from tide ----
 
@@ -175,8 +252,11 @@ class SteamVr:
         if self.panel_open and self.panel.progress():
             self._dirty()
 
-    def _accent(self) -> tuple[float, float, float]:
+    def _accent(self, shade: float = 1.0) -> tuple[float, float, float]:
         c = QColor(self.ctx.theme.token("accent", "#ffd400"))
+        if shade != 1.0:
+            h, s, v, _a = c.getHsvF()
+            c = QColor.fromHsvF(max(0.0, (h + 0.06) % 1.0), s, v * shade)
         return (c.redF(), c.greenF(), c.blueF())
 
     # ---- frames ----
@@ -186,7 +266,7 @@ class SteamVr:
 
     def _restyle(self) -> None:
         self.panel.restyle()
-        self.thread.post("ring_color", self._accent())
+        self._draw_ring()
         if self.watch_up:
             self._send_watch()
 
@@ -209,6 +289,15 @@ class SteamVr:
             self._dirty()
         if self.watch_up:
             self._send_watch()
+
+
+def _strip_command(text: str) -> str:
+    """"play daft punk" and "search for daft punk" both search daft punk."""
+    text = " ".join(text.split())
+    for lead in ("search for ", "look up ", "find ", "play ", "queue "):
+        if text.startswith(lead):
+            return text[len(lead):]
+    return text
 
 
 # vr threads that wouldn't stop in time: kept referenced so python never

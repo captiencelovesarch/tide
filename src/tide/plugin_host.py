@@ -36,7 +36,9 @@ from typing import Callable
 from PySide6.QtCore import QObject, QThread, Signal
 
 from . import config, qthreads
-from .plugin_api import API_VERSION, SETTING_KINDS, USES, TrackInfo, track_info
+from .plugin_api import (
+    API_VERSION, SETTING_KINDS, USES, ItemInfo, TrackInfo, item_info, track_info,
+)
 
 log = logging.getLogger("tide.plugins")
 
@@ -423,6 +425,36 @@ class _Playback:
         if self.current() is not None and self.liked() != bool(on):
             self._h.call_window("_on_like_clicked")
 
+    def speed(self) -> float:
+        btn = getattr(self._h.window, "speed_btn", None)
+        return float(btn.speed()) if btn is not None else 1.0
+
+    def speed_supported(self) -> bool:
+        """false on sources that can't change speed (spotify)"""
+        btn = getattr(self._h.window, "speed_btn", None)
+        probe = getattr(btn, "backend_supported", None)
+        return bool(probe()) if callable(probe) else btn is not None
+
+    def set_speed(self, rate: float) -> None:
+        """through the bar's speed button, so mpv, fullscreen and the
+        saved speed agree. snapped to tide's 0.05 steps, 0.5×–2.0×."""
+        btn = getattr(self._h.window, "speed_btn", None)
+        if btn is not None:
+            from .speed_law import clamp
+            btn.set_speed(clamp(rate))
+
+    def duck(self, fraction: float) -> None:
+        """drop the music to ``fraction`` of its volume for a moment (while
+        someone talks to a mic) without touching the saved volume."""
+        p = self._h.player
+        if p is not None and hasattr(p, "set_volume"):
+            p.set_volume(int(round(self.volume() * max(0.0, min(1.0, fraction)))))
+
+    def unduck(self) -> None:
+        p = self._h.player
+        if p is not None and hasattr(p, "set_volume"):
+            p.set_volume(self.volume())
+
     def volume(self) -> int:
         vol = getattr(self._h.window, "volume", None)
         return int(vol.volume()) if vol is not None else 0
@@ -566,6 +598,195 @@ class _PulseSink(QObject):
 
     def set_pulse(self, level: float) -> None:
         self._host._emit("pulse", float(level))
+
+
+class _Music:
+    """search, the library, and playing what they found, through the
+    active source. lookups run off the gui thread (ctx.jobs) and answer on
+    it; ``on_error`` gets the exception (NotSupportedError when the source
+    can't do that)."""
+
+    SEARCH = ("songs", "albums", "artists", "playlists")
+    LIBRARY = ("playlists", "liked", "albums", "artists")
+
+    def __init__(self, ctx: "PluginContext") -> None:
+        self._ctx = ctx
+
+    def _source(self):
+        from .sources import registry
+        src = registry().active
+        if src is None:
+            from .sources.base import NotSupportedError
+            raise NotSupportedError("no source")
+        return src
+
+    def _run(self, fn, on_done, on_error) -> None:
+        self._ctx.jobs.run(fn, on_done, on_error)
+
+    def search(self, query: str, kind: str, on_done, on_error=None, limit: int = 30) -> None:
+        """``kind``: songs / albums / artists / playlists."""
+        def work():
+            src = self._source()
+            if kind == "songs":
+                return [track_info(t) for t in src.search_songs(query, limit)]
+            if kind == "albums":
+                return [item_info("album", e) for e in src.search_albums(query, limit)]
+            if kind == "artists":
+                return [item_info("artist", e) for e in src.search_artists(query, limit)]
+            if kind == "playlists":
+                return [item_info("playlist", e) for e in src.search_playlists(query, limit)]
+            raise ValueError(kind)
+        self._run(work, on_done, on_error)
+
+    def library(self, section: str, on_done, on_error=None) -> None:
+        """``section``: playlists / liked / albums / artists."""
+        def work():
+            src = self._source()
+            if section == "playlists":
+                return [item_info("playlist", e) for e in src.get_library_playlists(200)
+                        if getattr(e, "playlist_id", "") != "LM"]
+            if section == "liked":
+                # "LM" is liked music on youtube music; spotify mirrors it
+                return [track_info(t) for t in src.get_playlist("LM", 500).tracks]
+            if section == "albums":
+                return [item_info("album", e) for e in src.get_library_albums_list(200)]
+            if section == "artists":
+                return [item_info("artist", e) for e in src.get_library_artists_list(200)]
+            raise ValueError(section)
+        self._run(work, on_done, on_error)
+
+    def open(self, item: ItemInfo, on_done, on_error=None) -> None:
+        """an album's or playlist's songs, or an artist's top songs."""
+        def work():
+            src = self._source()
+            if item.kind == "playlist":
+                tracks = src.get_playlist(item.id, 500).tracks
+            elif item.kind == "album":
+                detail = src.get_album(item.id)
+                tracks = detail.tracks if detail is not None else []
+            elif item.kind == "artist":
+                detail = src.get_artist(item.id)
+                tracks = detail.top_songs if detail is not None else []
+            else:
+                raise ValueError(item.kind)
+            return [track_info(t) for t in tracks]
+        self._run(work, on_done, on_error)
+
+    @staticmethod
+    def _tracks(infos) -> list:
+        return [i.ref for i in infos if i is not None and i.ref is not None]
+
+    def play_now(self, track: TrackInfo) -> None:
+        if track is not None and track.ref is not None:
+            self._ctx._host.call_window("_play_now", track.ref)
+
+    def play_next(self, track: TrackInfo) -> None:
+        if track is not None and track.ref is not None:
+            self._ctx._host.call_window("_queue_next", track.ref)
+
+    def play(self, tracks: list, start: int = 0, shuffle: bool = False) -> None:
+        """replace the queue with ``tracks`` and play from ``start`` (or a
+        shuffled order)."""
+        refs = self._tracks(tracks)
+        if not refs:
+            return
+        if shuffle:
+            import random
+            random.shuffle(refs)
+            start = 0
+        else:
+            start = max(0, min(int(start), len(refs) - 1))
+            refs = refs[start:] + refs[:start]
+        self._ctx._host.call_window("_play_all", refs)
+
+
+class _Speech:
+    """push-to-talk: ``listen()`` opens the default mic, ``finish()`` closes
+    it and turns what it heard into text, on this computer only. uses the
+    speech model precise lyric timing downloads (settings → playback →
+    lyrics → precise timing); without it ``available()`` says why not."""
+
+    RATE = 16000
+
+    def __init__(self, ctx: "PluginContext") -> None:
+        self._ctx = ctx
+        self._proc = None
+        self._buf = bytearray()
+        self._thread = None
+        ctx.on_stop(self.cancel)
+
+    def available(self) -> tuple[bool, str]:
+        from . import lyric_align
+        if not lyric_align.runtime_available():
+            return False, "voice needs onnxruntime (python-onnxruntime-cpu)"
+        if not lyric_align.model_installed():
+            return False, "voice needs the speech model: settings → playback → lyrics → precise timing"
+        return True, ""
+
+    def listening(self) -> bool:
+        return self._proc is not None
+
+    def listen(self) -> None:
+        import subprocess
+        import threading
+        if self._proc is not None:
+            return
+        self._buf = bytearray()
+        self._proc = subprocess.Popen(
+            ["parec", "--raw", "--format=s16le", f"--rate={self.RATE}", "--channels=1",
+             "--latency-msec=20"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        proc = self._proc
+
+        def pump():
+            while proc.stdout is not None:
+                chunk = proc.stdout.read(3200)
+                if not chunk:
+                    return
+                self._buf.extend(chunk)
+        self._thread = threading.Thread(target=pump, daemon=True)
+        self._thread.start()
+
+    def seconds(self) -> float:
+        return len(self._buf) / (2 * self.RATE)
+
+    def _close(self) -> bytes:
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return b""
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except Exception:  # noqa: BLE001 - kill it then
+            proc.kill()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        return bytes(self._buf)
+
+    def cancel(self) -> None:
+        self._close()
+
+    def finish(self, on_done, on_error=None) -> None:
+        """stop listening; ``on_done(text)`` with what was said ("" for
+        nothing)."""
+        pcm = self._close()
+
+        def work():
+            import numpy as np
+            from . import lyric_align
+            if len(pcm) < self.RATE:            # under half a second: nothing said
+                return ""
+            audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            logits = lyric_align._run_model(audio)
+            inv = {i: ch for ch, i in lyric_align.VOCAB.items()}
+            out, prev = [], None
+            for t in logits.argmax(axis=-1):
+                t = int(t)
+                if t != prev and t != lyric_align.BLANK and t in inv:
+                    out.append(inv[t])
+                prev = t
+            return " ".join("".join(out).replace("|", " ").split()).lower()
+        self._ctx.jobs.run(work, on_done, on_error)
 
 
 class _Track:
@@ -792,6 +1013,7 @@ class PluginContext:
         self.track = _Track(self)
         self.lyrics = _Lyrics(self)
         self.beats = _Beats(self)
+        self.music = _Music(self)
         self.theme = _Theme(self._relay)
         self.motion = _Motion()
         self.jobs = _Jobs(self)
@@ -799,6 +1021,7 @@ class PluginContext:
         self.paths = _Paths(manifest.slug)
         self._on_stop: list[Callable] = []
         self._adopted: list = []
+        self.speech = _Speech(self)
 
     @property
     def settings_changed(self):

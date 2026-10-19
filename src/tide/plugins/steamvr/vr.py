@@ -72,6 +72,10 @@ class VrBridge(QObject):
     panel_closed = Signal(str)                # why
     watch_visible = Signal(bool)
     lens = Signal(object)                     # each eye's outline, for the ring
+    panel_scroll = Signal(float)              # stick up / down while pointing at the panel
+    keyboard_text = Signal(str)               # what's typed so far
+    keyboard_done = Signal(str)               # enter on steamvr's keyboard
+    keyboard_closed = Signal()
 
 
 class _Gl:
@@ -170,14 +174,14 @@ class _Overlay:
         (self.ov.showOverlay if on else self.ov.hideOverlay)(self.h)
 
     def events(self):
+        """(type, the event) for each queued overlay event."""
         import openvr
         ev = openvr.VREvent_t()
         while True:
             ok, ev = self.ov.pollNextOverlayEvent(self.h, ev)
             if not ok:
                 return
-            m = ev.data.mouse
-            yield ev.eventType, float(m.x), float(m.y)
+            yield ev.eventType, ev
 
     def destroy(self) -> None:
         try:
@@ -203,11 +207,12 @@ class VrThread(QThread):
         self._cmds: queue.SimpleQueue = queue.SimpleQueue()
         self._stop = False
         self.panel_open = False
+        self.keyboard_open = False
         self.input = None
         self.pulse = 0.0
         self.playing = False
-        self.ring_color = (1.0, 0.83, 0.0)
         self.rings: list[_Overlay] = []
+        self.ring_width = 0.0
         # one gl context for the thread's life: dropping it here would
         # destroy a qt object off the gui thread (the deadlock qthreads.py
         # describes). it goes with this QThread object, after run() ends.
@@ -365,6 +370,7 @@ class VrThread(QThread):
         self.watch_shown = geo.Shown(geo.WATCH_SHOW_S, geo.WATCH_HIDE_S)
         self.dwell = geo.Dwell()
         self.flash = geo.FlashLimiter()
+        self.ripple = ringmod.Ripple()
         frames: dict[str, object] = {}
         next_t = time.perf_counter()
         while not self._stop:
@@ -398,6 +404,7 @@ class VrThread(QThread):
         import openvr
         ev = openvr.VREvent_t()
         while self.system.pollNextEvent(ev):
+            self._keyboard_event(ev.eventType)
             if ev.eventType in (openvr.VREvent_Quit, openvr.VREvent_DriverRequestedQuit):
                 # without the ack steamvr waits on us at shutdown
                 self.system.acknowledgeQuit_Exiting()
@@ -416,14 +423,13 @@ class VrThread(QThread):
                 frames["watch"] = cmd[1]
             elif kind == "close":
                 self._close(cmd[1])
+            elif kind == "keyboard":
+                if self.panel_open:
+                    self._keyboard(cmd[1])
             elif kind == "pulse":
                 self.pulse = float(cmd[1])
             elif kind == "playing":
                 self.playing = bool(cmd[1])
-            elif kind == "ring_color":
-                self.ring_color = tuple(cmd[1])
-                for o in self.rings:
-                    self.ov.setOverlayColor(o.h, *self.ring_color)
             elif kind == "ring_frames":
                 self._ring_setup(cmd[1], cmd[2])
             elif kind == "settings":
@@ -431,6 +437,43 @@ class VrThread(QThread):
                 self.panel.width(self._panel_width())
                 self.attention.linger_s = float(self.settings.get("linger", 2.5))
                 self.attention.animate = self._animate()
+
+    # ---- steamvr's keyboard ----
+
+    def _keyboard_text(self) -> str:
+        """pyopenvr's getKeyboardText passes its buffer where the length
+        goes; call the function table directly."""
+        import ctypes
+        fn = self.ov.function_table.getKeyboardText
+        n = int(fn(None, 0))
+        buf = ctypes.create_string_buffer(max(1, n))
+        fn(buf, max(1, n))
+        return buf.value.decode("utf-8", "replace")
+
+    def _keyboard(self, text: str) -> None:
+        import openvr
+        try:
+            self.ov.showKeyboardForOverlay(
+                self.panel.h, openvr.k_EGamepadTextInputModeNormal,
+                openvr.k_EGamepadTextInputLineModeSingleLine, openvr.KeyboardFlag_Modal,
+                "search", 120, text, 0)
+            self.keyboard_open = True
+        except openvr.OpenVRError as exc:
+            log.warning("no keyboard: %s", exc)
+            self.bridge.keyboard_closed.emit()
+
+    def _keyboard_event(self, kind: int) -> None:
+        import openvr
+        if not self.keyboard_open:
+            return
+        if kind == openvr.VREvent_KeyboardCharInput:
+            self.bridge.keyboard_text.emit(self._keyboard_text())
+        elif kind == openvr.VREvent_KeyboardDone:
+            self.keyboard_open = False
+            self.bridge.keyboard_done.emit(self._keyboard_text())
+        elif kind == openvr.VREvent_KeyboardClosed:
+            self.keyboard_open = False
+            self.bridge.keyboard_closed.emit()
 
     # ---- device reads ----
 
@@ -538,6 +581,13 @@ class VrThread(QThread):
     def _close(self, why: str) -> None:
         if not self.panel_open:
             return
+        if self.keyboard_open:
+            self.keyboard_open = False
+            try:
+                self.ov.hideKeyboard()
+            except Exception:  # noqa: BLE001 - it may be gone already
+                pass
+            self.bridge.keyboard_closed.emit()
         self.panel_open = False
         self.panel.show(False)
         self.bridge.panel_mouse.emit("leave", 0.0, 0.0)
@@ -546,12 +596,21 @@ class VrThread(QThread):
 
     def _panel_tick(self, now: float) -> None:
         import openvr
-        for kind, x, y in self.panel.events():
-            name = {openvr.VREvent_MouseMove: "move", openvr.VREvent_MouseButtonDown: "down",
-                    openvr.VREvent_MouseButtonUp: "up"}.get(kind)
-            if name is not None:
+        mouse = {openvr.VREvent_MouseMove: "move", openvr.VREvent_MouseButtonDown: "down",
+                 openvr.VREvent_MouseButtonUp: "up"}
+        for kind, ev in self.panel.events():
+            if kind in mouse:
                 self.last_touch = now
-                self.bridge.panel_mouse.emit(name, x, y)
+                self.bridge.panel_mouse.emit(mouse[kind], float(ev.data.mouse.x),
+                                             float(ev.data.mouse.y))
+            elif kind == openvr.VREvent_ScrollSmooth:
+                self.last_touch = now
+                self.bridge.panel_scroll.emit(float(ev.data.scroll.ydelta))
+            else:
+                self._keyboard_event(kind)
+        if self.keyboard_open:
+            # you're looking at the keyboard, not the panel: keep it
+            self.last_touch = now
         hmd = self._hmd()
         if hmd is None or self.panel_pose is None:
             return
@@ -575,21 +634,25 @@ class VrThread(QThread):
     # ---- ring ----
 
     def _ring_setup(self, images: list, width_m: float) -> None:
+        """[glow, rim] for this song. same layers again (a new song's
+        colours) upload in place; anything else rebuilds them."""
         import openvr
-        for o in self.rings:
-            o.destroy()
-        self.rings = []
-        for i, img in enumerate(images):
-            o = _Overlay(self.ov, self._gl, f"tide.vr.ring{i}", f"tide ring {i}", width_m,
-                         (img.width(), img.height()))
-            # each eye gets its own half: its own lens outline
-            self.ov.setOverlayFlag(o.h, openvr.VROverlayFlags_SideBySide_Parallel, True)
+        if len(self.rings) != len(images) or abs(self.ring_width - width_m) > 1e-6:
+            for o in self.rings:
+                o.destroy()
+            self.rings = []
+            for i, img in enumerate(images):
+                o = _Overlay(self.ov, self._gl, f"tide.vr.ring{i}", f"tide ring {i}", width_m,
+                             (img.width(), img.height()))
+                # each eye gets its own half: its own lens outline
+                self.ov.setOverlayFlag(o.h, openvr.VROverlayFlags_SideBySide_Parallel, True)
+                o.place_on(openvr.k_unTrackedDeviceIndex_Hmd,
+                           geo.translate(0.0, 0.0, -ringmod.DISTANCE_M))
+                o.alpha(0.0)
+                self.rings.append(o)
+            self.ring_width = width_m
+        for o, img in zip(self.rings, images):
             o.upload(img)
-            o.place_on(openvr.k_unTrackedDeviceIndex_Hmd,
-                       geo.translate(0.0, 0.0, -ringmod.DISTANCE_M))
-            self.ov.setOverlayColor(o.h, *self.ring_color)
-            o.alpha(0.0)
-            self.rings.append(o)
 
     def _ring_tick(self, now: float) -> None:
         if not self.rings:
@@ -599,15 +662,16 @@ class VrThread(QThread):
             for o in self.rings:
                 o.show(False)
             return
-        target = ringmod.level(mode, self.pulse, self.playing)
-        lvl = self.flash.update(now, target) * ringmod.STRENGTH.get(
-            self.settings.get("ring_strength", "normal"), 0.7)
-        # cross-fade the grain variants so the speckle shimmers
-        n = len(self.rings)
-        phase = (now * 3.0) % n
-        for i, o in enumerate(self.rings):
-            dist = min(abs(phase - i), n - abs(phase - i))
-            weight = max(0.0, 1.0 - dist) if n > 1 else 1.0
-            a = lvl * weight
-            o.show(a > 0.002)
-            o.alpha(a)
+        strength = ringmod.STRENGTH.get(self.settings.get("ring_strength", "normal"), 0.7)
+        pulse = self.pulse if self.playing else 0.0
+        glow = self.flash.update(now, ringmod.glow_level(mode, pulse, self.playing)) * strength
+        rim_alpha, rim_scale = self.ripple.update(now, pulse)
+        rim = rim_alpha * strength * (1.0 if mode == "kick" else 0.6)
+        glow_o, rim_o = self.rings[0], self.rings[-1]
+        glow_o.show(glow > 0.003)
+        glow_o.alpha(glow)
+        rim_o.show(rim > 0.003)
+        rim_o.alpha(rim)
+        # the ripple travels inward: the head-locked quad shrinks round
+        # the middle of your view
+        rim_o.width(self.ring_width * rim_scale)

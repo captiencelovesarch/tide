@@ -498,3 +498,99 @@ class PluginsTabTests(Base):
         names = [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())]
         self.assertIn("plugins", names)
         self.assertEqual(names[-1], "about")
+
+
+class MusicAndSpeedTests(Base):
+    """ctx.music through a fake source, speed through the speed button."""
+
+    def setUp(self):
+        super().setUp()
+        from tide.sources import registry
+        from tide.sources.base import AlbumEntry, AlbumDetail, MusicSource, PlaylistDetail
+
+        class Fake(MusicSource):
+            slug = "fakesrc"
+            def search_songs(self, q, limit=20):
+                return [Track("s1", f"{q} one", "a"), Track("s2", f"{q} two", "b")]
+            def resolve_stream(self, track):
+                return None
+            def search_albums(self, q, limit=20):
+                return [AlbumEntry("al1", "album", "artist", "2001")]
+            def get_album(self, bid):
+                return AlbumDetail(bid, "album", tracks=[Track("t1", "track", "a")])
+            def get_playlist(self, pid, limit=500):
+                return PlaylistDetail(pid, "liked", tracks=[Track("l1", "liked one", "a")])
+
+        reg = registry()
+        self._prev_active = reg.active_slug
+        reg.register(Fake())
+        reg.set_active("fakesrc")
+        self.addCleanup(lambda: reg.set_active(self._prev_active) if self._prev_active in
+                        [s.slug for s in reg.all()] else None)
+
+    def run_until(self, cond):
+        for _ in range(300):
+            _pump()
+            if cond():
+                return
+        self.fail("timed out")
+
+    def test_search_open_and_play(self):
+        played = []
+
+        class Win:
+            _current = None
+            def _play_now(self, t): played.append(("now", t.video_id))
+            def _queue_next(self, t): played.append(("next", t.video_id))
+            def _play_all(self, ts): played.append(("all", [t.video_id for t in ts]))
+        self.write("mine")
+        h = PluginHost(Win(), self.player, self.queue,
+                       roots=[(self.user, "yours")], state_file=self.tmp / "p.toml",
+                       settings_dir=self.tmp / "s", stamp=self.tmp / "st")
+        self.addCleanup(h.shutdown)
+        h.set_enabled("mine", True)
+        music = h.record("mine").ctx.music
+        got = {}
+        music.search("daft", "songs", lambda r: got.setdefault("songs", r))
+        music.search("daft", "albums", lambda r: got.setdefault("albums", r))
+        music.library("liked", lambda r: got.setdefault("liked", r))
+        self.run_until(lambda: len(got) == 3)
+        self.assertEqual([t.title for t in got["songs"]], ["daft one", "daft two"])
+        self.assertEqual(got["albums"][0].subtitle, "artist · 2001")
+        self.assertEqual(got["liked"][0].title, "liked one")
+        music.open(got["albums"][0], lambda r: got.setdefault("album", r))
+        self.run_until(lambda: "album" in got)
+        music.play_now(got["songs"][1])
+        music.play_next(got["songs"][0])
+        music.play(got["songs"], start=1)
+        self.assertEqual(played, [("now", "s2"), ("next", "s1"), ("all", ["s2", "s1"])])
+
+    def test_speed_goes_through_the_button(self):
+        class Btn:
+            value = 1.0
+            def speed(self): return self.value
+            def set_speed(self, v): self.value = v
+            def backend_supported(self): return True
+
+        class Win:
+            speed_btn = Btn()
+        self.write("mine")
+        h = PluginHost(Win(), self.player, self.queue, roots=[(self.user, "yours")],
+                       state_file=self.tmp / "p.toml", settings_dir=self.tmp / "s",
+                       stamp=self.tmp / "st")
+        self.addCleanup(h.shutdown)
+        h.set_enabled("mine", True)
+        pb = h.record("mine").ctx.playback
+        pb.set_speed(1.234)
+        self.assertEqual(pb.speed(), 1.25)          # tide's 0.05 steps
+        pb.set_speed(9)
+        self.assertEqual(pb.speed(), 2.0)           # and its range
+        self.assertTrue(pb.speed_supported())
+
+    def test_speech_says_what_it_needs(self):
+        self.write("mine")
+        h = self.host()
+        h.set_enabled("mine", True)
+        ok, why = h.record("mine").ctx.speech.available()
+        if not ok:
+            self.assertTrue(why.startswith("voice needs"))

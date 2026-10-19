@@ -24,7 +24,7 @@ the plugin's own that it stops in ``stop()``.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field, fields
 from typing import Protocol
 
 API_VERSION = 1
@@ -49,9 +49,23 @@ class TrackInfo:
     source: str = ""
     link: str = ""             # a web page for the track, "" when there isn't one
     art_url: str = ""
+    # tide's own record, so handing this back to ctx (play it, queue it)
+    # plays exactly what was found. opaque to plugins.
+    ref: object = field(default=None, compare=False, repr=False)
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "ref"}
+
+
+@dataclass(frozen=True)
+class ItemInfo:
+    """an album, playlist or artist from search or the library."""
+    kind: str                  # album / playlist / artist
+    id: str
+    title: str
+    subtitle: str = ""         # artist and year, a description, follower count...
+    art_url: str = ""
+    ref: object = field(default=None, compare=False, repr=False)
 
 
 class Plugin(Protocol):
@@ -84,4 +98,22 @@ def track_info(track) -> TrackInfo | None:
         source=source,
         link=track_link(vid, source),
         art_url=str(getattr(track, "thumbnail", "") or ""),
+        ref=track,
     )
+
+
+def item_info(kind: str, entry) -> ItemInfo | None:
+    """an AlbumEntry / PlaylistEntry / ArtistEntry (or detail) as an ItemInfo."""
+    if entry is None:
+        return None
+    g = lambda name: str(getattr(entry, name, "") or "")  # noqa: E731
+    if kind == "album":
+        sub = " · ".join(x for x in (g("artists"), g("year")) if x)
+        return ItemInfo("album", g("browse_id"), g("title"), sub, g("thumbnail"), entry)
+    if kind == "playlist":
+        return ItemInfo("playlist", g("playlist_id"), g("title"), g("description"),
+                        g("thumbnail"), entry)
+    if kind == "artist":
+        return ItemInfo("artist", g("channel_id"), g("name"), g("subscribers"), g("thumbnail"),
+                        entry)
+    return None

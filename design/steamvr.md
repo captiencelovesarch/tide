@@ -601,9 +601,18 @@ replaces phases 4 and 5 in `plugins.md`.
   shuffle / prev / play / next / repeat / like / ring, an x, and a tab bar
   (now playing, search, library, settings). search and library are next.
   the settings tab is built from plugin.toml as big segmented buttons.
-- **the ring:** built per connection from steamvr's lens outlines, pulsed
-  by tide's beat pulse (`ctx.beats`), tinted with the theme accent, at
-  most 3 flashes a second. not yet seen in a headset.
+- **the ring (round 3):** the user found the drawn, speckled version
+  "kinda crap". now two smooth layers per song: a soft glow from the edge
+  of view (two colours from the cover, ~5% of the view deep) that
+  breathes with the bass, and a thin rim that ripples inward on a kick.
+  outline rounded (steamvr's ~27 points showed as facets). still at most
+  3 flashes a second.
+- **round 3 also:** speed (− 1.0× +) next to volume; search (steamvr's
+  keyboard, hold-to-talk mic on the lyric-timing speech model, recent
+  searches, songs / albums / artists / playlists) and library (playlists,
+  liked, albums, artists as cover grids, details with play and shuffle);
+  lists scroll by grabbing them or the stick. fonts now survive tide's
+  app stylesheet, and rounded corners render see-through.
 - **going away:** the x, or the attention fade (look away for `linger`
   seconds, look back to keep it). motion off: no grow, no fade.
 - **threads:** every openvr call on the vr thread (`vr.py`); the gui

@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from PySide6.QtCore import Qt
 
 from tide.plugin_host import BUNDLED_DIR
 
@@ -203,20 +204,131 @@ class RingTests(unittest.TestCase):
     def test_levels(self):
         lv = self.ring.level
         self.assertEqual(lv("off", 1.0, True), 0.0)
-        self.assertEqual(lv("kick", 0.0, True), 0.0)
-        self.assertEqual(lv("kick", 0.8, True), 0.8)
-        self.assertEqual(lv("breathing", 0.0, True), 0.25)
+        self.assertAlmostEqual(lv("kick", 0.0, True), 0.12)
+        self.assertGreater(lv("kick", 0.8, True), lv("kick", 0.0, True))
+        self.assertEqual(lv("breathing", 0.0, True), 0.3)
         self.assertEqual(lv("breathing", 1.0, False), 0.0)     # paused: nothing
 
-    def test_draws_one_texture_per_variant(self):
+    def test_draws_a_glow_and_a_rim(self):
         from PySide6.QtWidgets import QApplication
         QApplication.instance() or QApplication([])
         eye = {"uv": self.ring.ellipse_uv(), "proj": [-1.4, 1.2, -1.4, 1.4], "eye_x": -0.03}
-        images, width = self.ring.draw({"left": eye, "right": dict(eye, eye_x=0.03)}, variants=2)
+        images, width = self.ring.draw({"left": eye, "right": dict(eye, eye_x=0.03)})
         self.assertEqual(len(images), 2)
-        self.assertEqual(images[0].width(), 2 * self.ring.HALF_W)
-        self.assertLessEqual(images[0].height(), self.ring.MAX_TEX_H)
+        glow = images[0]
+        self.assertEqual(glow.width(), 2 * self.ring.HALF_W)
+        self.assertLessEqual(glow.height(), self.ring.MAX_TEX_H)
         self.assertGreater(width, 4.0)
+        # bright at the edge of the view, clear in the middle of each eye
+        h = glow.height()
+        mid_left = glow.pixelColor(self.ring.HALF_W // 2, h // 2).alpha()
+        self.assertLess(mid_left, 8)
+        edge = max(glow.pixelColor(x, h // 2).alpha() for x in range(0, self.ring.HALF_W // 4))
+        self.assertGreater(edge, 150)
+
+    def test_smoothing_rounds_corners(self):
+        square = [(0, 0), (1, 0), (1, 1), (0, 1)]
+        out = self.ring.smooth(square, 2)
+        self.assertEqual(len(out), 16)
+        self.assertNotIn((0, 0), out)
+
+    def test_ripple_starts_on_a_kick_and_fades_inward(self):
+        r = self.ring.Ripple()
+        alpha, scale = r.update(0.0, 0.1)
+        self.assertEqual((alpha, scale), (0.0, 1.0))
+        alpha, scale = r.update(0.01, 0.9)              # a kick
+        self.assertGreater(alpha, 0.9)
+        alpha2, scale2 = r.update(0.3, 0.9)             # held: no new ripple
+        self.assertLess(alpha2, alpha)
+        self.assertLess(scale2, 1.0)
+
+    def test_ripple_caps_at_three_a_second(self):
+        r = self.ring.Ripple()
+        starts = 0
+        for i in range(90):                             # 8 kicks a second for 1 s
+            t = i / 90
+            before = r.started
+            r.update(t, 1.0 if (i % 11) < 2 else 0.0)
+            starts += r.started != before
+        self.assertLessEqual(starts, 3)
+
+    def test_cover_colors(self):
+        from PySide6.QtGui import QColor, QImage
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        img = QImage(32, 32, QImage.Format_RGB32)
+        img.fill(QColor("#808080"))
+        self.assertIsNone(self.ring.cover_colors(img))  # grey: use the theme
+        for y in range(16):
+            for x in range(32):
+                img.setPixelColor(x, y, QColor("#ff2266"))
+        a, b = self.ring.cover_colors(img)
+        self.assertGreater(a[0], 0.8)
+
+
+class ForwarderTests(unittest.TestCase):
+    """laser → qt: a drag in a list scrolls it and never clicks."""
+
+    def setUp(self):
+        from PySide6.QtWidgets import (QApplication, QPushButton, QScrollArea, QVBoxLayout,
+                                       QWidget)
+        self.app = QApplication.instance() or QApplication([])
+        spec = importlib.util.spec_from_file_location(
+            "tide_plugins_test_steamvr.panel", BUNDLED_DIR / "steamvr" / "panel.py",
+            submodule_search_locations=None)
+        # panel.py imports its siblings relatively: load it as part of a package
+        import types
+        pkg = types.ModuleType("tide_plugins_test_steamvr")
+        pkg.__path__ = [str(BUNDLED_DIR / "steamvr")]
+        sys.modules["tide_plugins_test_steamvr"] = pkg
+        self.panel = importlib.import_module("tide_plugins_test_steamvr.panel")
+        self.root = QWidget()
+        self.root.setAttribute(Qt.WA_DontShowOnScreen, True)
+        self.root.resize(400, 300)
+        area = QScrollArea(self.root)
+        area.setGeometry(0, 0, 400, 300)
+        content = QWidget()
+        col = QVBoxLayout(content)
+        self.clicks = []
+        for i in range(20):
+            b = QPushButton(f"row {i}")
+            b.setFixedHeight(60)
+            b.clicked.connect(lambda _c=False, i=i: self.clicks.append(i))
+            col.addWidget(b)
+        area.setWidget(content)
+        area.setWidgetResizable(True)
+        self.area = area
+        self.root.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        import shiboken6
+        shiboken6.delete(self.root)
+        for name in [n for n in sys.modules if n.startswith("tide_plugins_test_steamvr")]:
+            del sys.modules[name]
+
+    def test_tap_clicks(self):
+        fwd = self.panel.Forwarder(self.root)
+        fwd.handle("move", 100, 30)
+        fwd.handle("down", 100, 30)
+        fwd.handle("up", 100, 30)
+        self.assertEqual(self.clicks, [0])
+
+    def test_drag_scrolls_without_clicking(self):
+        fwd = self.panel.Forwarder(self.root)
+        fwd.handle("move", 100, 250)
+        fwd.handle("down", 100, 250)
+        for y in range(250, 90, -10):
+            fwd.handle("move", 100, y)
+        fwd.handle("up", 100, 90)
+        self.assertEqual(self.clicks, [])
+        self.assertGreater(self.area.verticalScrollBar().value(), 100)
+
+    def test_stick_scrolls(self):
+        fwd = self.panel.Forwarder(self.root)
+        fwd.handle("move", 100, 100)
+        fwd.scroll(-2.0)
+        self.assertEqual(self.area.verticalScrollBar().value(), 2 * fwd.STICK_PX)
 
 
 class PluginLifecycleTests(unittest.TestCase):
@@ -250,6 +362,14 @@ class PluginLifecycleTests(unittest.TestCase):
         self.assertEqual(host.record("steamvr").detail, "waiting for steamvr")
         img = plugin.panel.frame()
         self.assertEqual((img.width(), img.height()), (1000, 640))
+        for tab in ("search", "library", "settings", "now"):
+            plugin.panel.show_tab(tab)
+            app.processEvents()
+        img = plugin.panel.frame()
+        if plugin.ctx.theme.aesthetic() == "modern":
+            # rounded corners are see-through, not black (2026-10-19)
+            self.assertEqual(img.pixelColor(0, 0).alpha(), 0)
+        self.assertEqual(img.pixelColor(500, 320).alpha(), 255)
         host.set_enabled("steamvr", False)
         # stopped, and every qt object it adopted is gone right away (not
         # left for python's exit, where deleting them crashed)

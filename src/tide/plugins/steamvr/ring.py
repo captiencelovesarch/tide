@@ -1,23 +1,40 @@
-"""The ring: tide's backdrop pulse moved into vr, a grainy glow on the
-edge of your view that breathes over the game (design/steamvr.md).
+"""The ring: tide's bass pulse on the edge of your view, over the game.
 
-This module only draws. The shape is each eye's real lens outline (the
-hidden area mesh steamvr reports, nose cut and all), mapped onto one quad
-locked to the headset; a side-by-side texture gives each eye its own
-half. Drawn once per connection in white, in a few grain variants; the
-vr thread then tints, fades and cross-fades them, never re-uploading.
+Two layers, both following each eye's real lens outline (steamvr's hidden
+area mesh, so the index's nose cut too), on one quad locked to the
+headset with a side-by-side texture (each eye gets its own half):
 
-QImage painting only, so this runs fine off the gui thread (ctx.jobs).
+* glow: a soft light that fades from the edge of your vision toward the
+  middle, in two colours from the cover blending round the rim. it
+  breathes with the bass.
+* rim: a thin bright band right at the edge. on a kick it flashes and
+  ripples a little way inward (the vr thread shrinks it as it fades).
+
+Drawn per song (the colours change), at half resolution with numpy (a
+glow has no detail to lose) and upscaled smoothly; a hair of noise keeps
+8-bit gradients from banding. The vr thread only fades and scales the
+two layers, it never redraws them.
+
+QImage painting and numpy only, so this runs fine off the gui thread.
 """
 from __future__ import annotations
 
 import math
-import random
+
+import numpy as np
 
 DISTANCE_M = 2.0
-VARIANTS = 4
 HALF_W = 960
 MAX_TEX_H = 1080
+SCALE = 3                 # drawn at 1/SCALE resolution, upscaled
+# how far in the glow reaches, as a share of the eye's view width. the
+# middle of your view stays the game's
+GLOW_REACH = {"modern": 0.045, "brutalist": 0.03}
+RIM_REACH = 0.009
+SMOOTHING = 2             # rounds of corner cutting on the outline
+
+MODES = ("off", "kick", "breathing")
+STRENGTH = {"subtle": 0.45, "normal": 0.7, "loud": 1.0}
 
 
 def ellipse_uv(n: int = 96) -> list[tuple[float, float]]:
@@ -36,20 +53,84 @@ def _to_quad(eye: dict, u: float, v: float, distance: float) -> tuple[float, flo
     return eye["eye_x"] + tan_x * distance, tan_up * distance
 
 
-def _center_uv(eye: dict) -> tuple[float, float]:
-    left, right, top, bottom = eye["proj"]
-    hi, lo = max(top, bottom), min(top, bottom)
-    return -left / (right - left), hi / (hi - lo)
+def smooth(points: list, rounds: int = SMOOTHING) -> list:
+    """chaikin corner cutting: steamvr's outline is ~27 points, and a
+    bright rim traced every facet. each round doubles the points."""
+    for _ in range(rounds):
+        out = []
+        n = len(points)
+        for i in range(n):
+            (x0, y0), (x1, y1) = points[i], points[(i + 1) % n]
+            out.append((0.75 * x0 + 0.25 * x1, 0.75 * y0 + 0.25 * y1))
+            out.append((0.25 * x0 + 0.75 * x1, 0.25 * y0 + 0.75 * y1))
+        points = out
+    return points
 
 
-def draw(eyes: dict, distance: float = DISTANCE_M, variants: int = VARIANTS):
-    """(list of white side-by-side QImages, quad width in metres)."""
-    from PySide6.QtCore import QPointF, Qt
-    from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
+def _inside(px: np.ndarray, py: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    """even-odd point in polygon, vectorised over a pixel grid."""
+    inside = np.zeros(px.shape, dtype=bool)
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        crosses = (y1 > py) != (y2 > py)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            xs = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+        inside ^= crosses & (px < xs)
+    return inside
 
-    quad = {name: [_to_quad(e, u, v, distance) for u, v in (e["uv"] or ellipse_uv())]
+
+def _edge_distance(px: np.ndarray, py: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    """distance from each pixel to the nearest outline segment."""
+    best = np.full(px.shape, np.inf)
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        length2 = dx * dx + dy * dy or 1e-9
+        t = np.clip(((px - ax) * dx + (py - ay) * dy) / length2, 0.0, 1.0)
+        best = np.minimum(best, np.hypot(px - (ax + t * dx), py - (ay + t * dy)))
+    return best
+
+
+def _layer(distances: list, insides: list, angles: list, reach_px: float,
+           colors: tuple, rng: np.random.Generator, hard: bool) -> np.ndarray:
+    """rgba for both eye halves side by side."""
+    halves = []
+    c1 = np.array(colors[0], dtype=np.float32)
+    c2 = np.array(colors[1], dtype=np.float32)
+    for d, inside, ang in zip(distances, insides, angles):
+        if hard:
+            a = np.clip(1.0 - d / reach_px, 0.0, 1.0) ** 0.6
+        else:
+            a = np.exp(-(d / reach_px) ** 1.4)
+        a = np.where(inside, a, 0.0).astype(np.float32)
+        # two colours round the rim: c1 at the top, c2 at the bottom
+        mix = (0.5 - 0.5 * np.cos(ang))[..., None].astype(np.float32)
+        rgb = c1 * (1.0 - mix) + c2 * mix
+        a = np.clip(a + rng.uniform(-1.5 / 255, 1.5 / 255, a.shape).astype(np.float32), 0, 1)
+        halves.append(np.dstack([rgb, a[..., None]]))
+    return np.hstack(halves)
+
+
+def draw(eyes: dict, colors: tuple = ((1.0, 0.83, 0.0), (1.0, 0.45, 0.2)),
+         style: str = "modern", distance: float = DISTANCE_M):
+    """([glow, rim] as QImages, quad width in metres).
+
+    ``colors``: two rgb tuples 0..1 (top of the rim, bottom). ``style``:
+    modern (soft, two colours) or brutalist (a crisper band)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+
+    quad = {name: smooth([_to_quad(e, u, v, distance) for u, v in (e["uv"] or ellipse_uv())])
             for name, e in eyes.items()}
-    centers = {name: _to_quad(e, *_center_uv(e), distance) for name, e in eyes.items()}
+    centers = {}
+    for name, e in eyes.items():
+        left, right, top, bottom = e["proj"]
+        hi, lo = max(top, bottom), min(top, bottom)
+        centers[name] = _to_quad(e, -left / (right - left), hi / (hi - lo), distance)
     qw = 2 * max(abs(x) for pts in quad.values() for x, _ in pts) * 1.04
     qh = 2 * max(abs(y) for pts in quad.values() for _, y in pts) * 1.04
 
@@ -59,59 +140,108 @@ def draw(eyes: dict, distance: float = DISTANCE_M, variants: int = VARIANTS):
         half_w = int(half_w * MAX_TEX_H / tex_h)
         tex_h = MAX_TEX_H
     tex_h = int(round(tex_h))
+    sw, sh = half_w // SCALE, tex_h // SCALE
 
-    def px(x: float, y: float, offset: int) -> QPointF:
-        return QPointF(offset + (x + qw / 2) / qw * half_w, (qh / 2 - y) / qh * tex_h)
+    ys, xs = np.mgrid[0:sh, 0:sw].astype(np.float32) + 0.5
+    distances, insides, angles = [], [], []
+    for name in ("left", "right"):
+        poly = np.array([((x + qw / 2) / qw * sw, (qh / 2 - y) / qh * sh) for x, y in quad[name]],
+                        dtype=np.float32)
+        cx, cy = ((centers[name][0] + qw / 2) / qw * sw, (qh / 2 - centers[name][1]) / qh * sh)
+        insides.append(_inside(xs, ys, poly))
+        distances.append(_edge_distance(xs, ys, poly))
+        angles.append(np.arctan2(xs - cx, -(ys - cy)))     # 0 at the top
 
+    rng = np.random.default_rng(7)
+    hard = style == "brutalist"
+    if hard:
+        colors = (colors[0], colors[0])
+    glow_reach = GLOW_REACH["brutalist" if hard else "modern"] * sw
+    layers = [
+        _layer(distances, insides, angles, glow_reach, colors, rng, hard),
+        _layer(distances, insides, angles, RIM_REACH * sw, ((1, 1, 1), (1, 1, 1)) if hard
+               else tuple(tuple(min(1.0, c * 0.4 + 0.6) for c in col) for col in colors), rng, hard),
+    ]
     images = []
-    for variant in range(variants):
-        rng = random.Random(variant)
-        img = QImage(half_w * 2, tex_h, QImage.Format_RGBA8888)
-        img.fill(Qt.transparent)
-        p = QPainter(img)
-        p.setRenderHint(QPainter.Antialiasing)
-        for slot, name in enumerate(("left", "right")):
-            off = slot * half_w
-            pts = [px(x, y, off) for x, y in quad[name]]
-            cx = px(*centers[name], off)
-            path = QPainterPath()
-            path.addPolygon(QPolygonF(pts))
-            path.closeSubpath()
-            p.save()
-            p.setClipPath(path)
-            # the glow: wide soft strokes, clipped to the inside of the edge
-            for width, alpha in ((90, 18), (60, 28), (36, 45), (18, 70)):
-                p.setPen(QPen(QColor(255, 255, 255, alpha), width))
-                p.drawPath(path)
-            # the grain: dots near the edge, thinning toward the middle and
-            # never past ~16% of the way in
-            p.setPen(Qt.NoPen)
-            for _ in range(5000):
-                j = rng.randrange(len(pts))
-                a, b = pts[j], pts[(j + 1) % len(pts)]
-                t = rng.random()
-                ex, ey = a.x() + (b.x() - a.x()) * t, a.y() + (b.y() - a.y()) * t
-                depth = rng.random() ** 2.2 * 0.16
-                gx, gy = ex + (cx.x() - ex) * depth, ey + (cx.y() - ey) * depth
-                p.setBrush(QColor(255, 255, 255, rng.randrange(120, 256)))
-                r = rng.choice((1.0, 1.0, 1.5, 2.0))
-                p.drawEllipse(QPointF(gx, gy), r, r)
-            p.restore()
-        p.end()
-        images.append(img)
+    for rgba in layers:
+        data = np.ascontiguousarray((np.clip(rgba, 0, 1) * 255).astype(np.uint8))
+        small = QImage(data.data, sw * 2, sh, sw * 2 * 4, QImage.Format_RGBA8888).copy()
+        images.append(small.scaled(half_w * 2, tex_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
     return images, qw
 
 
-MODES = ("off", "kick", "breathing")
-STRENGTH = {"subtle": 0.45, "normal": 0.7, "loud": 1.0}
+def cover_colors(img) -> tuple | None:
+    """two colours for the rim from a cover: its most vivid colour and the
+    next most vivid one of a different hue. None for a grey cover."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+    if img is None or img.isNull():
+        return None
+    small = img.scaled(16, 16, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    picks = []
+    for y in range(small.height()):
+        for x in range(small.width()):
+            c = QColor(small.pixel(x, y))
+            h, s, v, _a = c.getHsvF()
+            if s > 0.25 and v > 0.3:
+                picks.append((s * v, h, c))
+    if not picks:
+        return None
+    picks.sort(key=lambda p: -p[0])
+    first = picks[0]
+    second = next((p for p in picks[1:] if min(abs(p[1] - first[1]), 1 - abs(p[1] - first[1])) > 0.08),
+                  first)
+
+    def lift(c: QColor) -> tuple:
+        # glows want light, saturated colour: push value up, keep the hue
+        h, s, v, _a = c.getHsvF()
+        out = QColor.fromHsvF(max(0.0, h), min(1.0, s * 1.1), max(0.85, v))
+        return (out.redF(), out.greenF(), out.blueF())
+    return lift(first[2]), lift(second[2])
 
 
-def level(mode: str, pulse: float, playing: bool) -> float:
-    """how bright the ring is for a pulse level (0..1), before strength.
-    kick: dark until a hit. breathing: always faintly there."""
+def glow_level(mode: str, pulse: float, playing: bool) -> float:
+    """how bright the glow is for a pulse level (0..1), before strength.
+    kick: barely there between hits. breathing: always softly there."""
     if mode == "off" or not playing:
         return 0.0
     pulse = max(0.0, min(1.0, pulse))
     if mode == "kick":
-        return pulse
-    return 0.25 + 0.75 * pulse
+        return 0.12 + 0.35 * pulse
+    return 0.3 + 0.7 * pulse
+
+
+# old name, kept for the tests and anything poking at it
+level = glow_level
+
+
+class Ripple:
+    """the rim on a kick: a flash that travels a little inward and fades.
+    a kick is the pulse jumping past ``ON`` from below ``OFF``; at most
+    ``per_second`` start a second (photosensitivity: always on)."""
+
+    ON, OFF = 0.62, 0.4
+    FADE_S = 0.38
+    TRAVEL = 0.07             # how far inward it ripples, as a share of the quad
+    per_second = 3
+
+    def __init__(self) -> None:
+        self.armed = True
+        self.started = -1e9
+        self._starts: list[float] = []
+
+    def update(self, now: float, pulse: float) -> tuple[float, float]:
+        """(alpha 0..1, scale 0..1 of the quad) for the rim now."""
+        if pulse < self.OFF:
+            self.armed = True
+        self._starts = [t for t in self._starts if now - t < 1.0]
+        if self.armed and pulse >= self.ON and len(self._starts) < self.per_second:
+            self.armed = False
+            self.started = now
+            self._starts.append(now)
+        age = now - self.started
+        if age > self.FADE_S * 4:
+            return 0.0, 1.0
+        alpha = math.exp(-age / self.FADE_S)
+        scale = 1.0 - self.TRAVEL * (1.0 - math.exp(-age / (self.FADE_S * 0.7)))
+        return alpha, scale

@@ -7,7 +7,7 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 
-DRAWN = ("note", "search", "volume", "ring")
+DRAWN = ("note", "search", "volume", "ring", "mic")
 
 
 def drawn(key: str, px: int, color: str, *, square: bool = False) -> QPixmap:
@@ -41,6 +41,11 @@ def drawn(key: str, px: int, color: str, *, square: bool = False) -> QPixmap:
         p.drawPath(path)
         p.drawArc(QRectF(11 * s, 7 * s, 8 * s, 10 * s), -50 * 16, 100 * 16)
         p.drawArc(QRectF(11 * s, 3.5 * s, 12 * s, 17 * s), -50 * 16, 100 * 16)
+    elif key == "mic":
+        p.drawRoundedRect(QRectF(9 * s, 3 * s, 6 * s, 11 * s), 3 * s, 3 * s)
+        p.drawArc(QRectF(5.5 * s, 6 * s, 13 * s, 11 * s), 180 * 16, 180 * 16)
+        p.drawLine(QPointF(12 * s, 17 * s), QPointF(12 * s, 21 * s))
+        p.drawLine(QPointF(8.5 * s, 21 * s), QPointF(15.5 * s, 21 * s))
     elif key == "ring":
         p.drawEllipse(QPointF(12 * s, 12 * s), 8.5 * s, 8.5 * s)
         p.setPen(Qt.NoPen)
