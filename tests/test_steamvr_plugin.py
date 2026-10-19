@@ -671,3 +671,192 @@ class RingFeelTests(unittest.TestCase):
         first = next(x for x, a in enumerate(row) if a > 0)
         # the brightest part sits clearly in from where the lens starts
         self.assertGreater(peak - first, glow.width() // 2 * 0.04)
+
+
+def _vr_pkg(name):
+    import types
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [str(BUNDLED_DIR / "steamvr")]
+    sys.modules[name] = pkg
+    return pkg
+
+
+class _FakeOverlay:
+    def __init__(self):
+        self.interactive = True
+        self.visible = False
+        self.has_frame = True
+        self.a = 1.0
+        self.w = 0.0
+
+    def set_interactive(self, on):
+        self.interactive = on
+
+    def show(self, on):
+        self.visible = on
+
+    def alpha(self, a):
+        self.a = a
+
+    def width(self, w):
+        self.w = w
+
+    def place(self, _pose):
+        pass
+
+
+class VrThreadPanelTests(unittest.TestCase):
+    """laser only, the back of the panel, its glow (2026-10-19)."""
+
+    def setUp(self):
+        _vr_pkg("tide_plugins_vrpanel_steamvr")
+        self.vr = importlib.import_module("tide_plugins_vrpanel_steamvr.vr")
+        self.geo = importlib.import_module("tide_plugins_vrpanel_steamvr.geometry")
+        self.events = []
+        bridge = self.vr.VrBridge()
+        bridge.panel_mouse.connect(lambda k, x, y: self.events.append(k))
+        t = self.vr.VrThread(bridge, None, {"log_path": os.devnull})
+        t.panel, t.back, t.glow = _FakeOverlay(), _FakeOverlay(), _FakeOverlay()
+        t.panel.visible = True
+        t.input = None
+        t.pokes = {s: self.geo.Poke() for s in self.vr.SIDES}
+        t.poke_px = (-1.0, -1.0)
+        t.touch = self.geo.TouchMode()
+        t.see_cursor = None
+        t.behind = False
+        t.last_touch = 0.0
+        t.glow_flash = self.geo.FlashLimiter()
+        t.glow_env = importlib.import_module("tide_plugins_vrpanel_steamvr.ring").Envelope()
+        t.panel_pose = self.geo.spawn_in_front(at(0.0, 1.7, 0.0))
+        self.t = t
+
+    def approach(self):
+        for i, z in enumerate((0.12, 0.06, 0.03, 0.01, -0.003, 0.03, 0.2)):
+            ctrl = self.t.panel_pose @ at(0.0, 0.0, z - 0.02)
+            self.t._poke(float(i), {"right": ctrl, "left": None}, 0.42)
+            yield self.t.panel.interactive
+
+    def test_touch_presses(self):
+        list(self.approach())
+        self.assertIn("down", self.events)
+
+    def test_laser_only_never_lets_go_of_the_laser(self):
+        self.t.settings["touch"] = False
+        self.assertTrue(all(self.approach()))
+        self.assertNotIn("down", self.events)
+
+    def test_from_behind_only_the_back_shows(self):
+        self.t.behind = True
+        self.t._panel_look(0.0, 0.8, 0.42)
+        self.assertEqual(self.t.panel.a, 0.0)
+        self.assertTrue(self.t.back.visible)
+        self.assertAlmostEqual(self.t.back.a, 0.8)
+        self.t.behind = False
+        self.t._panel_look(0.1, 0.8, 0.42)
+        self.assertAlmostEqual(self.t.panel.a, 0.8)
+        self.assertFalse(self.t.back.visible)
+
+    def test_no_touching_from_behind(self):
+        self.t.behind = True
+        list(self.approach())
+        self.assertNotIn("down", self.events)
+        self.assertFalse(self.t.panel.interactive)     # no laser through the back either
+
+    def test_glow_beats_and_switches_off(self):
+        self.t.settings.update({"panel_glow": "kick", "ring_strength": "loud"})
+        self.t.playing = True
+        self.t.pulse = 1.0
+        level = 0.0
+        for i in range(30):
+            level = self.t._glow_level(i / 144)
+        self.assertGreater(level, 0.3)
+        self.t.settings["panel_glow"] = "off"
+        self.assertEqual(self.t._glow_level(1.0), 0.0)
+
+    def test_turn_around_faces_back(self):
+        pose = self.t.panel_pose @ self.geo.turn_around()
+        self.assertTrue(np.allclose(pose[:3, 2], -self.t.panel_pose[:3, 2]))
+        self.assertTrue(np.allclose(pose[:3, 3], self.t.panel_pose[:3, 3]))
+
+
+class PanelLookTests(unittest.TestCase):
+    """fonts from tide's type roles, the lyric fade, the back and the glow."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import openvr  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("pyopenvr isn't installed")
+        os.environ["TIDE_VR_OFFLINE"] = "1"
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("TIDE_VR_OFFLINE", None)
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+        from tide.plugin_host import PluginHost
+        from tide.ui import typefaces
+        from tests.test_plugins import FakePlayer, FakeQueue
+        self.app = QApplication.instance() or QApplication([])
+        self.typefaces = typefaces
+        self.saved_roles = typefaces.roles()
+        typefaces.set_roles({"title": {"family": "DejaVu Serif", "weight": 700, "size": 115},
+                             "numbers": {"family": "DejaVu Sans Mono"}})
+        tmp = Path(tempfile.mkdtemp(prefix="tide-vr-"))
+        self.player = FakePlayer()
+        self.host = PluginHost(None, self.player, FakeQueue(), roots=[(BUNDLED_DIR, "bundled")],
+                               state_file=tmp / "p.toml", settings_dir=tmp / "s",
+                               stamp=tmp / "stamp", data_dir=tmp / "d")
+        self.assertTrue(self.host.set_enabled("steamvr", True))
+        self.plugin = self.host.record("steamvr").instance
+        for _ in range(10):
+            self.app.processEvents()
+
+    def tearDown(self):
+        self.host.set_enabled("steamvr", False)
+        self.typefaces.set_roles(self.saved_roles)
+
+    def test_fonts_follow_the_type_roles(self):
+        now = self.plugin.panel.now
+        self.assertEqual(now.title.font().family(), "DejaVu Serif")
+        self.assertEqual(now.title.font().pixelSize(), round(38 * 1.15))
+        self.assertEqual(now.elapsed.font().family(), "DejaVu Sans Mono")
+        body = self.plugin.ctx.theme.fonts()["ui"]["family"]
+        self.assertTrue(body)
+        self.assertEqual(now.meta.font().family(), body)
+
+    def test_speed_changes_reach_the_panel(self):
+        calls = []
+        self.plugin.panel.refresh = lambda *a: calls.append(a)
+        self.player.speed_changed.emit(1.25)
+        self.app.processEvents()
+        self.assertTrue(calls)
+
+    def test_faded_lyric_stays_in_its_place(self):
+        from PySide6.QtCore import QPoint
+        panel = self.plugin.panel
+        panel.show_tab("now")
+        lyric = panel.now.lyric_now
+        lyric.setText("WWWW the sung line WWWW")
+        lyric.set_opacity(0.5)
+        self.app.processEvents()
+        img = panel.frame()
+        top = lyric.mapTo(panel, QPoint(0, 0))
+        inside = [img.pixelColor(top.x() + x, top.y() + lyric.height() // 2)
+                  for x in range(0, 200, 2)]
+        self.assertTrue(any(c.lightness() > 60 for c in inside))
+
+    def test_back_and_glow(self):
+        from tide_plugins.steamvr import panel as pm, ring
+        back = pm.back_face(self.plugin.ctx)
+        self.assertEqual((back.width(), back.height()), (1000, 640))
+        self.assertEqual(back.pixelColor(500, 600).alpha(), 255)
+        glow, ratio = ring.panel_glow((1000, 640), 26, ((1, 0.4, 0.6), (0.3, 0.9, 0.5)))
+        self.assertGreater(ratio, 1.1)
+        cx, cy = glow.width() // 2, glow.height() // 2
+        self.assertEqual(glow.pixelColor(cx, cy).alpha(), 0)          # nothing under the panel
+        edge = int((glow.width() - 1000) / 2)
+        self.assertGreater(glow.pixelColor(edge - 6, cy).alpha(), 120)  # bright at its edge
+        self.assertLess(glow.pixelColor(4, cy).alpha(), 40)              # gone by the margin

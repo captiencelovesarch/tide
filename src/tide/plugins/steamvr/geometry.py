@@ -43,6 +43,13 @@ PANEL_DISTANCE_M = 0.55
 PANEL_DROP_DEG = 15.0
 
 
+def turn_around() -> np.ndarray:
+    """half a turn about y: a pose facing the other way."""
+    a = np.eye(4)
+    a[0, 0] = a[2, 2] = -1.0
+    return a
+
+
 def translate(x: float, y: float, z: float) -> np.ndarray:
     a = np.eye(4)
     a[:3, 3] = (x, y, z)

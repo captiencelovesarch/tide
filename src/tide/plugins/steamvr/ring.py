@@ -189,6 +189,47 @@ def draw(eyes: dict, colors: tuple = ((1.0, 0.83, 0.0), (1.0, 0.45, 0.2)),
     return images, qw
 
 
+# the panel's own glow: a soft light round its edge, beating with the ring
+PANEL_MARGIN = 0.12            # glow room on each side, as a share of the panel's width
+PANEL_REACH = 0.045
+
+
+def panel_glow(size: tuple[int, int], radius: int, colors: tuple, style: str = "modern"):
+    """(the glow round a ``size`` panel with ``radius`` corners, as a
+    QImage, and how much wider than the panel it is). nothing inside the
+    panel's shape; the vr thread fades it with the beat."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImage
+    w, h = size
+    m = int(round(w * PANEL_MARGIN))
+    tw, th = w + 2 * m, h + 2 * m
+    sw, sh = tw // SCALE, th // SCALE
+    ys, xs = np.mgrid[0:sh, 0:sw].astype(np.float32) + 0.5
+    xs, ys = xs * SCALE - tw / 2, ys * SCALE - th / 2
+    # signed distance to a rounded rectangle, in panel pixels
+    r = float(max(0, min(radius, w // 2, h // 2)))
+    qx = np.abs(xs) - (w / 2 - r)
+    qy = np.abs(ys) - (h / 2 - r)
+    d = np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - r
+    reach = PANEL_REACH * w
+    hard = style == "brutalist"
+    if hard:
+        a = np.clip(1.0 - d / reach, 0.0, 1.0) ** 0.8
+    else:
+        a = np.exp(-(np.maximum(d, 0) / reach) ** 1.3)
+    a = np.where(d > 0, a, 0.0).astype(np.float32)
+    c1 = np.array(colors[0], dtype=np.float32)
+    c2 = np.array(colors[1 if not hard else 0], dtype=np.float32)
+    mix = (0.5 - 0.5 * np.cos(np.arctan2(xs, -ys)))[..., None].astype(np.float32)
+    rgb = c1 * (1.0 - mix) + c2 * mix
+    rng = np.random.default_rng(11)
+    a = np.clip(a + rng.uniform(-1.5 / 255, 1.5 / 255, a.shape).astype(np.float32), 0, 1)
+    a = np.where(d > 0, a, 0.0)
+    data = np.ascontiguousarray((np.dstack([rgb, a[..., None]]) * 255).astype(np.uint8))
+    small = QImage(data.data, sw, sh, sw * 4, QImage.Format_RGBA8888).copy()
+    return small.scaled(tw, th, Qt.IgnoreAspectRatio, Qt.SmoothTransformation), tw / w
+
+
 def cover_colors(img) -> tuple | None:
     """two colours for the rim from a cover: its most vivid colour and the
     next most vivid one of a different hue. None for a grey cover."""

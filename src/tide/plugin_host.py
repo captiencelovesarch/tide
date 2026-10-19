@@ -845,6 +845,26 @@ class _Theme:
         typo = getattr(t, "typography", {}) or {}
         return str(typo.get("family", "") or ""), bool(typo.get("mono", False))
 
+    def fonts(self) -> dict[str, dict]:
+        """the user's type roles (settings, type roles): "ui" (body text),
+        "title" (song titles, headings), "numbers" (times, the speed).
+        each is {family, weight, size, spacing}: family is never empty
+        (a role with none uses the body face), weight 0 means the theme's
+        own, size is a percent of the body size, spacing a percent added
+        to normal tracking. theme.changed fires when any of it changes."""
+        from PySide6.QtWidgets import QApplication
+        from .ui import typefaces
+        app = QApplication.instance()
+        body = app.font().family() if app is not None else ""
+        body = body or self.font()[0]
+        out = {}
+        for name in typefaces.ROLES:
+            r = typefaces.role(name)
+            if name == "ui" or not r.get("family"):
+                r["family"] = body
+            out[name] = r
+        return out
+
     def case(self, text: str) -> str:
         """text in the theme's letter case, like tide's own labels."""
         from . import theming
@@ -1008,6 +1028,8 @@ class PluginContext:
         self.alive = True
         self.slug = manifest.slug
         self.manifest = manifest
+        from . import __version__
+        self.tide_version = __version__
         self.log = logging.getLogger(f"tide.plugin.{manifest.slug}")
         self._relay = _Relay()
         self.settings = settings

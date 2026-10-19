@@ -2,7 +2,7 @@
 slug        = "steamvr"
 name        = "steamvr"
 description = "check the watch on your wrist and tide opens in vr. look away and it goes."
-version     = "0.2.0"
+version     = "0.3.0"
 api         = 1
 entry       = "plugin:SteamVr"
 # pyopenvr. on arch: the python-openvr package
@@ -24,6 +24,13 @@ label   = "open by looking"
 kind    = "bool"
 default = true
 tooltip = "keep looking at the watch for a second and the panel opens. it swells as you look."
+
+[[setting]]
+key     = "touch"
+label   = "touch"
+kind    = "bool"
+default = true
+tooltip = "press the panel with the tip of your controller. off: the laser only."
 
 [[setting]]
 key     = "size"
@@ -53,6 +60,14 @@ label   = "ring strength"
 kind    = "choice"
 choices = [["subtle", "subtle"], ["normal", "normal"], ["loud", "loud"]]
 default = "normal"
+
+[[setting]]
+key     = "panel_glow"
+label   = "panel glow"
+kind    = "choice"
+choices = [["off", "off"], ["kick", "on the kick"], ["breathing", "breathing"]]
+default = "kick"
+tooltip = "the panel's edge glows with the music, in the cover's colours. same flash limit as the ring. needs motion on."
 
 [[setting]]
 key     = "lyrics"

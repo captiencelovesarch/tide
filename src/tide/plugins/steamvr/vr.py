@@ -233,6 +233,10 @@ class VrThread(QThread):
         self.playing = False
         self.rings: list[_Overlay] = []
         self.ring_width = 0.0
+        # kept across reconnects: they're drawn once (per song, per theme)
+        self.back_img = None
+        self.glow_img = None
+        self.glow_ratio = 1.0
         # one gl context for the thread's life: dropping it here would
         # destroy a qt object off the gui thread (the deadlock qthreads.py
         # describes). it goes with this QThread object, after run() ends.
@@ -331,7 +335,15 @@ class VrThread(QThread):
                                   PANEL_PX, interactive=True)
             self.watch = _Overlay(self.ov, self._gl, "tide.vr.watch", "tide watch", WATCH_WIDTH_M,
                                   (WATCH_PX, WATCH_PX))
-            overlays = [self.panel, self.watch]
+            # the panel's back (you walked round it) and its glow, under it
+            self.back = _Overlay(self.ov, self._gl, "tide.vr.back", "tide back",
+                                 self._panel_width(), PANEL_PX)
+            self.glow = _Overlay(self.ov, self._gl, "tide.vr.glow", "tide glow",
+                                 self._panel_width() * self.glow_ratio, PANEL_PX)
+            self.ov.setOverlaySortOrder(self.glow.h, 0)
+            self.ov.setOverlaySortOrder(self.panel.h, 1)
+            self.ov.setOverlaySortOrder(self.back.h, 1)
+            overlays = [self.panel, self.watch, self.back, self.glow]
             self._input()
             self.bridge.lens.emit(self._lens())
             self.bridge.status.emit("connected")
@@ -425,6 +437,13 @@ class VrThread(QThread):
         self.see_width = self._panel_width()
         self.drawn = ([], None)
         self.drawn_at = -1e9
+        self.behind = False
+        self.glow_flash = geo.FlashLimiter()
+        self.glow_env = ringmod.Envelope()
+        if self.back_img is not None:
+            frames["back"] = self.back_img
+        if self.glow_img is not None:
+            frames["glow"] = self.glow_img
         self.closing_at: float | None = None
         self.closing_from = 1.0
         self.watch_popped_at = -1e9
@@ -449,9 +468,10 @@ class VrThread(QThread):
                 self._guard("watch", self._watch_tick, now)
             self._guard("closing", self._closing_tick, now)
             self._guard("ring", self._ring_tick, now)
-            img = frames.pop("watch", None)
-            if img is not None:
-                self._upload(self.watch, img)
+            for name, ov in (("watch", self.watch), ("back", self.back), ("glow", self.glow)):
+                img = frames.pop(name, None)
+                if img is not None:
+                    self._upload(ov, img)
             fresh = frames.pop("panel", None)
             if fresh is not None:
                 self.panel_base = fresh
@@ -533,6 +553,11 @@ class VrThread(QThread):
                 frames["panel"] = cmd[1]          # newest wins
             elif kind == "watch_frame":
                 frames["watch"] = cmd[1]
+            elif kind == "back_frame":
+                self.back_img = frames["back"] = cmd[1]
+            elif kind == "glow_frame":
+                self.glow_img = frames["glow"] = cmd[1]
+                self.glow_ratio = float(cmd[2])
             elif kind == "close":
                 self._close(cmd[1])
             elif kind == "keyboard":
@@ -679,6 +704,10 @@ class VrThread(QThread):
         self.panel.set_interactive(True)
         self.panel_pose = geo.spawn_in_front(hmd)
         self.panel.place(self.panel_pose)
+        # the back faces the other way, so it reads right from behind
+        self.back.place(self.panel_pose @ geo.turn_around())
+        self.glow.place(self.panel_pose)
+        self.behind = False
         self.opened_at = now
         self.last_touch = now
         self.attention.reset(now)
@@ -687,8 +716,8 @@ class VrThread(QThread):
         self.watch.show(False)
         self.watch.width(WATCH_WIDTH_M)
         self.bridge.watch_visible.emit(False)
-        self.panel.alpha(0.0 if self._animate() else 1.0)
-        self.panel.show(True)
+        self._panel_look(now, 0.0 if self._animate() else 1.0, self._panel_width())
+        self._show_panel(True)
         self._buzz(0.08, 120, 0.9)
         self.bridge.panel_opened.emit(how)
 
@@ -711,7 +740,7 @@ class VrThread(QThread):
             # modern: a quick shrink and fade instead of vanishing
             self.closing_at = time.perf_counter()
         else:
-            self.panel.show(False)
+            self._show_panel(False)
         self.bridge.panel_mouse.emit("leave", 0.0, 0.0)
         self._buzz(0.03, 200, 0.6)
         self.bridge.panel_closed.emit(why)
@@ -722,11 +751,10 @@ class VrThread(QThread):
         t = (now - self.closing_at) / CLOSE_S
         if t >= 1.0:
             self.closing_at = None
-            self.panel.show(False)
+            self._show_panel(False)
             return
         k = 1.0 - t * t
-        self.panel.alpha(self.closing_from * k)
-        self.panel.width(self._panel_width() * (1.0 - 0.08 * t))
+        self._panel_look(now, self.closing_from * k, self._panel_width() * (1.0 - 0.08 * t))
 
     def _panel_tick(self, now: float) -> None:
         import openvr
@@ -770,10 +798,41 @@ class VrThread(QThread):
         alpha, close = self.attention.update(now, gaze, hand_m, now - self.last_touch)
         alpha = min(alpha, fade_in)
         self.closing_from = alpha
-        self.panel.width(width)
-        self.panel.alpha(alpha)
+        self.behind = float(geo.to_local(self.panel_pose, hmd[:3, 3])[2]) < 0.0
+        self._panel_look(now, alpha, width)
         if close:
             self._close("looked away")
+
+    def _show_panel(self, on: bool) -> None:
+        self.panel.show(on)
+        if not on:
+            self.back.show(False)
+            self.glow.show(False)
+
+    def _panel_look(self, now: float, alpha: float, width: float) -> None:
+        """the panel, its back and its glow at ``alpha`` and ``width``.
+        from behind only the back shows: an overlay is seen from both
+        sides, so the front would show through mirrored."""
+        self.panel.width(width)
+        self.panel.alpha(0.0 if self.behind else alpha)
+        self.back.width(width)
+        self.back.alpha(alpha)
+        self.back.show(self.panel.visible and self.behind and self.back.has_frame)
+        glow = self._glow_level(now) * alpha
+        self.glow.width(width * self.glow_ratio)
+        self.glow.alpha(glow)
+        self.glow.show(self.panel.visible and glow > 0.003 and self.glow.has_frame)
+
+    def _glow_level(self, now: float) -> float:
+        """the panel's glow with the beat, like the ring: flash-limited,
+        then smoothed to the headset's rate."""
+        mode = self.settings.get("panel_glow", "off")
+        if mode == "off" or not self._animate():
+            return 0.0
+        strength = ringmod.STRENGTH.get(self.settings.get("ring_strength", "normal"), 0.7)
+        pulse = self.pulse if self.playing else 0.0
+        limited = self.glow_flash.update(now, ringmod.glow_level(mode, pulse, self.playing))
+        return self.glow_env.update(now, limited) * strength
 
     def _poke(self, now: float, hands: dict, width: float) -> None:
         """a controller tip on the panel, as mouse events. with a tip right
@@ -784,8 +843,13 @@ class VrThread(QThread):
                  for side, c in hands.items() if c is not None}
         pressing = next((s for s, p in self.pokes.items() if p.pressed), None)
         was = self.touch.touching
-        touching = self.touch.update(list(local.values()), width, height, pressing is not None)
-        self.panel.set_interactive(not touching)
+        if self.settings.get("touch", True) and not self.behind:
+            touching = self.touch.update(list(local.values()), width, height, pressing is not None)
+        else:
+            # laser only, or you're round the back
+            self.touch.reset()
+            touching = False
+        self.panel.set_interactive(not touching and not self.behind)
         if touching:
             self._touch(now, local, width, height, pressing)
         elif was:

@@ -12,7 +12,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QOffscreenSurface, QSurfaceFormat
 
 from . import ring as ringmod
-from .panel import Forwarder, VrPanel, watch_face
+from .panel import PANEL_PX, Forwarder, VrPanel, back_face, watch_face
 from .vr import VrBridge, VrThread
 
 FRAME_MS = 33          # at most ~30 redraws a second while open
@@ -29,6 +29,7 @@ class SteamVr:
         self._ring_colors = None          # from the current cover
         self._ring_art = ""
         self._ring_drawn = False
+        self._glow_drawn = False
         # every qt object here is handed to ctx.adopt: tide deletes them
         # right after stop(), while qt is still whole
         self.panel = ctx.adopt(VrPanel(ctx))
@@ -74,6 +75,9 @@ class SteamVr:
         pb.track_changed.connect(self._track_changed)
         pb.state_changed.connect(self._state)
         pb.liked_changed.connect(lambda _l: self._refresh())
+        # the speed label and slider only caught up on the next reopen
+        # (2026-10-19)
+        pb.speed_changed.connect(lambda _r: self._refresh())
         pb.position_changed.connect(self._position)
         q.modes_changed.connect(self._refresh)
         q.changed.connect(self._refresh)
@@ -92,6 +96,7 @@ class SteamVr:
         self.thread = VrThread(self.bridge, self.surface, self._vr_settings())
         self.thread.start()
         self._apply_settings()
+        self._send_back()
         self.thread.post("playing", pb.state() == "playing")
         ctx.set_status("waiting for steamvr")
 
@@ -134,6 +139,8 @@ class SteamVr:
             "ring_strength": s["ring_strength"],
             "motion_off": self.ctx.motion.off(),
             "cursor": self.ctx.theme.token("accent", "#ffd400"),
+            "touch": s["touch"],
+            "panel_glow": s["panel_glow"],
         }
 
     def _apply_settings(self) -> None:
@@ -141,10 +148,14 @@ class SteamVr:
         self.thread.post("settings", self._vr_settings())
         if s["ring"] != "off":
             self._last_ring = s["ring"]
-            self.ctx.beats.subscribe()
             if not self._ring_drawn:
                 self._ring_drawn = True
                 self._draw_ring()
+        if s["panel_glow"] != "off" and not self._glow_drawn:
+            self._glow_drawn = True
+            self._draw_glow()
+        if s["ring"] != "off" or s["panel_glow"] != "off":
+            self.ctx.beats.subscribe()
         else:
             self.ctx.beats.unsubscribe()
         if s["lyrics"]:
@@ -278,6 +289,19 @@ class SteamVr:
         self.ctx.jobs.run(lambda: ringmod.draw(eyes, (a, b), style),
                           on_done=lambda result: self.thread.post("ring_frames", *result))
 
+    def _draw_glow(self) -> None:
+        """the panel's glow, per song like the ring."""
+        if self.ctx.settings["panel_glow"] == "off":
+            return
+        a, b = self._ring_colors or (self._accent(), self._accent(0.75))
+        style = self.ctx.theme.aesthetic()
+        radius = 26 if style == "modern" else 0
+        self.ctx.jobs.run(lambda: ringmod.panel_glow(PANEL_PX, radius, (a, b), style),
+                          on_done=lambda result: self.thread.post("glow_frame", *result))
+
+    def _send_back(self) -> None:
+        self.thread.post("back_frame", back_face(self.ctx))
+
     def _track_changed(self, track) -> None:
         self._refresh()
         url = getattr(track, "art_url", "") if track is not None else ""
@@ -287,6 +311,7 @@ class SteamVr:
         if not url:
             self._ring_colors = None
             self._draw_ring()
+            self._draw_glow()
             return
         self.ctx.track.art(url, lambda img, u=url: self._ring_cover(u, img))
 
@@ -297,6 +322,7 @@ class SteamVr:
         if colors != self._ring_colors:
             self._ring_colors = colors
             self._draw_ring()
+            self._draw_glow()
 
     # ---- from tide ----
 
@@ -329,6 +355,8 @@ class SteamVr:
         self.panel.set_animate(self._springy(), self._durations())
         self.thread.post("settings", self._vr_settings())
         self._draw_ring()
+        self._draw_glow()
+        self._send_back()
         if self.watch_up:
             self._send_watch()
 

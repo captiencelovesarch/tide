@@ -229,7 +229,10 @@ class AmbientController(QObject):
         if targets is not None:
             self._send(level, targets)
             return
-        backdrop = self._backdrop_pulses()
+        # with no listeners the clock only runs for the backdrop, and the
+        # gate is upstream (_wants_pulse) as it always was. a listener can
+        # keep the clock going with the backdrop pulse off
+        backdrop = self._backdrop_pulses() or not self._listeners
         if backdrop:
             self._send(level, self._targets)
         elif self._backdrop_live or level == 0.0:

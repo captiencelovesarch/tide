@@ -22,7 +22,7 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QPixmap, QRegion,
 )
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QApplication, QButtonGroup, QFrame, QGraphicsOpacityEffect,
+    QAbstractScrollArea, QApplication, QButtonGroup, QFrame,
     QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QSlider,
     QStackedWidget, QVBoxLayout, QWidget,
 )
@@ -43,8 +43,13 @@ TABS = (("now", "note", "now playing"),
         ("library", "library", "library"),
         ("settings", "settings", "settings"))
 # the settings page, in order: plugin.toml keys
-VR_SETTINGS = ("watch_hand", "open_by_looking", "size", "linger", "ring", "ring_strength",
-               "lyrics", "haptics", "voice_model")
+# two columns, each label over its buttons: one long list squeezed the
+# buttons too small to touch
+VR_SETTINGS_COLUMNS = (
+    ("watch_hand", "open_by_looking", "touch", "size", "linger"),
+    ("ring", "ring_strength", "panel_glow", "lyrics", "haptics", "voice_model"),
+)
+VR_SETTINGS = tuple(k for col in VR_SETTINGS_COLUMNS for k in col)
 RECENT_MAX = 8
 
 
@@ -235,21 +240,43 @@ class _Look:
         self.hover = t.token("hover_bg", "#1a1a1a")
         self.modern = t.aesthetic() == "modern"
         self.family, self.mono = t.font()
+        # the user's type roles: body, titles, numbers (2026-10-19: a
+        # title font and a body font set in tide didn't come across)
+        fonts = t.fonts() if hasattr(t, "fonts") else {}
+        self.roles = {name: fonts.get(name) or {"family": self.family, "weight": 0,
+                                                "size": 100, "spacing": 0}
+                      for name in ("ui", "title", "numbers")}
 
-    def font(self, px: int, bold: bool = False) -> QFont:
-        f = QFont(self.family) if self.family else QFont()
+    def _spec(self, px: int, bold: bool, role: str) -> tuple[str, int, int, int]:
+        """(family, px, weight, spacing) for text in ``role``."""
+        r = self.roles.get(role) or self.roles["ui"]
+        size = int(r.get("size") or 100) if role != "ui" else 100
+        px = max(1, round(px * size / 100))
+        weight = int(r.get("weight") or 0)
+        if not weight or (role == "ui" and bold):
+            weight = max(weight, 700 if bold else 400)
+        return str(r.get("family") or self.family or ""), px, weight, int(r.get("spacing") or 0)
+
+    def font(self, px: int, bold: bool = False, role: str = "ui") -> QFont:
+        family, px, weight, spacing = self._spec(px, bold, role)
+        f = QFont(family) if family else QFont()
         f.setPixelSize(px)
-        f.setBold(bold)
+        f.setWeight(QFont.Weight(weight))
+        if spacing:
+            f.setLetterSpacing(QFont.PercentageSpacing, 100.0 + spacing)
         return f
 
-    def apply(self, widget: QWidget, px: int, bold: bool = False, extra: str = "") -> None:
+    def apply(self, widget: QWidget, px: int, bold: bool = False, extra: str = "",
+              role: str = "ui") -> None:
         """a font on ``widget`` that survives tide's app-wide stylesheet:
         once a widget is polished, the theme's qss beats setFont, but a
-        widget's own stylesheet beats the theme's."""
-        widget.setFont(self.font(px, bold))
-        family = f"font-family: '{self.family}'; " if self.family else ""
-        widget.setStyleSheet(f"{family}font-size: {px}px; font-weight: {700 if bold else 400};"
-                             f"{extra}")
+        widget's own stylesheet beats the theme's. letter spacing can't
+        be said in qss; it rides the widget's own font, which the sheet's
+        family and size merge over."""
+        family, size, weight, _spacing = self._spec(px, bold, role)
+        widget.setFont(self.font(px, bold, role))
+        fam = f"font-family: '{family}'; " if family else ""
+        widget.setStyleSheet(f"{fam}font-size: {size}px; font-weight: {weight};{extra}")
 
     def icon(self, key: str, px: int, color: str) -> QPixmap | None:
         if key in icons.DRAWN:
@@ -447,7 +474,7 @@ class _SongRow(QFrame):
         look.apply(sub, 18)
         length = QLabel(_fmt(track.duration) if track.duration else "")
         length.setObjectName("dim")
-        look.apply(length, 18)
+        look.apply(length, 18, role="numbers")
         _passive(title, sub, length)
         _elide(title, ctx.theme.case(track.title), 520)
         _elide(sub, ctx.theme.case(" · ".join(x for x in (track.artists, track.album) if x)), 520)
@@ -626,7 +653,7 @@ class _Detail(QWidget):
         self.shuffle_btn.setText(t.case("shuffle"))
         for b in (self.back_btn, self.play_btn, self.shuffle_btn):
             look.apply(b, 19, True)
-        look.apply(self.title, 30, True)
+        look.apply(self.title, 30, True, role="title")
         look.apply(self.sub, 19)
 
     def show_item(self, item, look: _Look) -> None:
@@ -674,6 +701,34 @@ class _Detail(QWidget):
 # pages
 # ---------------------------------------------------------------------------
 
+class _FadeLabel(QLabel):
+    """a label that can fade. a QGraphicsOpacityEffect did this before,
+    but rendered into the panel's image on a scaled (hidpi) desktop the
+    effect drew at twice the label's position: the sung line showed up
+    on the repeat button (2026-10-19)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.opacity = 1.0
+
+    def set_opacity(self, value: float) -> None:
+        value = max(0.0, min(1.0, float(value)))
+        if abs(value - self.opacity) > 1e-3:
+            self.opacity = value
+            self.update()
+
+    def paintEvent(self, e) -> None:
+        if self.opacity >= 0.999:
+            super().paintEvent(e)
+            return
+        p = QPainter(self)
+        p.setOpacity(self.opacity)
+        p.setFont(self.font())
+        p.setPen(self.palette().color(self.foregroundRole()))
+        p.drawText(self.contentsRect(), int(self.alignment()), self.text())
+        p.end()
+
+
 class _NowPlaying(QWidget):
     def __init__(self, ctx) -> None:
         super().__init__()
@@ -688,7 +743,7 @@ class _NowPlaying(QWidget):
         self.next.setObjectName("dim")
         self.lyric_prev = QLabel()
         self.lyric_prev.setObjectName("dim")
-        self.lyric_now = QLabel()
+        self.lyric_now = _FadeLabel()
         self.lyric_next = QLabel()
         self.lyric_next.setObjectName("dim")
         for lab in (self.title, self.meta, self.next, self.lyric_prev, self.lyric_now,
@@ -782,23 +837,20 @@ class _NowPlaying(QWidget):
         lay.addLayout(controls)
 
         # modern: the sung line fades in when it changes
-        self.lyric_fx = QGraphicsOpacityEffect(self.lyric_now)
-        self.lyric_fx.setOpacity(1.0)
-        self.lyric_now.setGraphicsEffect(self.lyric_fx)
         self.lyric_changed_at = -1e9
         self.animate = False
 
     def restyle(self, look: _Look) -> None:
         self.cover.radius = look.radius(16)
-        look.apply(self.title, 38, True)
+        look.apply(self.title, 38, True, role="title")
         look.apply(self.meta, 24)
         look.apply(self.next, 19)
         look.apply(self.lyric_prev, 21)
         look.apply(self.lyric_now, 27, True)
         look.apply(self.lyric_next, 21)
         for lab in (self.elapsed, self.total):
-            look.apply(lab, 20)
-        look.apply(self.speed, 22, True)
+            look.apply(lab, 20, role="numbers")
+        look.apply(self.speed, 22, True, role="numbers")
         self.vol_icon.setPixmap(look.icon("volume", 34, look.dim))
         self.speed_icon.setPixmap(look.icon("speed", 34, look.dim))
         for b in self.buttons:
@@ -872,7 +924,7 @@ class _NowPlaying(QWidget):
     def tick(self, now: float) -> bool:
         """modern's lyric fade; True while it's still moving."""
         t = (now - self.lyric_changed_at) / self.LYRIC_FADE_S
-        self.lyric_fx.setOpacity(0.15 + 0.85 * _ease_out(t) if t < 1 else 1.0)
+        self.lyric_now.set_opacity(0.15 + 0.85 * _ease_out(t) if t < 1 else 1.0)
         return t < 1
 
     def _seek_start(self) -> None:
@@ -1186,32 +1238,43 @@ class _Settings(QWidget):
         super().__init__()
         self.ctx = ctx
         self.rows: dict[str, tuple[QLabel, _Segments]] = {}
-        grid = QGridLayout(self)
-        grid.setContentsMargins(0, 0, 90, 0)
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(8)
-        for r, key in enumerate(VR_SETTINGS):
-            d = ctx.settings.desc(key)
-            label = QLabel(ctx.theme.case(d.label))
-            label.setObjectName("dim")
-            if d.kind == "action":
-                # a single button: values of (None, its label)
-                label.setText("")
-                values = [(None, d.label)]
-            elif d.kind == "bool":
-                values = [(True, "on"), (False, "off")]
-            else:
-                values = [(v, lab.replace(" of looking away", "")) for v, lab in d.choices]
-            seg = _Segments(ctx, values, height=44)
-            if d.kind == "action":
-                for _v, b in seg.buttons:
-                    b.setCheckable(False)
-            seg.picked.connect(lambda v, k=key: self.changed.emit(k, v))
-            grid.addWidget(label, r, 0, Qt.AlignVCenter)
-            grid.addWidget(seg, r, 1)
-            self.rows[key] = (label, seg)
-        grid.setColumnStretch(1, 1)
-        grid.setRowStretch(len(VR_SETTINGS), 1)
+        cols = QHBoxLayout(self)
+        cols.setContentsMargins(0, 0, 90, 0)
+        cols.setSpacing(36)
+        for keys in VR_SETTINGS_COLUMNS:
+            col = QVBoxLayout()
+            col.setSpacing(10)
+            for key in keys:
+                self._row(col, key)
+            col.addStretch(1)
+            cols.addLayout(col)
+        cols.addStretch(1)
+
+    def _row(self, col: QVBoxLayout, key: str) -> None:
+        ctx = self.ctx
+        d = ctx.settings.desc(key)
+        label = QLabel(ctx.theme.case(d.label))
+        label.setObjectName("dim")
+        if d.kind == "action":
+            # a single button: values of (None, its label)
+            label.setText("")
+            values = [(None, d.label)]
+        elif d.kind == "bool":
+            values = [(True, "on"), (False, "off")]
+        else:
+            values = [(v, lab.replace(" of looking away", "")) for v, lab in d.choices]
+        seg = _Segments(ctx, values, height=46)
+        if d.kind == "action":
+            for _v, b in seg.buttons:
+                b.setCheckable(False)
+        seg.picked.connect(lambda v, k=key: self.changed.emit(k, v))
+        item = QVBoxLayout()
+        item.setSpacing(2)
+        if label.text():
+            item.addWidget(label)
+        item.addWidget(seg, 0, Qt.AlignLeft)
+        col.addLayout(item)
+        self.rows[key] = (label, seg)
 
     def restyle(self, look: _Look) -> None:
         for label, seg in self.rows.values():
@@ -1502,12 +1565,41 @@ def watch_face(ctx, progress: float) -> QImage:
     pen.setCapStyle(Qt.FlatCap)
     p.setPen(pen)
     p.drawArc(r.adjusted(8, 8, -8, -8), 90 * 16, -int(360 * 16 * max(0.0, min(1.0, progress))))
-    family, _mono = t.font()
-    f = QFont(family) if family else QFont()
-    f.setPixelSize(54)
-    f.setBold(True)
-    p.setFont(f)
+    p.setFont(_Look(ctx).font(54, True, "title"))
     p.setPen(QColor(t.token("fg", "#e6e6e6")))
     p.drawText(r, Qt.AlignCenter, t.case("tide"))
+    p.end()
+    return img
+
+
+def back_face(ctx) -> QImage:
+    """the back of the panel, for when you walk round it: tide's name in
+    the title font and the versions, on the panel's own frame."""
+    look = _Look(ctx)
+    t = ctx.theme
+    w, h = PANEL_PX
+    img = QImage(w, h, QImage.Format_RGBA8888)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.TextAntialiasing)
+    r = look.radius(26)
+    p.setPen(QPen(QColor(look.border), 3))
+    p.setBrush(QColor(look.bg))
+    p.drawRoundedRect(QRectF(1.5, 1.5, w - 3, h - 3), r, r)
+    name = QRectF(0, h * 0.24, w, h * 0.36)
+    p.setFont(look.font(150, True, "title"))
+    p.setPen(QColor(look.fg))
+    p.drawText(name, Qt.AlignHCenter | Qt.AlignBottom, t.case("tide"))
+    # a short accent stroke under the name
+    p.setPen(QPen(QColor(look.accent), 6, Qt.SolidLine, Qt.RoundCap if look.modern else Qt.FlatCap))
+    y = name.bottom() + 26
+    p.drawLine(int(w / 2 - 46), int(y), int(w / 2 + 46), int(y))
+    p.setFont(look.font(26, False, "numbers"))
+    p.setPen(QColor(look.dim))
+    tide_v = getattr(ctx, "tide_version", "") or ""
+    lines = [f"tide {tide_v}".strip(), f"steamvr plugin {ctx.manifest.version}"]
+    p.drawText(QRectF(0, y + 30, w, 90), Qt.AlignHCenter | Qt.AlignTop,
+               t.case("\n".join(lines)))
     p.end()
     return img

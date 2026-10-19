@@ -205,11 +205,12 @@ mostly thin wrappers.
 | `audio` | `spectrum()` consumer of the shared capture, `set_filter(chain)`: this plugin's slot in the mpv `af` chain | `audio_capture.feed()`, `Player.set_audio_filter_chain` (`player.py:218`). the host joins every plugin's chain in a fixed order |
 | `settings` | `ctx.settings["key"]`, `set(key, value)`, signal `changed(set[str])`. undeclared key → `KeyError` | new `PluginSettings`, see below |
 | `ui` | `add_view(...)`, `add_visualizer_tile(...)`, `add_tray_action(...)`, `add_bar_item(...)`, `add_shortcut(...)`, `toast(text, action_label, on_action)` | see "ui hooks" |
-| `theme` | `current()`, `token(name, default)`, `aesthetic()`, signal `changed()` | `theming.manager()` |
+| `theme` | `current()`, `token(name, default)`, `aesthetic()`, `font()`, `fonts()` (the type roles: `ui`, `title`, `numbers`, each family / weight / size % / spacing %), signal `changed()` | `theming.manager()`, `ui/typefaces.py` |
 | `motion` | `dur("short")`, `ease("out")`, `intensity()`, `profile()` | `ui/motion.py`. plugins animate through this like core does, so intensity off still means nothing moves |
 | `jobs` | `run(fn, on_done)` off the GUI thread, joined at stop/quit | `qthreads.py`. a plugin owning a raw QThread is how you get the "QThread destroyed while running" abort |
 | `paths` | `data_dir`, `cache_dir` (per plugin, created 0700) | `config.py` |
 | `log` | `logging.getLogger("tide.plugin.<slug>")` | |
+| `tide_version`, `manifest.version` | tide's version and the plugin's own, for an about line | `tide.__version__` |
 
 the only module plugins import from tide is `tide.plugin_api` (the
 `Plugin` protocol, `TrackInfo`, `BeatClock`, and for tiles the base classes

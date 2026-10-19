@@ -644,6 +644,16 @@ replaces phases 4 and 5 in `plugins.md`.
   at the headset's frame rate. every plugin error now lands with its
   traceback in the plugin's `errors.log` (the switch-off toast says
   where).
+- **round 7 (2026-10-19):** a "touch" switch (off: laser only). the
+  panel has a back: walk round it and you see tide's name in the title
+  font and both versions, never the front mirrored, and no laser or
+  touch from that side. a "panel glow" round its edge beats with the
+  music in the cover's colours (off / on the kick / breathing, same
+  strength and flash limit as the ring). text follows tide's type roles
+  (`ctx.theme.fonts()`: body, titles, numbers). the speed slider and
+  label follow speed changes as they happen. the sung lyric fades by
+  painting itself instead of through a QGraphicsOpacityEffect. settings
+  sit in two columns so every button stays full size.
 
 ## spike findings
 
@@ -746,6 +756,15 @@ running log from `tools/vr-spike`. each one changes the plan above.
   times, within 20-30 s of each start. tide's log only goes to the
   terminal that started it, and nothing reproduced offline (real search
   results, modern motion, 2,000 random touch events). hence errors.log.
+- **2026-10-19 · the sung lyric showed on the repeat button:** the only
+  thing that drew that line apart from the page was its opacity effect,
+  so the effect is gone. it didn't reproduce offscreen or on wayland
+  here (not even after a 2× grab), so that's the best explanation, not a
+  proven one.
+- **2026-10-19 · overlays are seen from both sides:** from behind, the
+  front shows mirrored. the back is its own overlay turned half round,
+  and the front's alpha drops to 0 while your head is behind the panel's
+  plane.
 - **2026-10-19 · steamvr loads no bindings for us:** vrserver logs
   "system.generated.python3.14 (indexhmd) has no configured binding.
   Input will not be available" on every connect. haptics go through
