@@ -618,6 +618,12 @@ running log from `tools/vr-spike`. each one changes the plan above.
   `GL_EXT_memory_object_fd` + `GL_EXT_semaphore_fd`; the rx 9070 /
   radeonsi has both under wayland). **gl textures are the only upload the
   plugin uses.** file uploads only for one-off static images, if at all.
+- **2026-10-19 · gl uploads confirmed:** ~2 minutes, 915 redraws at
+  0.42 ms each (p95 0.67), one shared vulkan image reused the whole time,
+  no compositor errors, clean exit. the loop held 144 hz (p95 6.39 ms).
+  one gotcha: re-uploading with `QOpenGLTexture.setData(QImage)` re-runs
+  texture setup and throws a warning plus `GL_INVALID_OPERATION` per frame
+  (pixels still land). redraws use `setData(RGBA, UInt8, bits)` instead.
 
 ## risks, on top of plugins.md
 

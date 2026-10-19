@@ -324,7 +324,12 @@ class GlUploader:
             tex.setMinMagFilters(QOpenGLTexture.Linear, QOpenGLTexture.Linear)
             tex.setWrapMode(QOpenGLTexture.ClampToEdge)
             self.textures.append(tex)
-        tex.setData(img, QOpenGLTexture.DontGenerateMipMaps)
+            tex.setData(img, QOpenGLTexture.DontGenerateMipMaps)
+        else:
+            # the QImage overload re-runs format/size/mip setup, which an
+            # allocated texture refuses (a warning and GL_INVALID_OPERATION
+            # per frame); a plain pixel upload is all a redraw needs
+            tex.setData(QOpenGLTexture.RGBA, QOpenGLTexture.UInt8, img.constBits())
         self.ctx.functions().glFlush()
         return tex
 
