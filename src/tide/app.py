@@ -368,6 +368,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="tide", description="a multi-source music player")
     parser.add_argument("--theme", help="theme slug to load (overrides saved preference)")
     parser.add_argument("--list-themes", action="store_true", help="print available themes and exit")
+    parser.add_argument("--no-plugins", action="store_true",
+                        help="start without any plugins (they stay switched on for next time)")
     return parser.parse_args(argv)
 
 
@@ -874,6 +876,19 @@ def run(argv: list[str] | None = None) -> int:
     except Exception:
         pass
 
+    # Plugins last: everything a ctx reaches for (window controls, queue,
+    # volume, toasts) exists by now. A plugin that fails to start is
+    # switched off with a toast; one that crashed tide on its last start
+    # stays off (the safe-mode stamp in plugin_host).
+    from . import plugin_host
+    plugins = plugin_host.PluginHost(window, player, window.queue, parent=window)
+    plugin_host.set_host(plugins)
+    plugins.notice.connect(lambda text: show_toast(window.toast_host(), text))
+    plugins.install_hooks()
+    window._plugins = plugins
+    if not args.no_plugins:
+        plugins.start_enabled()
+
     rc = app.exec()
     # release the single-instance name first — a relaunch racing this
     # teardown should get a clean listen, not a probe of a dying server
@@ -904,6 +919,10 @@ def run(argv: list[str] | None = None) -> int:
     # in-flight resolve thread gets torn down mid-network call and segfaults.
     try:
         window._prefetch.shutdown()
+    except Exception:
+        pass
+    try:
+        plugins.shutdown()
     except Exception:
         pass
     discord.shutdown()

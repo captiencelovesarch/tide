@@ -1,7 +1,12 @@
 # plugins
 
-> **status: design only, nothing built.** written 2026-10-18 against 2.3.0
-> (`8bdf4a3`). every file and line reference below is from that tree.
+> **status: building.** written 2026-10-18 against 2.3.0 (`8bdf4a3`);
+> line references below are from that tree. built so far (2026-10-19):
+> the host (`plugin_host.py`, `plugin_api.py`, phase 1), the plugins tab in
+> settings (`ui/plugins_tab.py`, phase 2), and the steamvr plugin's first
+> slice (`plugins/steamvr/`, see design/steamvr.md). not yet: the ui hooks
+> (views, tiles, tray, bar items, shortcuts), `ctx.lyrics`, `ctx.beats`,
+> `ctx.audio`, and moving features out of core (phase 3).
 
 the goal: tide keeps growing sideways (presence, scrobbling, a rhythm game
 in the visualizer, an fx rack, an update nag). plugins let those live

@@ -1,0 +1,40 @@
+[plugin]
+slug        = "steamvr"
+name        = "steamvr"
+description = "a watch on your wrist opens tide in vr. look away and it goes."
+version     = "0.1.0"
+api         = 1
+entry       = "plugin:SteamVr"
+# pyopenvr. on arch: the python-openvr package
+requires    = ["openvr"]
+uses        = ["playback", "vr", "ui"]
+default     = false
+
+[[setting]]
+key     = "watch_hand"
+label   = "watch on"
+kind    = "choice"
+choices = [["left", "left wrist"], ["right", "right wrist"]]
+default = "left"
+tooltip = "raise that wrist and look at it. poke the watch with your other hand or point at it."
+
+[[setting]]
+key     = "size"
+label   = "panel size"
+kind    = "choice"
+choices = [["small", "small"], ["medium", "medium"], ["large", "large"]]
+default = "medium"
+
+[[setting]]
+key     = "linger"
+label   = "goes away after"
+kind    = "choice"
+choices = [[1.5, "1.5 s of looking away"], [2.5, "2.5 s of looking away"], [4.0, "4 s of looking away"], [6.0, "6 s of looking away"]]
+default = 2.5
+
+[[setting]]
+key     = "haptics"
+label   = "haptics"
+kind    = "bool"
+default = true
+tooltip = "a tick in your hands when the panel opens and closes."

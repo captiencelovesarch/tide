@@ -36,6 +36,15 @@ LYRICS_CACHE_DIR: Path = CACHE_DIR / "lyrics"
 USER_THEMES_DIR: Path = CONFIG_DIR / "themes"
 SESSION_FILE: Path = CACHE_DIR / "session.json"
 HISTORY_FILE: Path = CACHE_DIR / "history.jsonl"
+# plugins (see design/plugins.md): which are on, each one's settings, its
+# own data, and the safe-mode stamp a plugin start leaves behind until it
+# finishes
+USER_PLUGINS_DIR: Path = CONFIG_DIR / "plugins"
+PLUGIN_STATE_FILE: Path = CONFIG_DIR / "plugins.toml"
+PLUGIN_SETTINGS_DIR: Path = CONFIG_DIR / "plugin-settings"
+PLUGIN_DATA_DIR: Path = DATA_DIR / "plugins"
+PLUGIN_CACHE_DIR: Path = CACHE_DIR / "plugins"
+PLUGIN_START_STAMP: Path = CACHE_DIR / "plugin-starting"
 
 
 def ensure_dirs() -> None:

@@ -588,6 +588,27 @@ replaces phases 4 and 5 in `plugins.md`.
 - [ ] streaming speech (words while you talk) if the first engine can't
 - [ ] (moved: gl textures are the default now, see spike findings)
 
+## built: the first slice (2026-10-19)
+
+`src/tide/plugins/steamvr/`, bundled, off by default, needs pyopenvr.
+
+- **opening:** the wrist watch from the spike (`run.sh watch`), poke or
+  laser. the headphones gesture, the glance card and the dashboard tab
+  come later.
+- **the panel:** cover, title, artist · album, seek, prev / play / next /
+  like, an x. themed from the current theme (both personalities), laser
+  input.
+- **going away:** the x, or the attention fade (look away for `linger`
+  seconds, look back to keep it). motion off: no grow, no fade.
+- **threads:** every openvr call on the vr thread (`vr.py`); the gui
+  thread renders the qt panel and posts frames. gl textures only.
+- **steamvr comes and goes:** a background-type check first, so tide
+  never launches steamvr; retries every 10 s; recovers after steamvr
+  quits or the compositor stops answering.
+- **settings:** watch on (left / right wrist), panel size, goes away
+  after, haptics.
+- **TIDE_VR_OFFLINE=1** keeps steamvr out of it (tests, panel work).
+
 ## spike findings
 
 running log from `tools/vr-spike`. each one changes the plan above.
