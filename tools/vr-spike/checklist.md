@@ -60,7 +60,7 @@ steamvr's compositor in testing; `raw` and `file` both did).
 - [ ] **click** counts up, the **hold** log says how long you held it,
       the **drag** slider follows the laser
 - [ ] if clicks land upside down (you point at the top, the bottom reacts),
-      rerun with `--no-flip` and note it
+      rerun with `--invert-clicks` and note it
 - [ ] the bottom line shows `tick p95` and `upload` times
 - [ ] click both sticks together three times, fast: both hands buzz and the
       panel jumps back in front of you

@@ -629,7 +629,13 @@ running log from `tools/vr-spike`. each one changes the plan above.
   it also hid the clicks: the laser maps to where a button really is, so
   clicking where the flipped picture showed it hit empty space. the fix is
   free: flip the texture bounds (`setOverlayTextureBounds`, v 1→0), on by
-  default now. mouse coordinates don't change with it.
+  default now.
+- **2026-10-19 · laser y follows the texture bounds:** with the bounds
+  flipped the panel showed right way up and the slider dragged, but clicks
+  and holds missed. steamvr reports laser y in the texture's frame, so
+  flipped bounds already turn it top-down; flipping it again sent clicks to
+  the mirror spot. the slider only worked because it sits at mid height.
+  rule for the plugin: **flip the texture or the laser y, never both.**
 
 ## risks, on top of plugins.md
 

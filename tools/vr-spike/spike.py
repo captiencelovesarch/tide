@@ -161,12 +161,19 @@ class PanelLoop:
     """one hidden qt panel in vr: placement, laser input, redraws, stats,
     and the stick triple-click (brings the panel back in front of you)."""
 
-    def __init__(self, s, widget, *, key: str, attach: str | None, flip: bool,
+    def __init__(self, s, widget, *, key: str, attach: str | None, invert_clicks: bool = False,
                  upload: str = "gl", gl_flip: bool = True) -> None:
         from PySide6.QtCore import QTimer, Qt
         from panels import Forwarder, H, W
         from vrcore import Overlay, Stats
-        self.s, self.w, self.attach, self.flip = s, widget, attach, flip
+        # steamvr reports laser y bottom-up in the texture's own frame. a
+        # texture drawn with flipped bounds flips that frame too, so its
+        # clicks arrive top-down already (2026-10-19: flipping them again
+        # sent every click off the buttons; only the slider, at mid
+        # height, still worked)
+        flip = not (upload == "gl" and gl_flip)
+        self.s, self.w, self.attach = s, widget, attach
+        self.flip = flip != invert_clicks
         self.W, self.H = W, H
         self.ov = Overlay(s, key, f"tide spike {key}", 0.40 if attach is None else 0.22,
                           upload=upload)
@@ -364,7 +371,7 @@ def cmd_panel(args) -> None:
     s = Session()
     if args.upload in ("raw", "file"):
         print(f"warning: {args.upload} uploads crashed vrcompositor before. re-test only")
-    loop = PanelLoop(s, panel, key="panel", attach=args.attach, flip=not args.no_flip,
+    loop = PanelLoop(s, panel, key="panel", attach=args.attach, invert_clicks=args.invert_clicks,
                      upload=args.upload, gl_flip=not args.no_gl_flip)
     panel.log("point the laser here and pull the trigger")
     if s.input is None:
@@ -742,7 +749,7 @@ def cmd_voice(args) -> None:
         from vrcore import Session
         _hidden(panel)
         session = Session()
-        loop = PanelLoop(session, panel, key="voice", attach=None, flip=not args.no_flip,
+        loop = PanelLoop(session, panel, key="voice", attach=None, invert_clicks=args.invert_clicks,
                          upload=args.upload, gl_flip=not args.no_gl_flip)
         panel.log("point at the mic button, hold the trigger, talk, let go")
         app.exec()
@@ -819,7 +826,7 @@ def main() -> None:
 
     p = sub.add_parser("panel", help="live qt panel with laser input")
     p.add_argument("--attach", choices=SIDES, help="ride on a controller instead of floating")
-    p.add_argument("--no-flip", action="store_true",
+    p.add_argument("--invert-clicks", action="store_true",
                    help="use if clicks land mirrored top to bottom")
     p.add_argument("--preview", action="store_true", help="desktop window, no vr")
     p.add_argument("--snapshot", metavar="PNG", help="render the panel to a file, no vr")
@@ -855,7 +862,8 @@ def main() -> None:
     p.add_argument("--desktop", action="store_true", help="a desktop window, no vr")
     p.add_argument("--device", help="parec source name (default: system default input)")
     p.add_argument("--prompts", default=str(HERE / "prompts.txt"))
-    p.add_argument("--no-flip", action="store_true")
+    p.add_argument("--invert-clicks", action="store_true",
+                   help="use if clicks land mirrored top to bottom")
     _upload_flags(p)
     p.set_defaults(func=cmd_voice)
 
