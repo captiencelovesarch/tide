@@ -415,6 +415,7 @@ class VrThread(QThread):
         self.dwell = geo.Dwell()
         self.flash = geo.FlashLimiter()
         self.ripple = ringmod.Ripple()
+        self.envelope = ringmod.Envelope()
         self.pokes = {side: geo.Poke() for side in SIDES}
         self.poke_px = (-1.0, -1.0)
         self.touch = geo.TouchMode()
@@ -848,7 +849,10 @@ class VrThread(QThread):
             return
         strength = ringmod.STRENGTH.get(self.settings.get("ring_strength", "normal"), 0.7)
         pulse = self.pulse if self.playing else 0.0
-        glow = self.flash.update(now, ringmod.glow_level(mode, pulse, self.playing)) * strength
+        # the flash limit judges the real jumps; the envelope then smooths
+        # what's left to the headset's frame rate
+        limited = self.flash.update(now, ringmod.glow_level(mode, pulse, self.playing))
+        glow = self.envelope.update(now, limited) * strength
         rim_alpha, rim_scale = self.ripple.update(now, pulse)
         rim = rim_alpha * strength * (1.0 if mode == "kick" else 0.6)
         glow_o, rim_o = self.rings[0], self.rings[-1]

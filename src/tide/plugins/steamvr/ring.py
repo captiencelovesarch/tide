@@ -4,11 +4,15 @@ Two layers, both following each eye's real lens outline (steamvr's hidden
 area mesh, so the index's nose cut too), on one quad locked to the
 headset with a side-by-side texture (each eye gets its own half):
 
-* glow: a soft light that fades from the edge of your vision toward the
-  middle, in two colours from the cover blending round the rim. it
+* glow: a soft light that fades from near the edge of your vision toward
+  the middle, in two colours from the cover blending round the rim. it
   breathes with the bass.
-* rim: a thin bright band right at the edge. on a kick it flashes and
-  ripples a little way inward (the vr thread shrinks it as it fades).
+* rim: a thin bright band. on a kick it flashes and ripples a little way
+  inward (the vr thread shrinks it as it fades).
+
+Both sit on the lens outline pulled in by INSET. right on the outline
+they were at the very edge of what the lens shows, mostly out of sight
+(2026-10-19); a soft halo still runs out to the real edge.
 
 Drawn per song (the colours change), at half resolution with numpy (a
 glow has no detail to lose) and upscaled smoothly; a hair of noise keeps
@@ -29,8 +33,12 @@ MAX_TEX_H = 1080
 SCALE = 3                 # drawn at 1/SCALE resolution, upscaled
 # how far in the glow reaches, as a share of the eye's view width. the
 # middle of your view stays the game's
-GLOW_REACH = {"modern": 0.045, "brutalist": 0.03}
+GLOW_REACH = {"modern": 0.05, "brutalist": 0.032}
 RIM_REACH = 0.009
+# the outline the ring follows, scaled toward the middle of each eye's
+# view. 1.0 is the lens edge
+INSET = 0.86
+HALO = 0.45               # how far the glow spills outward, as a share of its reach
 SMOOTHING = 2             # rounds of corner cutting on the outline
 
 MODES = ("off", "kick", "breathing")
@@ -67,6 +75,12 @@ def smooth(points: list, rounds: int = SMOOTHING) -> list:
     return points
 
 
+def inset(points: np.ndarray, center: tuple, k: float = INSET) -> np.ndarray:
+    """an outline pulled toward ``center``."""
+    c = np.asarray(center, dtype=np.float32)
+    return c + (np.asarray(points, dtype=np.float32) - c) * k
+
+
 def _inside(px: np.ndarray, py: np.ndarray, poly: np.ndarray) -> np.ndarray:
     """even-odd point in polygon, vectorised over a pixel grid."""
     inside = np.zeros(px.shape, dtype=bool)
@@ -95,18 +109,21 @@ def _edge_distance(px: np.ndarray, py: np.ndarray, poly: np.ndarray) -> np.ndarr
     return best
 
 
-def _layer(distances: list, insides: list, angles: list, reach_px: float,
+def _layer(distances: list, insides: list, visibles: list, angles: list, reach_px: float,
            colors: tuple, rng: np.random.Generator, hard: bool) -> np.ndarray:
-    """rgba for both eye halves side by side."""
+    """rgba for both eye halves side by side. ``insides``: inside the
+    pulled-in outline; ``visibles``: inside the lens at all."""
     halves = []
     c1 = np.array(colors[0], dtype=np.float32)
     c2 = np.array(colors[1], dtype=np.float32)
-    for d, inside, ang in zip(distances, insides, angles):
+    for d, inside, visible, ang in zip(distances, insides, visibles, angles):
         if hard:
             a = np.clip(1.0 - d / reach_px, 0.0, 1.0) ** 0.6
+            out = np.clip(1.0 - d / (reach_px * HALO), 0.0, 1.0)
         else:
             a = np.exp(-(d / reach_px) ** 1.4)
-        a = np.where(inside, a, 0.0).astype(np.float32)
+            out = np.exp(-(d / (reach_px * HALO)) ** 2)
+        a = np.where(inside, a, np.where(visible, out, 0.0)).astype(np.float32)
         # two colours round the rim: c1 at the top, c2 at the bottom
         mix = (0.5 - 0.5 * np.cos(ang))[..., None].astype(np.float32)
         rgb = c1 * (1.0 - mix) + c2 * mix
@@ -143,12 +160,14 @@ def draw(eyes: dict, colors: tuple = ((1.0, 0.83, 0.0), (1.0, 0.45, 0.2)),
     sw, sh = half_w // SCALE, tex_h // SCALE
 
     ys, xs = np.mgrid[0:sh, 0:sw].astype(np.float32) + 0.5
-    distances, insides, angles = [], [], []
+    distances, insides, visibles, angles = [], [], [], []
     for name in ("left", "right"):
-        poly = np.array([((x + qw / 2) / qw * sw, (qh / 2 - y) / qh * sh) for x, y in quad[name]],
+        edge = np.array([((x + qw / 2) / qw * sw, (qh / 2 - y) / qh * sh) for x, y in quad[name]],
                         dtype=np.float32)
         cx, cy = ((centers[name][0] + qw / 2) / qw * sw, (qh / 2 - centers[name][1]) / qh * sh)
+        poly = inset(edge, (cx, cy))
         insides.append(_inside(xs, ys, poly))
+        visibles.append(_inside(xs, ys, edge))
         distances.append(_edge_distance(xs, ys, poly))
         angles.append(np.arctan2(xs - cx, -(ys - cy)))     # 0 at the top
 
@@ -158,8 +177,8 @@ def draw(eyes: dict, colors: tuple = ((1.0, 0.83, 0.0), (1.0, 0.45, 0.2)),
         colors = (colors[0], colors[0])
     glow_reach = GLOW_REACH["brutalist" if hard else "modern"] * sw
     layers = [
-        _layer(distances, insides, angles, glow_reach, colors, rng, hard),
-        _layer(distances, insides, angles, RIM_REACH * sw, ((1, 1, 1), (1, 1, 1)) if hard
+        _layer(distances, insides, visibles, angles, glow_reach, colors, rng, hard),
+        _layer(distances, insides, visibles, angles, RIM_REACH * sw, ((1, 1, 1), (1, 1, 1)) if hard
                else tuple(tuple(min(1.0, c * 0.4 + 0.6) for c in col) for col in colors), rng, hard),
     ]
     images = []
@@ -213,6 +232,28 @@ def glow_level(mode: str, pulse: float, playing: bool) -> float:
 
 # old name, kept for the tests and anything poking at it
 level = glow_level
+
+
+class Envelope:
+    """the pulse at the headset's rate. tide's beat clock ticks at 60 Hz
+    from the gui thread, jittery whenever the gui is busy, and a 144 Hz
+    headset showed each step (2026-10-19: "ever so slightly choppy").
+    this follows it every vr frame: quick up, so a kick still lands on
+    time, and a slower glide down."""
+
+    ATTACK_S = 0.012
+    RELEASE_S = 0.085
+
+    def __init__(self) -> None:
+        self.level = 0.0
+        self._last: float | None = None
+
+    def update(self, now: float, target: float) -> float:
+        dt = 0.0 if self._last is None else min(0.1, max(0.0, now - self._last))
+        self._last = now
+        tau = self.ATTACK_S if target > self.level else self.RELEASE_S
+        self.level += (float(target) - self.level) * (1.0 - math.exp(-dt / tau))
+        return self.level
 
 
 class Ripple:

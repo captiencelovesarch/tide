@@ -639,6 +639,11 @@ replaces phases 4 and 5 in `plugins.md`.
   target once every tip is 14 cm away (or off its edge). it thins out to
   22% over your controllers, seen from your eyes, and a cursor ring
   shrinks onto the spot a tip is about to touch.
+- **round 6 (2026-10-19):** the ring follows the lens outline pulled
+  in to 86%, with a soft halo out to the edge, and its pulse is smoothed
+  at the headset's frame rate. every plugin error now lands with its
+  traceback in the plugin's `errors.log` (the switch-off toast says
+  where).
 
 ## spike findings
 
@@ -736,6 +741,15 @@ running log from `tools/vr-spike`. each one changes the plan above.
   controller projects onto it (a capsule fitted to the index mesh, head
   ring to grip), recomposed on the vr thread at up to 45 hz so it keeps
   up without a round trip to the gui.
+- **2026-10-19 · switched itself off, no trace:** after a search and
+  opening an album the host's error limit turned the plugin off, three
+  times, within 20-30 s of each start. tide's log only goes to the
+  terminal that started it, and nothing reproduced offline (real search
+  results, modern motion, 2,000 random touch events). hence errors.log.
+- **2026-10-19 · steamvr loads no bindings for us:** vrserver logs
+  "system.generated.python3.14 (indexhmd) has no configured binding.
+  Input will not be available" on every connect. haptics go through
+  input actions, so they may not be firing at all. (open)
 - **2026-10-19 · the index tip:** `valve_controller_knu_1_0_*.json` in
   the indexcontroller driver gives a `tip` component at (±0.006, −0.015,
   0.02) in the controller's frame, and the low-res mesh's front-most

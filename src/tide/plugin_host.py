@@ -48,6 +48,7 @@ MODULE_ROOT = "tide_plugins"
 # this many uncaught errors from one plugin inside the window switches it off
 ERROR_LIMIT = 5
 ERROR_WINDOW_S = 10.0
+ERROR_LOG_BYTES = 256 * 1024   # a plugin's errors.log starts over past this
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -1129,10 +1130,12 @@ class PluginHost(QObject):
                  state_file: Path | None = None,
                  settings_dir: Path | None = None,
                  stamp: Path | None = None,
+                 data_dir: Path | None = None,
                  parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.window, self.player, self.queue = window, player, queue
         self.state_file = state_file or config.PLUGIN_STATE_FILE
+        self.data_dir = data_dir or config.PLUGIN_DATA_DIR
         self.settings_dir = settings_dir or config.PLUGIN_SETTINGS_DIR
         self.stamp = stamp or config.PLUGIN_START_STAMP
         self.position = 0.0
@@ -1503,6 +1506,7 @@ class PluginHost(QObject):
         if key not in self._logged:
             self._logged.add(key)
             log.error("plugin %s: %s: %s", slug, exc_type.__name__, exc, exc_info=exc_info)
+        self._write_error(slug, exc_info)
         now = time.monotonic()
         rec.errors.append(now)
         while rec.errors and now - rec.errors[0] > ERROR_WINDOW_S:
@@ -1511,6 +1515,28 @@ class PluginHost(QObject):
             rec.errors.clear()
             self._too_many.emit(slug)
 
+    def error_log(self, slug: str) -> Path:
+        return self.data_dir / slug / "errors.log"
+
+    def _write_error(self, slug: str, exc_info) -> None:
+        """every error with its traceback, in the plugin's data folder.
+        tide's own log goes to whatever terminal started it, which is
+        often none, and then a plugin switching itself off left no trace
+        (2026-10-19)."""
+        import traceback
+        path = self.error_log(slug)
+        text = (time.strftime("%Y-%m-%d %H:%M:%S ") + threading.current_thread().name + "\n"
+                + "".join(traceback.format_exception(*exc_info)) + "\n")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "a"
+            if path.exists() and path.stat().st_size > ERROR_LOG_BYTES:
+                mode = "w"
+            with open(path, mode, encoding="utf-8") as f:
+                f.write(text)
+        except OSError:
+            pass
+
     def _switch_off_for_errors(self, slug: str) -> None:
         rec = self._records.get(slug)
         if rec is None or not rec.running:
@@ -1518,7 +1544,8 @@ class PluginHost(QObject):
         self._enabled[slug] = False
         self._save_state()
         self._stop(rec, status="off: it kept failing")
-        self.notice.emit(f"{rec.manifest.name} kept failing. turned it off")
+        self.notice.emit(f"{rec.manifest.name} kept failing. turned it off "
+                         f"(what went wrong is in {self.error_log(slug)})")
 
 
 _host: PluginHost | None = None

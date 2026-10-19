@@ -141,7 +141,7 @@ class Base(unittest.TestCase):
                        roots=[(self.bundled, "bundled"), (self.user, "yours")],
                        state_file=self.tmp / "plugins.toml",
                        settings_dir=self.tmp / "plugin-settings",
-                       stamp=self.tmp / "plugin-starting", **kw)
+                       stamp=self.tmp / "plugin-starting", data_dir=self.tmp / "data", **kw)
         self.addCleanup(h.shutdown)
         return h
 
@@ -312,6 +312,10 @@ class ErrorTests(Base):
         self.assertFalse(h.record("flaky").running)
         self.assertEqual(h.record("flaky").status, "off: it kept failing")
         self.assertIn("kept failing", notices[0])
+        # each one, with where it came from, for after the fact
+        logged = h.error_log("flaky").read_text()
+        self.assertEqual(logged.count("Traceback"), plugin_host.ERROR_LIMIT)
+        self.assertIn("on_track", logged)
 
     def test_errors_elsewhere_pass_through(self):
         self.write("mine")

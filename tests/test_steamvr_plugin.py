@@ -633,3 +633,41 @@ class WhisperTests(unittest.TestCase):
         w = wave.open(str(d / "b.wav"))
         audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
         self.assertEqual(sw.transcribe(audio), "surreal")
+
+
+class RingFeelTests(unittest.TestCase):
+    """2026-10-19: the ring sat on the very edge of the lens, out of sight,
+    and its pulse stepped at 60 Hz on a 144 Hz headset."""
+
+    def setUp(self):
+        import types
+        pkg = types.ModuleType("tide_plugins_ringfeel_steamvr")
+        pkg.__path__ = [str(BUNDLED_DIR / "steamvr")]
+        sys.modules["tide_plugins_ringfeel_steamvr"] = pkg
+        self.ring = importlib.import_module("tide_plugins_ringfeel_steamvr.ring")
+
+    def test_envelope_glides_between_steps(self):
+        env = self.ring.Envelope()
+        levels = []
+        # a 60 Hz staircase read at 144 Hz
+        for i in range(144):
+            now = i / 144
+            step = 1.0 if int(now * 60) % 20 < 3 else 0.1
+            levels.append(env.update(now, step))
+        jumps = [abs(b - a) for a, b in zip(levels, levels[1:])]
+        self.assertLess(max(jumps), 0.6)
+        self.assertGreater(max(levels), 0.85)     # a kick still gets there
+
+    def test_glow_peaks_inside_the_lens_edge(self):
+        from PySide6.QtGui import QGuiApplication
+        _app = QGuiApplication.instance() or QGuiApplication([])
+        eye = {"uv": [], "proj": [-1.2, 1.2, -1.2, 1.2], "eye_x": 0.0}
+        images, _w = self.ring.draw({"left": dict(eye), "right": dict(eye)})
+        glow = images[0]
+        h = glow.height()
+        y = h // 2
+        row = [glow.pixelColor(x, y).alpha() for x in range(glow.width() // 2)]
+        peak = max(range(len(row)), key=row.__getitem__)
+        first = next(x for x, a in enumerate(row) if a > 0)
+        # the brightest part sits clearly in from where the lens starts
+        self.assertGreater(peak - first, glow.width() // 2 * 0.04)
