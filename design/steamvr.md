@@ -608,6 +608,10 @@ running log from `tools/vr-spike`. each one changes the plan above.
   blocked ~1 s waiting for a reply: **openvr calls must stay off tide's gui
   thread, and the plugin must notice a dead compositor** (the spike now
   stops when an upload takes over 0.5 s).
+- **2026-10-19 · laser input works:** in the same run, before the crash,
+  two laser clicks landed on the right button. steamvr's mouse y is
+  bottom-up as expected; flipping it is right. the explicit teardown
+  order held: no segfault on exit even with the compositor gone.
 - **2026-10-19 · the path that should work:** wayvr updates 2560×1440
   overlays constantly through vrclient's shared vulkan images. vrclient
   takes an opengl texture the same way (`CVRSharedGLTexture`, needs
