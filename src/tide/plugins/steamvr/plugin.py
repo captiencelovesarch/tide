@@ -57,6 +57,11 @@ class SteamVr:
         self._redraw.setSingleShot(True)
         self._redraw.setInterval(FRAME_MS)
         self._redraw.timeout.connect(self._send_panel)
+        self._downloading = False
+        self._download_progress = (0, 1)
+        self._download_tick = ctx.adopt(QTimer())
+        self._download_tick.setInterval(300)
+        self._download_tick.timeout.connect(self._show_download)
         self._listen_tick = ctx.adopt(QTimer())
         self._listen_tick.setInterval(250)
         self._listen_tick.timeout.connect(self._listening)
@@ -105,9 +110,21 @@ class SteamVr:
 
     # ---- settings ----
 
+    def _springy(self) -> bool:
+        """modern's motion: the theme is modern and motion isn't off."""
+        m = self.ctx.motion
+        return (not m.off() and self.ctx.theme.aesthetic() == "modern"
+                and m.profile() == "springy")
+
+    def _durations(self) -> dict:
+        m = self.ctx.motion
+        return {k: m.dur(k) / 1000.0 for k in ("micro", "short", "med")}
+
     def _vr_settings(self) -> dict:
         s = self.ctx.settings
         return {
+            "springy": self._springy(),
+            "log_path": str(self.ctx.paths.data_dir / "sessions.log"),
             "watch_hand": s["watch_hand"],
             "open_by_looking": s["open_by_looking"],
             "size": s["size"],
@@ -135,22 +152,64 @@ class SteamVr:
             self.ctx.lyrics.unsubscribe()
         self.panel.ring_on = s["ring"] != "off"
         self.panel.lyrics_on = s["lyrics"]
+        self.panel.set_animate(self._springy(), self._durations())
         self.panel.refresh()
 
     def _set(self, key: str, value) -> None:
         """a change made on the panel's own settings page."""
+        if self.ctx.settings.desc(key).kind == "action":
+            self.on_action(key)
+            return
         try:
             self.ctx.settings.set(key, value)
         except (KeyError, ValueError):
             return
         self._apply_settings()
 
+    # ---- the voice model ----
+
+    def on_action(self, key: str) -> None:
+        """an action setting's button (desktop plugins tab or the vr
+        settings page)."""
+        if key != "voice_model" or self._downloading:
+            return
+        ok, _why = self.ctx.speech.available()
+        if ok:
+            self.ctx.set_status("the voice model is already here")
+            return
+        self._downloading = True
+        self._download_progress = (0, 1)
+
+        def progress(done: int, total: int) -> None:
+            self._download_progress = (done, total)    # read by the timer below
+
+        def finished(_result) -> None:
+            self._downloading = False
+            self._download_tick.stop()
+            self.ctx.set_status("voice model ready")
+            self.panel.search.say("voice is ready: hold the mic and talk")
+
+        def failed(exc) -> None:
+            self._downloading = False
+            self._download_tick.stop()
+            self.ctx.set_status(f"voice model didn't download: {exc}"[:120])
+
+        self._download_tick.start()
+        self.ctx.speech.download(progress, finished, failed)
+
+    def _show_download(self) -> None:
+        done, total = self._download_progress
+        pct = int(100 * done / total) if total else 0
+        self.ctx.set_status(f"getting the voice model · {pct}%")
+        self.panel.search.say(f"getting the voice model · {pct}%")
+
     # ---- voice search: hold the mic, talk, let go ----
 
     def _mic_down(self) -> None:
         ok, why = self.ctx.speech.available()
         if not ok:
-            self.panel.search.say(why)
+            self.panel.search.say(why + ": settings → get the voice model "
+                                  f"({self.ctx.speech.model_size_mb()} mb)")
             return
         self.ctx.playback.duck(0.3)
         self.ctx.speech.listen()
@@ -266,17 +325,23 @@ class SteamVr:
 
     def _restyle(self) -> None:
         self.panel.restyle()
+        self.panel.set_animate(self._springy(), self._durations())
+        self.thread.post("settings", self._vr_settings())
         self._draw_ring()
         if self.watch_up:
             self._send_watch()
 
     def _dirty(self) -> None:
         if self.panel_open and not self._redraw.isActive():
-            self._redraw.start()
+            self._redraw.start(FRAME_MS)
 
     def _send_panel(self) -> None:
         if self.panel_open:
             self.thread.post("panel_frame", self.panel.frame())
+            # something still moving (a page sliding, a ripple, a fade):
+            # keep frames coming at ~60 a second until it settles
+            if self.panel.animating() and not self._redraw.isActive():
+                self._redraw.start(16)
 
     def _send_watch(self) -> None:
         dur = self.ctx.playback.duration()

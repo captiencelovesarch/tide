@@ -22,15 +22,16 @@ from PySide6.QtGui import (
     QPainterPath, QPen, QPixmap, QRegion,
 )
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QApplication, QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractScrollArea, QApplication, QButtonGroup, QFrame, QGraphicsOpacityEffect,
+    QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizePolicy, QSlider,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import icons
 from .vr import PANEL_PX, WATCH_PX
 
-COVER_PX = 280
-TEXT_W = 560          # the column right of the cover, for eliding
+COVER_PX = 250
+TEXT_W = 590          # the column right of the cover, for eliding
 CONTROL_PX = 84
 PLAY_PX = 112
 TILE_W = 168
@@ -43,7 +44,7 @@ TABS = (("now", "note", "now playing"),
         ("settings", "settings", "settings"))
 # the settings page, in order: plugin.toml keys
 VR_SETTINGS = ("watch_hand", "open_by_looking", "size", "linger", "ring", "ring_strength",
-               "lyrics", "haptics")
+               "lyrics", "haptics", "voice_model")
 RECENT_MAX = 8
 
 
@@ -54,6 +55,11 @@ def _fmt(seconds: float) -> str:
 
 def _elide(label: QLabel, text: str, width: int) -> None:
     label.setText(QFontMetrics(label.font()).elidedText(text, Qt.ElideRight, width))
+
+
+def _ease_out(t: float) -> float:
+    t = min(1.0, max(0.0, t))
+    return 1.0 - (1.0 - t) ** 3
 
 
 def _passive(*widgets: QWidget) -> None:
@@ -157,6 +163,9 @@ class Forwarder:
         elif kind == "down":
             self._coast.stop()
             self._rehover()
+            ripple = getattr(self.root, "ripple", None)
+            if ripple is not None:
+                ripple(QPointF(self.pos))
             self.grab = self._at(self.pos)
             self._press = QPointF(self.pos)
             self._area = self._scroll_area(self.grab)
@@ -319,13 +328,38 @@ class _Cover(QLabel):
         self.radius = 0
         _passive(self)
 
+    animate = False         # modern crossfades a new cover over the old one
+    FADE_S = 0.42
+
     def load(self, url: str) -> None:
         if url == self._url:
             return
         self._url = url
+        old = self.pixmap()
+        self._old = QPixmap(old) if self.animate and old is not None and not old.isNull() else None
+        self._swapped_at = None
         self.clear()
         if url:
             self.ctx.track.art(url, lambda img, u=url: self._got(u, img))
+
+    def fading(self, now: float) -> bool:
+        return (getattr(self, "_old", None) is not None and self._swapped_at is not None
+                and now - self._swapped_at < self.FADE_S)
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        old = getattr(self, "_old", None)
+        if old is None:
+            return
+        swapped = getattr(self, "_swapped_at", None)
+        t = 0.0 if swapped is None else (time.monotonic() - swapped) / self.FADE_S
+        if t >= 1.0:
+            self._old = None
+            return
+        p = QPainter(self)
+        p.setOpacity(1.0 - _ease_out(t))
+        p.drawPixmap(0, 0, old)
+        p.end()
 
     def _got(self, url: str, img) -> None:
         if url != self._url or img is None or img.isNull():
@@ -348,6 +382,7 @@ class _Cover(QLabel):
             p.end()
             pix = shaped
         self.setPixmap(pix)
+        self._swapped_at = time.monotonic()
         win = self.window()
         if hasattr(win, "changed"):
             win.changed.emit()
@@ -687,32 +722,33 @@ class _NowPlaying(QWidget):
         self.vol_icon.setFixedSize(34, 34)
         self.volume = QSlider(Qt.Horizontal)
         self.volume.setRange(0, 100)
-        self.volume.setFixedSize(120, 44)
+        self.volume.setFixedHeight(44)
         self.volume.valueChanged.connect(lambda v: ctx.playback.set_volume(v))
-        # speed: − 1.0× +, the number resets to 1.0×
-        self.slower = QPushButton("−")
-        self.faster = QPushButton("+")
+        # speed: a slider over tide's range in its 0.05 steps (0.5×–2.0×);
+        # the number beside it resets to 1.0×
+        self.speed_icon = QLabel()
+        self.speed_icon.setFixedSize(34, 34)
+        self.speed_slider = QSlider(Qt.Horizontal)
+        self.speed_slider.setRange(10, 40)
+        self.speed_slider.setFixedHeight(44)
+        self.speed_slider.valueChanged.connect(lambda v: ctx.playback.set_speed(v * 0.05))
         self.speed = QPushButton("1.0×")
-        for b in (self.slower, self.faster):
-            b.setObjectName("small")
-            b.setFixedSize(48, 48)
         self.speed.setObjectName("speed")
         self.speed.setFixedSize(84, 48)
-        self.slower.clicked.connect(lambda: self._nudge(-1))
-        self.faster.clicked.connect(lambda: self._nudge(+1))
         self.speed.clicked.connect(lambda: ctx.playback.set_speed(1.0))
         seek_row = QHBoxLayout()
         seek_row.setSpacing(12)
         seek_row.addWidget(self.elapsed)
         seek_row.addWidget(self.seek, 1)
         seek_row.addWidget(self.total)
-        seek_row.addSpacing(16)
-        seek_row.addWidget(self.vol_icon)
-        seek_row.addWidget(self.volume)
-        seek_row.addSpacing(16)
-        seek_row.addWidget(self.slower)
-        seek_row.addWidget(self.speed)
-        seek_row.addWidget(self.faster)
+        mix_row = QHBoxLayout()
+        mix_row.setSpacing(12)
+        mix_row.addWidget(self.vol_icon)
+        mix_row.addWidget(self.volume, 1)
+        mix_row.addSpacing(30)
+        mix_row.addWidget(self.speed_icon)
+        mix_row.addWidget(self.speed_slider, 1)
+        mix_row.addWidget(self.speed)
 
         self.shuffle = _IconButton("shuffle", "shuffle", CONTROL_PX)
         self.prev = _IconButton("prev", "prev", CONTROL_PX)
@@ -739,13 +775,18 @@ class _NowPlaying(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(14)
+        lay.setSpacing(10)
         lay.addLayout(top)
         lay.addLayout(seek_row)
+        lay.addLayout(mix_row)
         lay.addLayout(controls)
 
-    def _nudge(self, direction: int) -> None:
-        self.ctx.playback.set_speed(self.ctx.playback.speed() + 0.05 * direction)
+        # modern: the sung line fades in when it changes
+        self.lyric_fx = QGraphicsOpacityEffect(self.lyric_now)
+        self.lyric_fx.setOpacity(1.0)
+        self.lyric_now.setGraphicsEffect(self.lyric_fx)
+        self.lyric_changed_at = -1e9
+        self.animate = False
 
     def restyle(self, look: _Look) -> None:
         self.cover.radius = look.radius(16)
@@ -757,9 +798,9 @@ class _NowPlaying(QWidget):
         look.apply(self.lyric_next, 21)
         for lab in (self.elapsed, self.total):
             look.apply(lab, 20)
-        for b in (self.slower, self.faster, self.speed):
-            look.apply(b, 22, True)
+        look.apply(self.speed, 22, True)
         self.vol_icon.setPixmap(look.icon("volume", 34, look.dim))
+        self.speed_icon.setPixmap(look.icon("speed", 34, look.dim))
         for b in self.buttons:
             b.look = look
             b.paint_icon()
@@ -796,11 +837,13 @@ class _NowPlaying(QWidget):
         rate = pb.speed()
         self.speed.setText(f"{rate:.1f}×" if abs(rate * 10 - round(rate * 10)) < 1e-3
                            else f"{rate:.2f}×")
+        if not self.speed_slider.isSliderDown():
+            self.speed_slider.blockSignals(True)
+            self.speed_slider.setValue(int(round(rate / 0.05)))
+            self.speed_slider.blockSignals(False)
         can = pb.speed_supported()
-        for b in (self.slower, self.speed, self.faster):
-            b.setEnabled(can)
-        self.slower.setEnabled(can and rate > 0.5 + 1e-4)
-        self.faster.setEnabled(can and rate < 2.0 - 1e-4)
+        for w in (self.speed_slider, self.speed):
+            w.setEnabled(can)
         self.progress(pb.position(), pb.duration(), lyrics_on)
 
     def progress(self, position: float, duration: float, lyrics_on: bool) -> bool:
@@ -818,7 +861,19 @@ class _NowPlaying(QWidget):
         _elide(self.lyric_prev, t.case(prev or ""), TEXT_W)
         _elide(self.lyric_now, t.case(now or ""), TEXT_W)
         _elide(self.lyric_next, t.case(nxt or ""), TEXT_W)
-        return before != (self.lyric_prev.text(), self.lyric_now.text(), self.lyric_next.text())
+        changed = before != (self.lyric_prev.text(), self.lyric_now.text(),
+                             self.lyric_next.text())
+        if changed and self.animate and before[1] != self.lyric_now.text():
+            self.lyric_changed_at = time.monotonic()
+        return changed
+
+    LYRIC_FADE_S = 0.26
+
+    def tick(self, now: float) -> bool:
+        """modern's lyric fade; True while it's still moving."""
+        t = (now - self.lyric_changed_at) / self.LYRIC_FADE_S
+        self.lyric_fx.setOpacity(0.15 + 0.85 * _ease_out(t) if t < 1 else 1.0)
+        return t < 1
 
     def _seek_start(self) -> None:
         self._dragging = True
@@ -1134,14 +1189,23 @@ class _Settings(QWidget):
         grid = QGridLayout(self)
         grid.setContentsMargins(0, 0, 90, 0)
         grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(10)
+        grid.setVerticalSpacing(8)
         for r, key in enumerate(VR_SETTINGS):
             d = ctx.settings.desc(key)
             label = QLabel(ctx.theme.case(d.label))
             label.setObjectName("dim")
-            values = ([(True, "on"), (False, "off")] if d.kind == "bool"
-                      else [(v, lab.replace(" of looking away", "")) for v, lab in d.choices])
-            seg = _Segments(ctx, values, height=48)
+            if d.kind == "action":
+                # a single button: values of (None, its label)
+                label.setText("")
+                values = [(None, d.label)]
+            elif d.kind == "bool":
+                values = [(True, "on"), (False, "off")]
+            else:
+                values = [(v, lab.replace(" of looking away", "")) for v, lab in d.choices]
+            seg = _Segments(ctx, values, height=44)
+            if d.kind == "action":
+                for _v, b in seg.buttons:
+                    b.setCheckable(False)
             seg.picked.connect(lambda v, k=key: self.changed.emit(k, v))
             grid.addWidget(label, r, 0, Qt.AlignVCenter)
             grid.addWidget(seg, r, 1)
@@ -1156,7 +1220,8 @@ class _Settings(QWidget):
 
     def refresh(self) -> None:
         for key, (_l, seg) in self.rows.items():
-            seg.select(self.ctx.settings[key])
+            if self.ctx.settings.desc(key).kind != "action":
+                seg.select(self.ctx.settings[key])
 
 
 # ---------------------------------------------------------------------------
@@ -1175,6 +1240,9 @@ class VrPanel(QWidget):
         self.ctx = ctx
         self.ring_on = False
         self.lyrics_on = True
+        self.animate = False          # modern with motion on: see set_animate
+        self._ripples: list[tuple[QPointF, float]] = []
+        self._slide: tuple[QPixmap, float, int] | None = None
         self.setObjectName("vrpanel")
         self.setAttribute(Qt.WA_DontShowOnScreen, True)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -1225,10 +1293,47 @@ class VrPanel(QWidget):
                 return key
         return "now"
 
+    def set_animate(self, on: bool, durations: dict | None = None) -> None:
+        """modern's motion (and only with motion on): pages slide, presses
+        ripple, covers and lyric lines fade. ``durations`` in seconds from
+        tide's motion profile, so vr and the desktop share one timing."""
+        self.animate = on
+        d = durations or {}
+        self.SLIDE_S = d.get("short", 0.26)
+        self.RIPPLE_S = d.get("med", 0.42)
+        for cover in self.findChildren(_Cover):
+            cover.animate = on
+        _Cover.animate = on
+        self.now.animate = on
+        if not on:
+            self._ripples.clear()
+            self._slide = None
+
+    SLIDE_S = 0.26
+    RIPPLE_S = 0.42
+
+    def ripple(self, pos: QPointF) -> None:
+        if self.animate:
+            self._ripples.append((pos, time.monotonic()))
+
+    def animating(self) -> bool:
+        """still moving: keep sending frames."""
+        now = time.monotonic()
+        moving = self._slide is not None and now - self._slide[1] < self.SLIDE_S
+        moving |= any(now - t < self.RIPPLE_S for _p, t in self._ripples)
+        moving |= self.now.tick(now)
+        moving |= any(c.fading(now) for c in self.findChildren(_Cover))
+        return moving
+
     def show_tab(self, key: str) -> None:
         page = self.pages.get(key)
         if page is None:
             return
+        old = self.stack.currentWidget()
+        if self.animate and old is not page and self.isVisible():
+            order = list(self.pages.values())
+            direction = 1 if order.index(page) > order.index(old) else -1
+            self._slide = (self.stack.grab(), time.monotonic(), direction)
         self.stack.setCurrentWidget(page)
         for k, b in self.tabs.items():
             b.setChecked(k == key)
@@ -1331,7 +1436,47 @@ class VrPanel(QWidget):
         img = QImage(*PANEL_PX, QImage.Format_RGBA8888)
         img.fill(Qt.transparent)
         self.render(img, QPoint(), QRegion(), QWidget.RenderFlag.DrawChildren)
+        if self.animate:
+            self._paint_motion(img)
         return img
+
+    def _paint_motion(self, img: QImage) -> None:
+        now = time.monotonic()
+        p = QPainter(img)
+        p.setRenderHint(QPainter.Antialiasing)
+        if self._slide is not None:
+            old, start, direction = self._slide
+            t = (now - start) / self.SLIDE_S
+            if t >= 1.0:
+                self._slide = None
+            else:
+                e = _ease_out(t)
+                r = self.stack.geometry()
+                new = self.stack.grab()
+                shift = 70
+                p.save()
+                p.setClipRect(r)
+                p.fillRect(r, QColor(self.look.bg))
+                p.setOpacity(1.0 - e)
+                p.drawPixmap(r.x() - int(direction * shift * e), r.y(), old)
+                p.setOpacity(e)
+                p.drawPixmap(r.x() + int(direction * shift * (1.0 - e)), r.y(), new)
+                p.restore()
+        alive = []
+        accent = QColor(self.look.accent)
+        for pos, start in self._ripples:
+            t = (now - start) / self.RIPPLE_S
+            if t >= 1.0:
+                continue
+            alive.append((pos, start))
+            e = _ease_out(t)
+            c = QColor(accent)
+            c.setAlphaF(0.38 * (1.0 - t))
+            p.setPen(Qt.NoPen)
+            p.setBrush(c)
+            p.drawEllipse(pos, 14 + 60 * e, 14 + 60 * e)
+        self._ripples = alive
+        p.end()
 
 
 def watch_face(ctx, progress: float) -> QImage:

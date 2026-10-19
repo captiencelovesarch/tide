@@ -67,3 +67,9 @@ label   = "haptics"
 kind    = "bool"
 default = true
 tooltip = "a tick in your hands when the panel opens and closes."
+
+[[setting]]
+key     = "voice_model"
+label   = "get the voice model"
+kind    = "action"
+tooltip = "whisper, about 77 mb, runs on this computer. voice search needs it."

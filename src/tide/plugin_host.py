@@ -702,9 +702,9 @@ class _Music:
 
 class _Speech:
     """push-to-talk: ``listen()`` opens the default mic, ``finish()`` closes
-    it and turns what it heard into text, on this computer only. uses the
-    speech model precise lyric timing downloads (settings → playback →
-    lyrics → precise timing); without it ``available()`` says why not."""
+    it and turns what it heard into text, on this computer only, with
+    whisper (speech_whisper.py). its model is a ~77 MB download on request:
+    ``download()``; until then ``available()`` says what's missing."""
 
     RATE = 16000
 
@@ -716,12 +716,22 @@ class _Speech:
         ctx.on_stop(self.cancel)
 
     def available(self) -> tuple[bool, str]:
-        from . import lyric_align
-        if not lyric_align.runtime_available():
+        from . import speech_whisper
+        if not speech_whisper.runtime_available():
             return False, "voice needs onnxruntime (python-onnxruntime-cpu)"
-        if not lyric_align.model_installed():
-            return False, "voice needs the speech model: settings → playback → lyrics → precise timing"
+        if not speech_whisper.installed():
+            return False, "voice needs its speech model first"
         return True, ""
+
+    def model_size_mb(self) -> int:
+        from . import speech_whisper
+        return round(speech_whisper.total_bytes() / 1e6)
+
+    def download(self, on_progress=None, on_done=None, on_error=None) -> None:
+        """fetch the speech model off the gui thread. ``on_progress(done,
+        total)`` may arrive from the download thread: keep it cheap."""
+        from . import speech_whisper
+        self._ctx.jobs.run(lambda: speech_whisper.download(on_progress), on_done, on_error)
 
     def listening(self) -> bool:
         return self._proc is not None
@@ -773,19 +783,11 @@ class _Speech:
 
         def work():
             import numpy as np
-            from . import lyric_align
+            from . import speech_whisper
             if len(pcm) < self.RATE:            # under half a second: nothing said
                 return ""
             audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-            logits = lyric_align._run_model(audio)
-            inv = {i: ch for ch, i in lyric_align.VOCAB.items()}
-            out, prev = [], None
-            for t in logits.argmax(axis=-1):
-                t = int(t)
-                if t != prev and t != lyric_align.BLANK and t in inv:
-                    out.append(inv[t])
-                prev = t
-            return " ".join("".join(out).replace("|", " ").split()).lower()
+            return speech_whisper.transcribe(audio)
         self._ctx.jobs.run(work, on_done, on_error)
 
 

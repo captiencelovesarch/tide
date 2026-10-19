@@ -254,3 +254,63 @@ class Attention:
             else:
                 self.alpha = max(target, self.alpha - step)
         return self.alpha, self.alpha <= 0.0
+
+
+def ease_out_back(t: float, overshoot: float = 1.6) -> float:
+    """modern's springy ease: past the target a little, then settles."""
+    t = min(1.0, max(0.0, t)) - 1.0
+    return 1.0 + t * t * ((overshoot + 1.0) * t + overshoot)
+
+
+def to_local(pose: np.ndarray, point: np.ndarray) -> np.ndarray:
+    """``point`` in ``pose``'s own frame: x right, y up, z out of its face."""
+    return (np.linalg.inv(pose) @ np.append(np.asarray(point, float), 1.0))[:3]
+
+
+class Poke:
+    """a fingertip against a flat panel, as mouse events.
+
+    the finger hovers within HOVER_M in front of the surface, presses when
+    it reaches PRESS_M coming from the front (not when it starts behind
+    the panel), drags while pressed, and lets go when it pulls back past
+    RELEASE_M (the gap stops a shaky finger from double-clicking), slides
+    off the edge, or goes right through (THROUGH_M)."""
+
+    HOVER_M = 0.04
+    PRESS_M = 0.006
+    RELEASE_M = 0.016
+    THROUGH_M = -0.06
+    MARGIN_M = 0.01
+
+    def __init__(self) -> None:
+        self.pressed = False
+        self.hovering = False
+        self._last_z: float | None = None
+
+    def reset(self) -> None:
+        self.pressed = False
+        self.hovering = False
+        self._last_z = None
+
+    def update(self, local: np.ndarray, width: float, height: float) -> list[tuple[str, float, float]]:
+        """events as (kind, u, v), u and v 0..1 from the panel's top left."""
+        x, y, z = (float(c) for c in local)
+        inside = abs(x) <= width / 2 + self.MARGIN_M and abs(y) <= height / 2 + self.MARGIN_M
+        u = min(1.0, max(0.0, x / width + 0.5))
+        v = min(1.0, max(0.0, 0.5 - y / height))
+        came_from_front = self._last_z is not None and self._last_z > self.PRESS_M
+        self._last_z = z
+        out: list[tuple[str, float, float]] = []
+        if self.pressed:
+            if z > self.RELEASE_M or z < self.THROUGH_M or not inside:
+                self.pressed = False
+                out.append(("up", u, v))
+            else:
+                out.append(("move", u, v))
+        elif inside and z <= self.PRESS_M and z > self.THROUGH_M and came_from_front:
+            self.pressed = True
+            out += [("move", u, v), ("down", u, v)]
+        elif inside and 0.0 < z < self.HOVER_M:
+            out.append(("move", u, v))
+        self.hovering = self.pressed or (inside and 0.0 < z < self.HOVER_M)
+        return out

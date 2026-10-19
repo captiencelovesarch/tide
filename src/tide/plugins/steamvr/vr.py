@@ -35,9 +35,15 @@ from . import ring as ringmod
 log = logging.getLogger("tide.plugin.steamvr")
 
 HERE = Path(__file__).resolve().parent
-RETRY_S = 10.0
+RETRY_S = 10.0             # reconnect backoff goes 2 → 4 → 8 → 10 s
 STALL_S = 0.5
+STALLS_TO_GIVE_UP = 3      # in a row: one slow upload (a big first texture) isn't a dead compositor
 GROW_S = 0.25
+SPRING_S = 0.42            # modern's springy open
+CLOSE_S = 0.22
+WATCH_POP_S = 0.3
+POKE_NEAR_M = 0.30         # a hand this close to the panel: it stops being a laser target...
+POKE_FAR_M = 0.45          # ...until both hands are this far again
 PANEL_PX = (1000, 640)
 PANEL_WIDTH_M = {"small": 0.34, "medium": 0.42, "large": 0.50}
 WATCH_PX = 256
@@ -127,14 +133,13 @@ class _Overlay:
         self.ov, self.gl = ov, gl
         self.h = ov.createOverlay(key, name)
         ov.setOverlayWidthInMeters(self.h, width_m)
+        self.interactive = False
         if interactive:
-            ov.setOverlayInputMethod(self.h, openvr.VROverlayInputMethod_Mouse)
             scale = openvr.HmdVector2_t()
             scale.v[0], scale.v[1] = float(px[0]), float(px[1])
             ov.setOverlayMouseScale(self.h, scale)
-            # steamvr draws its laser at it outside the dashboard
-            ov.setOverlayFlag(self.h, openvr.VROverlayFlags_MakeOverlaysInteractiveIfVisible, True)
             ov.setOverlayFlag(self.h, openvr.VROverlayFlags_SendVRSmoothScrollEvents, True)
+            self.set_interactive(True)
         bounds = openvr.VRTextureBounds_t()
         bounds.uMin, bounds.uMax, bounds.vMin, bounds.vMax = 0.0, 1.0, 1.0, 0.0
         ov.setOverlayTextureBounds(self.h, bounds)
@@ -153,6 +158,19 @@ class _Overlay:
         self.ov.setOverlayTexture(self.h, t)
         self.has_frame = True
         return time.perf_counter() - t0
+
+    def set_interactive(self, on: bool) -> None:
+        """a laser target or not. while it is one, steamvr takes the
+        controllers while you point at it and our hand-skeleton reads stop,
+        so poking needs it off."""
+        import openvr
+        if on == self.interactive:
+            return
+        self.interactive = on
+        self.ov.setOverlayInputMethod(
+            self.h, openvr.VROverlayInputMethod_Mouse if on else openvr.VROverlayInputMethod_None)
+        # steamvr draws its laser at it outside the dashboard
+        self.ov.setOverlayFlag(self.h, openvr.VROverlayFlags_MakeOverlaysInteractiveIfVisible, on)
 
     def place(self, pose: np.ndarray) -> None:
         import openvr
@@ -241,21 +259,45 @@ class VrThread(QThread):
         while not self._stop and time.monotonic() < end:
             time.sleep(0.1)
 
+    def _note(self, text: str) -> None:
+        """a line in sessions.log (the plugin's data dir): every session's
+        start and end, and each kind of per-tick error once. the first
+        "it keeps disconnecting" report had nothing to go on."""
+        path = self.settings.get("log_path")
+        if not path:
+            return
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+        except OSError:
+            pass
+
     def run(self) -> None:
+        retry = 2.0
         while not self._stop:
             if not self._steamvr_running():
                 self.bridge.status.emit("waiting for steamvr")
                 self._sleep(RETRY_S)
                 continue
+            started = time.monotonic()
             try:
                 self._session()
-            except _Lost as why:
-                self.bridge.status.emit(str(why))
-                self._sleep(RETRY_S)
+                why = "stopped"
+            except _Lost as lost:
+                why = str(lost)
             except Exception as exc:  # noqa: BLE001 - never let the thread die quietly
                 log.exception("vr session failed")
-                self.bridge.status.emit(f"error: {exc}"[:120])
-                self._sleep(RETRY_S)
+                import traceback
+                why = f"error: {exc}"
+                self._note("".join(traceback.format_exception(exc)).rstrip())
+            self._note(f"session ended after {time.monotonic() - started:.0f} s: {why}")
+            if self._stop:
+                return
+            self.bridge.status.emit(f"{why} · reconnecting"[:120])
+            # a session that ran a while gets a quick retry; one that keeps
+            # failing backs off
+            retry = 2.0 if time.monotonic() - started > 60 else min(RETRY_S, retry * 2)
+            self._sleep(retry)
 
     def _steamvr_running(self) -> bool:
         """a background-type init fails instead of launching steamvr, so
@@ -291,6 +333,7 @@ class VrThread(QThread):
             self._input()
             self.bridge.lens.emit(self._lens())
             self.bridge.status.emit("connected")
+            self._note("connected")
             self._loop()
         finally:
             for o in overlays + self.rings:
@@ -371,6 +414,13 @@ class VrThread(QThread):
         self.dwell = geo.Dwell()
         self.flash = geo.FlashLimiter()
         self.ripple = ringmod.Ripple()
+        self.pokes = {side: geo.Poke() for side in SIDES}
+        self.poke_px = (-1.0, -1.0)
+        self.closing_at: float | None = None
+        self.closing_from = 1.0
+        self.watch_popped_at = -1e9
+        self.stalls = 0
+        self._errors_seen: set[str] = set()
         frames: dict[str, object] = {}
         next_t = time.perf_counter()
         while not self._stop:
@@ -383,22 +433,50 @@ class VrThread(QThread):
                     self.input.updateActionState(self.sets)
                 except openvr.OpenVRError:
                     pass
-            self._commands(frames)
+            self._guard("commands", self._commands, frames)
             if self.panel_open:
-                self._panel_tick(now)
+                self._guard("panel", self._panel_tick, now)
             else:
-                self._watch_tick(now)
-            self._ring_tick(now)
+                self._guard("watch", self._watch_tick, now)
+            self._guard("closing", self._closing_tick, now)
+            self._guard("ring", self._ring_tick, now)
             for name, ov in (("panel", self.panel), ("watch", self.watch)):
                 img = frames.pop(name, None)
-                if img is not None and ov.upload(img) > STALL_S:
-                    raise _Lost("steamvr stopped answering")
+                if img is None:
+                    continue
+                if ov.upload(img) > STALL_S:
+                    self.stalls += 1
+                    if self.stalls >= STALLS_TO_GIVE_UP:
+                        raise _Lost("steamvr stopped answering")
+                else:
+                    self.stalls = 0
             next_t += 1.0 / hz
             delay = next_t - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
             else:
                 next_t = time.perf_counter()
+
+    def _guard(self, where: str, fn, *args) -> None:
+        """one tick of one part. an error there is noted once and skipped;
+        it no longer ends the whole session (a stray bad pose or a failed
+        read used to disconnect you). steamvr really going away still
+        does (_Lost)."""
+        try:
+            fn(*args)
+        except _Lost:
+            raise
+        except Exception as exc:  # noqa: BLE001 - see above
+            key = f"{where}:{type(exc).__name__}:{exc}"
+            if key not in self._errors_seen:
+                self._errors_seen.add(key)
+                log.exception("vr %s tick failed", where)
+                import traceback
+                self._note(f"{where} tick failed (once noted, carrying on): "
+                           + "".join(traceback.format_exception(exc)).rstrip())
+
+    def _springy(self) -> bool:
+        return self._animate() and self.settings.get("springy", False)
 
     def _events(self) -> None:
         import openvr
@@ -512,6 +590,15 @@ class VrThread(QThread):
                 pass
         return geo.fingertip_from_controller(ctrl)
 
+    def _buzz_hand(self, side: str, seconds: float, freq: float, amp: float) -> None:
+        if self.input is None or not self.settings.get("haptics", True):
+            return
+        try:
+            self.input.triggerHapticVibrationAction(
+                self.haptic, 0.0, seconds, freq, amp, self.sources[side])
+        except Exception:  # noqa: BLE001 - haptics are a nicety
+            pass
+
     def _buzz(self, seconds: float, freq: float, amp: float) -> None:
         if self.input is None or not self.settings.get("haptics", True):
             return
@@ -533,22 +620,25 @@ class VrThread(QThread):
         if shown != was:
             self.bridge.watch_visible.emit(shown)
             self.dwell.reset()
-            self.watch.width(WATCH_WIDTH_M)
+            self.watch_popped_at = now
         self.watch.show(shown and self.watch.has_frame)
         if not shown or hmd is None or ctrl is None:
             return
         pos = geo.wrist_point(ctrl, side)
         self.watch.place(geo.facing(pos, hmd[:3, 3]))
+        # modern: it pops in with a little overshoot
+        pop = (geo.ease_out_back((now - self.watch_popped_at) / WATCH_POP_S)
+               if self._springy() else 1.0)
 
+        fill = 0.0
         if self.settings.get("open_by_looking", True):
             ang, _d = geo.off_center_deg(hmd, pos)
             fill = self.dwell.update(now, ang <= geo.DWELL_LOOK_DEG)
-            # it swells as you look, so you see it's about to open
-            self.watch.width(WATCH_WIDTH_M * (1.0 + WATCH_SWELL * fill))
-            if fill >= 1.0:
-                self._open("watch (looked)", now)
-                return
-
+        # it swells as you look, so you see it's about to open
+        self.watch.width(WATCH_WIDTH_M * max(0.05, pop) * (1.0 + WATCH_SWELL * fill))
+        if fill >= 1.0:
+            self._open("watch (looked)", now)
+            return
         other = "right" if side == "left" else "left"
         tip = self._fingertip(other)
         if tip is not None and float(np.linalg.norm(tip - pos)) <= geo.POKE_M:
@@ -563,6 +653,10 @@ class VrThread(QThread):
         if hmd is None:
             return
         self.panel_open = True
+        self.closing_at = None
+        for p in self.pokes.values():
+            p.reset()
+        self.panel.set_interactive(True)
         self.panel_pose = geo.spawn_in_front(hmd)
         self.panel.place(self.panel_pose)
         self.opened_at = now
@@ -589,10 +683,28 @@ class VrThread(QThread):
                 pass
             self.bridge.keyboard_closed.emit()
         self.panel_open = False
-        self.panel.show(False)
+        for p in self.pokes.values():
+            p.reset()
+        if self._springy() and self.panel.visible:
+            # modern: a quick shrink and fade instead of vanishing
+            self.closing_at = time.perf_counter()
+        else:
+            self.panel.show(False)
         self.bridge.panel_mouse.emit("leave", 0.0, 0.0)
         self._buzz(0.03, 200, 0.6)
         self.bridge.panel_closed.emit(why)
+
+    def _closing_tick(self, now: float) -> None:
+        if self.closing_at is None:
+            return
+        t = (now - self.closing_at) / CLOSE_S
+        if t >= 1.0:
+            self.closing_at = None
+            self.panel.show(False)
+            return
+        k = 1.0 - t * t
+        self.panel.alpha(self.closing_from * k)
+        self.panel.width(self._panel_width() * (1.0 - 0.08 * t))
 
     def _panel_tick(self, now: float) -> None:
         import openvr
@@ -616,20 +728,63 @@ class VrThread(QThread):
             return
         center = self.panel_pose[:3, 3]
         gaze, _d = geo.off_center_deg(hmd, center)
-        hands = [self._controller(s) for s in SIDES]
-        hand_m = min((float(np.linalg.norm(c[:3, 3] - center)) for c in hands if c is not None),
-                     default=99.0)
-        alpha, close = self.attention.update(now, gaze, hand_m, now - self.last_touch)
-        # opening: the panel grows to size as it fades in
-        grow = 1.0
+        hands = {s: self._controller(s) for s in SIDES}
+        hand_m = min((float(np.linalg.norm(c[:3, 3] - center)) for c in hands.values()
+                      if c is not None), default=99.0)
+        # opening: the panel grows to size as it fades in; modern springs
+        grow, fade_in = 1.0, 1.0
         if self.attention.animate:
-            t = geo.ease_out((now - self.opened_at) / GROW_S)
-            grow = 0.3 + 0.7 * t
-            alpha = min(alpha, t)
-        self.panel.width(self._panel_width() * grow)
+            age = now - self.opened_at
+            if self._springy():
+                grow = 0.6 + 0.4 * geo.ease_out_back(age / SPRING_S)
+                fade_in = geo.ease_out(age / 0.18)
+            else:
+                fade_in = geo.ease_out(age / GROW_S)
+                grow = 0.3 + 0.7 * fade_in
+        width = self._panel_width() * grow
+        self._poke(now, hands, hand_m, width)
+        alpha, close = self.attention.update(now, gaze, hand_m, now - self.last_touch)
+        alpha = min(alpha, fade_in)
+        self.closing_from = alpha
+        self.panel.width(width)
         self.panel.alpha(alpha)
         if close:
             self._close("looked away")
+
+    def _poke(self, now: float, hands: dict, hand_m: float, width: float) -> None:
+        """your index fingertip on the panel, as mouse events. near the
+        panel it stops being a laser target, so the skeleton keeps
+        reporting your finger (2026-10-19: poking the panel did nothing,
+        only the watch took pokes)."""
+        if hand_m < POKE_NEAR_M:
+            self.panel.set_interactive(False)
+        elif hand_m > POKE_FAR_M and not any(p.pressed for p in self.pokes.values()):
+            self.panel.set_interactive(True)
+        if self.panel.interactive:
+            return
+        height = width * PANEL_PX[1] / PANEL_PX[0]
+        pressing = next((s for s, p in self.pokes.items() if p.pressed), None)
+        order = [pressing] if pressing else list(SIDES)
+        for side in order:
+            if hands.get(side) is None:
+                continue
+            tip = self._fingertip(side)
+            if tip is None:
+                continue
+            local = geo.to_local(self.panel_pose, tip)
+            for kind, u, v in self.pokes[side].update(local, width, height):
+                x, y = u * PANEL_PX[0], v * PANEL_PX[1]
+                if kind == "move" and abs(x - self.poke_px[0]) < 0.5 and abs(y - self.poke_px[1]) < 0.5:
+                    continue
+                self.poke_px = (x, y)
+                self.bridge.panel_mouse.emit(kind, x, y)
+                if kind == "down":
+                    self._buzz_hand(side, 0.02, 220, 0.8)
+                elif kind == "up":
+                    self._buzz_hand(side, 0.012, 260, 0.4)
+            if self.pokes[side].hovering:
+                self.last_touch = now
+                break
 
     # ---- ring ----
 

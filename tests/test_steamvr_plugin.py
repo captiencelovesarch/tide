@@ -381,3 +381,120 @@ class PluginLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PokeTests(unittest.TestCase):
+    """a fingertip on the panel (2026-10-19: poking it did nothing)."""
+
+    W, H = 0.42, 0.42 * 640 / 1000
+
+    def run_path(self, zs, x=0.0, y=0.0):
+        poke = geo.Poke()
+        out = []
+        for z in zs:
+            out += [k for k, _u, _v in poke.update(np.array([x, y, z]), self.W, self.H)]
+        return poke, out
+
+    def test_press_drag_release(self):
+        poke, kinds = self.run_path([0.05, 0.03, 0.01, 0.004, 0.002, 0.003, 0.02])
+        self.assertIn("down", kinds)
+        self.assertEqual(kinds.count("down"), 1)
+        self.assertEqual(kinds[-1], "up")
+        self.assertFalse(poke.pressed)
+
+    def test_shaky_finger_doesnt_double_click(self):
+        # wobbling a few mm around the surface stays one press
+        _poke, kinds = self.run_path([0.03, 0.005, 0.009, 0.004, 0.012, 0.003, 0.03])
+        self.assertEqual(kinds.count("down"), 1)
+        self.assertEqual(kinds.count("up"), 1)
+
+    def test_no_press_from_behind(self):
+        _poke, kinds = self.run_path([-0.03, -0.01, 0.0, 0.004])
+        self.assertNotIn("down", kinds)
+
+    def test_through_the_panel_lets_go(self):
+        _poke, kinds = self.run_path([0.02, 0.004, -0.02, -0.07])
+        self.assertEqual(kinds[-1], "up")
+
+    def test_outside_does_nothing(self):
+        _poke, kinds = self.run_path([0.02, 0.004], x=0.5)
+        self.assertEqual(kinds, [])
+
+    def test_coordinates(self):
+        poke = geo.Poke()
+        poke.update(np.array([0.0, 0.0, 0.02]), self.W, self.H)
+        events = poke.update(np.array([-self.W / 2, self.H / 2, 0.004]), self.W, self.H)
+        _k, u, v = events[-1]
+        self.assertAlmostEqual(u, 0.0)
+        self.assertAlmostEqual(v, 0.0)          # top left
+
+
+class SpringTests(unittest.TestCase):
+    def test_overshoots_then_lands(self):
+        values = [geo.ease_out_back(i / 50) for i in range(51)]
+        self.assertGreater(max(values), 1.0)
+        self.assertAlmostEqual(values[-1], 1.0)
+        self.assertAlmostEqual(values[0], 0.0)
+
+
+class GuardTests(unittest.TestCase):
+    """one bad tick no longer ends the session (2026-10-19 disconnects)."""
+
+    def test_a_failing_tick_is_noted_once_and_skipped(self):
+        import types
+        pkg = types.ModuleType("tide_plugins_guard_steamvr")
+        pkg.__path__ = [str(BUNDLED_DIR / "steamvr")]
+        sys.modules["tide_plugins_guard_steamvr"] = pkg
+        try:
+            vr = importlib.import_module("tide_plugins_guard_steamvr.vr")
+            log_path = Path(tempfile.mkdtemp()) / "sessions.log"
+            t = vr.VrThread(vr.VrBridge(), None, {"log_path": str(log_path)})
+            t._errors_seen = set()
+
+            def boom(_now):
+                raise ValueError("bad pose")
+            for _ in range(5):
+                t._guard("watch", boom, 0.0)          # no raise
+            self.assertEqual(log_path.read_text().count("watch tick failed"), 1)
+
+            def lost(_now):
+                raise vr._Lost("steamvr quit")
+            with self.assertRaises(vr._Lost):
+                t._guard("watch", lost, 0.0)
+        finally:
+            for name in [n for n in sys.modules if n.startswith("tide_plugins_guard_steamvr")]:
+                del sys.modules[name]
+
+
+class WhisperTests(unittest.TestCase):
+    def test_features_have_whispers_shape(self):
+        from tide import speech_whisper as sw
+        mel = sw.log_mel(np.zeros(16000, dtype=np.float32))
+        self.assertEqual(mel.shape, (80, 3000))
+        filters = sw.mel_filters()
+        self.assertEqual(filters.shape, (80, 201))
+        self.assertTrue((filters.sum(axis=1) > 0).all())
+
+    def test_pinned_files(self):
+        from tide import speech_whisper as sw
+        self.assertEqual(len(sw.FILES), 4)
+        self.assertEqual(round(sw.total_bytes() / 1e6), 78)
+        for _name, size, sha in sw.FILES.values():
+            self.assertEqual(len(sha), 64)
+
+    def test_hears_surreal(self):
+        """the word wav2vec2 got wrong. needs the model and espeak-ng."""
+        import shutil
+        import subprocess
+        import wave
+        from tide import speech_whisper as sw
+        if not sw.available() or shutil.which("espeak-ng") is None or shutil.which("ffmpeg") is None:
+            self.skipTest("no whisper model or espeak-ng here")
+        d = Path(tempfile.mkdtemp())
+        subprocess.run(["espeak-ng", "-v", "en-us", "-s", "150", "-w", str(d / "a.wav"), "surreal"],
+                       check=True, capture_output=True)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(d / "a.wav"), "-ar", "16000",
+                        "-ac", "1", str(d / "b.wav")], check=True)
+        w = wave.open(str(d / "b.wav"))
+        audio = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).astype(np.float32) / 32768
+        self.assertEqual(sw.transcribe(audio), "surreal")

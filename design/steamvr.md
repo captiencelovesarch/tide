@@ -624,6 +624,15 @@ replaces phases 4 and 5 in `plugins.md`.
   after, haptics.
 - **TIDE_VR_OFFLINE=1** keeps steamvr out of it (tests, panel work).
 
+- **round 4 (2026-10-19):** voice runs on whisper base.en (onnxruntime,
+  ~77 MB, `speech_whisper.py`; "surreal" now comes out "surreal").
+  poking the panel works: near a hand it stops being a laser target so
+  the finger skeleton keeps reporting. one bad tick no longer ends the
+  session; three slow uploads in a row do; reconnects back off from 2 s;
+  every session end lands in the plugin's `sessions.log`. speed is a
+  slider. modern gets a springy open, a shrink-and-fade close, a popping
+  watch, sliding tabs, press ripples and cover / lyric crossfades.
+
 ## spike findings
 
 running log from `tools/vr-spike`. each one changes the plan above.
