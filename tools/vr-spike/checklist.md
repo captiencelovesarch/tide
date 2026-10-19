@@ -62,8 +62,10 @@ steamvr's compositor in testing; `raw` and `file` both did).
 - [ ] if clicks land upside down (you point at the top, the bottom reacts),
       rerun with `--invert-clicks` and note it
 - [ ] the bottom line shows `tick p95` and `upload` times
-- [ ] click both sticks together three times, fast: both hands buzz and the
-      panel jumps back in front of you
+- [ ] click both sticks together three times, fast: two short buzzes and
+      the panel closes. do it again: one long buzz and it opens in front of
+      you. the terminal prints every `stick l down` / `stick r down`, so if
+      it doesn't fire, note whether those lines show up
 - [ ] when you close it the terminal ends with `teardown: qt events
       drained` and no segfault. if it crashes, copy the last lines
 

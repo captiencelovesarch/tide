@@ -73,8 +73,10 @@ class TripleClick:
     """both sticks clicked together, three times, quickly."""
 
     name = "stick triple-click"
-    PAIR_S = 0.15      # the two clicks of one "both" land this close
-    WINDOW_S = 1.2     # three pairs inside this
+    # first try was 0.15 / 1.2 s; clicking both sticks at once is awkward,
+    # so a little looser. tune these against the `sticks` recordings.
+    PAIR_S = 0.2       # the two clicks of one "both" land this close
+    WINDOW_S = 1.5     # three pairs inside this
 
     def __init__(self) -> None:
         self.prev = {s: False for s in SIDES}

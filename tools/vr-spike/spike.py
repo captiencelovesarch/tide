@@ -159,7 +159,8 @@ def cmd_png(args) -> None:
 
 class PanelLoop:
     """one hidden qt panel in vr: placement, laser input, redraws, stats,
-    and the stick triple-click (brings the panel back in front of you)."""
+    and the stick triple-click (closes the panel, or opens it in front of
+    you, the summon backup from design/steamvr.md)."""
 
     def __init__(self, s, widget, *, key: str, attach: str | None, invert_clicks: bool = False,
                  upload: str = "gl", gl_flip: bool = True) -> None:
@@ -186,6 +187,7 @@ class PanelLoop:
         widget.dirty.connect(self._mark)
         self.tick_ms, self.upload_ms = Stats(), Stats()
         self.triple = TripleClick()
+        self.visible = True
         self.sticks = {side: False for side in SIDES}
         self.focus_seen: list[str] = []
         self.on_tick = None
@@ -216,6 +218,23 @@ class PanelLoop:
         hmd = self.s.hmd()
         if hmd is not None:
             self.ov.place(spawn_in_front(hmd))
+
+    def toggle(self) -> None:
+        """the stick triple-click: open in front of you, or close."""
+        self.visible = not self.visible
+        if self.visible:
+            self.respawn()
+            self.ov.show()
+            self.dirty = True
+            for side in SIDES:
+                self.s.buzz(side, 0.08, 120, 0.9)
+        else:
+            self.ov.hide()
+            self.fwd.leave()
+            # two short buzzes for closing, one long for opening
+            for side in SIDES:
+                self.s.buzz(side, 0.03, 200, 0.7)
+        self._log(f"stick triple-click: panel {'open' if self.visible else 'closed'}")
 
     def _log(self, text: str) -> None:
         log = getattr(self.w, "log", None)
@@ -256,10 +275,7 @@ class PanelLoop:
                 self._log(f"stick {side[0]} {'down' if sticks[side] else 'up'}")
         self.sticks = sticks
         if self.triple.feed(Sample(now, None, {}, sticks)):
-            self._log("stick triple-click: panel back in front of you")
-            for side in SIDES:
-                self.s.buzz(side, 0.08, 120, 0.9)
-            self.respawn()
+            self.toggle()
 
         if self.on_tick is not None:
             self.on_tick()
@@ -279,7 +295,7 @@ class PanelLoop:
             self.dirty = True
 
         from vrcore import MAX_FPS, STALL_S
-        if (self.dirty and not self.uploads_stopped
+        if (self.dirty and self.visible and not self.uploads_stopped
                 and now - self._last_upload >= 1 / MAX_FPS[self.ov.mode]):
             img = QImage(self.W, self.H, QImage.Format_RGBA8888)
             img.fill(Qt.transparent)
