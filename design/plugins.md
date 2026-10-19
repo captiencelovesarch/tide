@@ -454,6 +454,12 @@ aur/source only.
 
 ## 4. steamvr plugin sketch
 
+> how it should feel (summoning, attention, poke, pin) and its build order
+> now live in `design/steamvr.md`. this section is the transport layer
+> underneath: runtime, textures, placement, laser, deps, risks. where the two
+> disagree, steamvr.md wins (it replaces the single wrist/hand/world panel
+> below with a bubble → panel that follows your attention).
+
 ### what it does
 
 a tide panel floating in vr while you're in a game: cover, title, artist,
@@ -589,7 +595,7 @@ proves those hooks, without waiting for the ui-hook work.
 
 each phase ends with something that works and ships on its own.
 
-**phase 0 · steamvr spike** (1 evening, separate script, no tide changes)
+**phase 0 · steamvr spike** (1–2 evenings, separate script, no tide changes. full checklist: `design/steamvr.md`, vr 0)
 - [ ] `pip install --user openvr` in a venv, a 50-line script: init as
       overlay, `setOverlayRaw` a png 0.6 m in front of you
 - [ ] same, but a rendered `QWidget` with a button
@@ -630,17 +636,14 @@ each phase ends with something that works and ships on its own.
 - done when: an existing user's discord and listenbrainz setup survives the
   upgrade untouched, and both can be switched off and on live.
 
-**phase 4 · steamvr plugin, laser** (3–4 days)
-- [ ] `ctx.beats`
-- [ ] `plugins/steamvr/`: runtime retry loop, `VrPanel`, raw upload,
-      world + hand placement, laser input, tray toggle, settings
+**phase 4 · steamvr plugin** (see `design/steamvr.md`, vr 1 to vr 3)
+- [ ] `ctx.beats`, plus the extra hooks steamvr.md lists
 - [ ] publish `python-openvr` to the aur, add the optdepend
-- done when: you skip a song from inside a game.
+- [ ] vr 1 (it shows up), vr 2 (it's physical), vr 3 (it lives here)
+- done when: in vivecraft you touch your headphones, skip a song, look
+  back at the game and it's gone.
 
-**phase 5 · steamvr, poke and grab** (3–5 days)
-- [ ] fingertip pose (skeletal or faked), poke press / drag, haptics
-- [ ] grab to move, saved pose, wrist mode with look-to-show
-- [ ] gl texture path if raw turned out too slow
+**phase 5** folded into phase 4.
 
 **phase 6 · ui hooks + tiles** (3 days)
 - [ ] view registry, tile registry, bar items that survive the plugin
