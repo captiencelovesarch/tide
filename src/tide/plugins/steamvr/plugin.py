@@ -133,6 +133,7 @@ class SteamVr:
             "ring": s["ring"],
             "ring_strength": s["ring_strength"],
             "motion_off": self.ctx.motion.off(),
+            "cursor": self.ctx.theme.token("accent", "#ffd400"),
         }
 
     def _apply_settings(self) -> None:

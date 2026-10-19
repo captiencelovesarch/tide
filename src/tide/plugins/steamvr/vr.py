@@ -11,9 +11,12 @@ thread. Learned in the spike (tools/vr-spike, design/steamvr.md):
 * overlays get no button input while a game has focus. tracking and laser
   clicks on our own overlays do arrive, so that's all this uses.
 * an interactive overlay (one the laser can click) takes the controllers
-  from the game while you point at it, and while one is up our hand
-  skeleton reads stop. so only the open panel is interactive; the watch
-  and the ring never are (h3vr froze when the watch came up mid-aim).
+  from the game while you point at it. so only the open panel is
+  interactive; the watch and the ring never are (h3vr froze when the
+  watch came up mid-aim). touch goes by controller poses, which keep
+  coming either way.
+* overlays draw over the game's controllers. seethrough.py thins the
+  panel where they are.
 
 The gui thread renders the qt panel and posts frames in; this thread
 posts what happened back out through VrBridge's signals.
@@ -31,6 +34,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from . import geometry as geo
 from . import ring as ringmod
+from . import seethrough
 
 log = logging.getLogger("tide.plugin.steamvr")
 
@@ -42,15 +46,13 @@ GROW_S = 0.25
 SPRING_S = 0.42            # modern's springy open
 CLOSE_S = 0.22
 WATCH_POP_S = 0.3
-POKE_NEAR_M = 0.30         # a hand this close to the panel: it stops being a laser target...
-POKE_FAR_M = 0.45          # ...until both hands are this far again
+SEE_THROUGH_HZ = 45        # redraws of the windows over your controllers, at most
 PANEL_PX = (1000, 640)
 PANEL_WIDTH_M = {"small": 0.34, "medium": 0.42, "large": 0.50}
 WATCH_PX = 256
 WATCH_WIDTH_M = 0.045
 WATCH_SWELL = 0.35         # how much bigger the watch grows as look-to-open fills
 SIDES = ("left", "right")
-INDEX_TIP_BONE = 10
 
 
 def to_np(m34) -> np.ndarray:
@@ -348,8 +350,8 @@ class VrThread(QThread):
             self.bridge.watch_visible.emit(False)
 
     def _input(self) -> None:
-        """hand skeletons and haptics. no buttons: an overlay never gets
-        them while a game has focus."""
+        """haptics. no buttons: an overlay never gets them while a game
+        has focus."""
         import openvr
         self.input = None
         try:
@@ -361,7 +363,6 @@ class VrThread(QThread):
             self.sources = {s: inp.getInputSourceHandle(f"/user/hand/{s}") for s in SIDES}
             self.sets = (openvr.VRActiveActionSet_t * 1)()
             self.sets[0].ulActionSet = inp.getActionSetHandle("/actions/tide")
-            self.bones = (openvr.VRBoneTransform_t * 31)()
             self.input = inp
         except openvr.OpenVRError as exc:
             log.warning("no hand input: %s", exc)
@@ -416,6 +417,13 @@ class VrThread(QThread):
         self.ripple = ringmod.Ripple()
         self.pokes = {side: geo.Poke() for side in SIDES}
         self.poke_px = (-1.0, -1.0)
+        self.touch = geo.TouchMode()
+        self.panel_base = None           # the gui's last frame, before seethrough
+        self.see_caps: list = []
+        self.see_cursor = None
+        self.see_width = self._panel_width()
+        self.drawn = ([], None)
+        self.drawn_at = -1e9
         self.closing_at: float | None = None
         self.closing_from = 1.0
         self.watch_popped_at = -1e9
@@ -440,22 +448,47 @@ class VrThread(QThread):
                 self._guard("watch", self._watch_tick, now)
             self._guard("closing", self._closing_tick, now)
             self._guard("ring", self._ring_tick, now)
-            for name, ov in (("panel", self.panel), ("watch", self.watch)):
-                img = frames.pop(name, None)
-                if img is None:
-                    continue
-                if ov.upload(img) > STALL_S:
-                    self.stalls += 1
-                    if self.stalls >= STALLS_TO_GIVE_UP:
-                        raise _Lost("steamvr stopped answering")
-                else:
-                    self.stalls = 0
+            img = frames.pop("watch", None)
+            if img is not None:
+                self._upload(self.watch, img)
+            fresh = frames.pop("panel", None)
+            if fresh is not None:
+                self.panel_base = fresh
+            img = self._panel_image(now, fresh is not None)
+            if img is not None:
+                self._upload(self.panel, img)
             next_t += 1.0 / hz
             delay = next_t - time.perf_counter()
             if delay > 0:
                 time.sleep(delay)
             else:
                 next_t = time.perf_counter()
+
+    def _upload(self, ov: _Overlay, img) -> None:
+        if ov.upload(img) > STALL_S:
+            self.stalls += 1
+            if self.stalls >= STALLS_TO_GIVE_UP:
+                raise _Lost("steamvr stopped answering")
+        else:
+            self.stalls = 0
+
+    def _panel_image(self, now: float, fresh: bool):
+        """the frame to upload this tick, if any: the gui's last one with
+        the windows over your controllers and the cursor on top."""
+        if self.panel_base is None:
+            return None
+        caps, cur = self.see_caps, self.see_cursor
+        if not fresh:
+            if seethrough.same(caps, self.drawn[0]) and seethrough.same(cur, self.drawn[1]):
+                return None
+            if now - self.drawn_at < 1.0 / SEE_THROUGH_HZ:
+                return None
+        self.drawn = (caps, cur)
+        self.drawn_at = now
+        if not caps and cur is None:
+            return self.panel_base
+        return seethrough.compose(self.panel_base, caps, cur, self.see_width,
+                                  self.settings.get("cursor", "#ffffff"))
 
     def _guard(self, where: str, fn, *args) -> None:
         """one tick of one part. an error there is noted once and skipped;
@@ -570,25 +603,10 @@ class VrThread(QThread):
         p = self.poses[idx]
         return to_np(p.mDeviceToAbsoluteTracking) if p.bPoseIsValid else None
 
-    def _fingertip(self, side: str) -> np.ndarray | None:
-        """the index fingertip: the skeleton's tip bone on the controller's
-        pose (the spike's recordings: the skeleton root is the raw pose, and
-        that matches the tracked pose to half a millimetre), else a fixed
-        point on the controller."""
-        import openvr
+    def _tip(self, side: str) -> np.ndarray | None:
+        """the front tip of a controller, what you touch things with."""
         ctrl = self._controller(side)
-        if ctrl is None:
-            return None
-        if self.input is not None:
-            try:
-                self.input.getSkeletalBoneData(
-                    self.act[f"hand_{side}"], openvr.VRSkeletalTransformSpace_Model,
-                    openvr.VRSkeletalMotionRange_WithoutController, self.bones)
-                tip = self.bones[INDEX_TIP_BONE].position.v
-                return geo.fingertip_from_skeleton(ctrl, [tip[0], tip[1], tip[2]])
-            except openvr.OpenVRError:
-                pass
-        return geo.fingertip_from_controller(ctrl)
+        return None if ctrl is None else geo.controller_tip(ctrl, side)
 
     def _buzz_hand(self, side: str, seconds: float, freq: float, amp: float) -> None:
         if self.input is None or not self.settings.get("haptics", True):
@@ -640,7 +658,7 @@ class VrThread(QThread):
             self._open("watch (looked)", now)
             return
         other = "right" if side == "left" else "left"
-        tip = self._fingertip(other)
+        tip = self._tip(other)
         if tip is not None and float(np.linalg.norm(tip - pos)) <= geo.POKE_M:
             self._open("watch (poked)", now)
 
@@ -656,6 +674,7 @@ class VrThread(QThread):
         self.closing_at = None
         for p in self.pokes.values():
             p.reset()
+        self.touch.reset()
         self.panel.set_interactive(True)
         self.panel_pose = geo.spawn_in_front(hmd)
         self.panel.place(self.panel_pose)
@@ -685,6 +704,8 @@ class VrThread(QThread):
         self.panel_open = False
         for p in self.pokes.values():
             p.reset()
+        self.touch.reset()
+        self.see_caps, self.see_cursor = [], None
         if self._springy() and self.panel.visible:
             # modern: a quick shrink and fade instead of vanishing
             self.closing_at = time.perf_counter()
@@ -742,7 +763,9 @@ class VrThread(QThread):
                 fade_in = geo.ease_out(age / GROW_S)
                 grow = 0.3 + 0.7 * fade_in
         width = self._panel_width() * grow
-        self._poke(now, hands, hand_m, width)
+        self.see_width = width
+        self._poke(now, hands, width)
+        self.see_caps = seethrough.holes(self.panel_pose, hmd[:3, 3], hands, width, PANEL_PX)
         alpha, close = self.attention.update(now, gaze, hand_m, now - self.last_touch)
         alpha = min(alpha, fade_in)
         self.closing_from = alpha
@@ -751,28 +774,34 @@ class VrThread(QThread):
         if close:
             self._close("looked away")
 
-    def _poke(self, now: float, hands: dict, hand_m: float, width: float) -> None:
-        """your index fingertip on the panel, as mouse events. near the
-        panel it stops being a laser target, so the skeleton keeps
-        reporting your finger (2026-10-19: poking the panel did nothing,
-        only the watch took pokes)."""
-        if hand_m < POKE_NEAR_M:
-            self.panel.set_interactive(False)
-        elif hand_m > POKE_FAR_M and not any(p.pressed for p in self.pokes.values()):
-            self.panel.set_interactive(True)
-        if self.panel.interactive:
-            return
+    def _poke(self, now: float, hands: dict, width: float) -> None:
+        """a controller tip on the panel, as mouse events. with a tip right
+        at it the panel stops being a laser target, so the laser and your
+        hand don't both drive the cursor; pull away and the laser's back."""
         height = width * PANEL_PX[1] / PANEL_PX[0]
+        local = {side: geo.to_local(self.panel_pose, geo.controller_tip(c, side))
+                 for side, c in hands.items() if c is not None}
         pressing = next((s for s, p in self.pokes.items() if p.pressed), None)
+        was = self.touch.touching
+        touching = self.touch.update(list(local.values()), width, height, pressing is not None)
+        self.panel.set_interactive(not touching)
+        if touching:
+            self._touch(now, local, width, height, pressing)
+        elif was:
+            for p in self.pokes.values():
+                p.reset()
+            self.poke_px = (-1.0, -1.0)
+            self.bridge.panel_mouse.emit("leave", 0.0, 0.0)
+        pressing = next((s for s, p in self.pokes.items() if p.pressed), None)
+        self.see_cursor = seethrough.cursor(local, width, PANEL_PX, pressing)
+
+    def _touch(self, now: float, local: dict, width: float, height: float,
+               pressing: str | None) -> None:
         order = [pressing] if pressing else list(SIDES)
         for side in order:
-            if hands.get(side) is None:
+            if side not in local:
                 continue
-            tip = self._fingertip(side)
-            if tip is None:
-                continue
-            local = geo.to_local(self.panel_pose, tip)
-            for kind, u, v in self.pokes[side].update(local, width, height):
+            for kind, u, v in self.pokes[side].update(local[side], width, height):
                 x, y = u * PANEL_PX[0], v * PANEL_PX[1]
                 if kind == "move" and abs(x - self.poke_px[0]) < 0.5 and abs(y - self.poke_px[1]) < 0.5:
                     continue

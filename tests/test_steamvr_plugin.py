@@ -429,6 +429,141 @@ class PokeTests(unittest.TestCase):
         self.assertAlmostEqual(v, 0.0)          # top left
 
 
+def _seethrough():
+    import types
+    pkg = types.ModuleType("tide_plugins_see_steamvr")
+    pkg.__path__ = [str(BUNDLED_DIR / "steamvr")]
+    sys.modules["tide_plugins_see_steamvr"] = pkg
+    return importlib.import_module("tide_plugins_see_steamvr.seethrough")
+
+
+def _facing_head(z=-0.5):
+    """a panel at head height ``z`` out, its face toward the head."""
+    return at(0.0, 1.7, z)
+
+
+class ControllerTipTests(unittest.TestCase):
+    """touch comes from the front of the controller, not a fingertip 11 cm
+    past it (2026-10-19)."""
+
+    def test_tip_is_on_the_controller(self):
+        ctrl = at(0.2, 1.2, -0.3)
+        for side in ("left", "right"):
+            tip = geo.controller_tip(ctrl, side)
+            self.assertLess(np.linalg.norm(tip - ctrl[:3, 3]), 0.03)
+
+    def test_hands_mirror(self):
+        ctrl = at(0.0, 0.0, 0.0)
+        left, right = geo.controller_tip(ctrl, "left"), geo.controller_tip(ctrl, "right")
+        self.assertAlmostEqual(left[0], -right[0])
+        self.assertAlmostEqual(left[1], right[1])
+
+
+class TouchModeTests(unittest.TestCase):
+    """laser or touch (2026-10-19: "laser doesn't work anymore")."""
+
+    W, H = 0.42, 0.42 * 640 / 1000
+
+    def test_hands_held_out_keep_the_laser(self):
+        # pointing from 25-40 cm away used to switch the laser off for good
+        mode = geo.TouchMode()
+        for z in (0.40, 0.30, 0.25, 0.2, 0.3):
+            self.assertFalse(mode.update([np.array([0.05, -0.05, z])], self.W, self.H, False))
+
+    def test_a_tip_at_the_panel_switches_to_touch_and_back(self):
+        mode = geo.TouchMode()
+        self.assertTrue(mode.update([np.array([0.0, 0.0, 0.05])], self.W, self.H, False))
+        self.assertTrue(mode.update([np.array([0.0, 0.0, 0.12])], self.W, self.H, False))
+        self.assertFalse(mode.update([np.array([0.0, 0.0, 0.2])], self.W, self.H, False))
+
+    def test_a_press_holds_touch(self):
+        mode = geo.TouchMode()
+        mode.update([np.array([0.0, 0.0, 0.02])], self.W, self.H, False)
+        self.assertTrue(mode.update([np.array([0.0, 0.0, 0.3])], self.W, self.H, True))
+
+    def test_off_to_the_side_is_laser(self):
+        mode = geo.TouchMode()
+        self.assertFalse(mode.update([np.array([0.5, 0.0, 0.02])], self.W, self.H, False))
+
+
+class SeeThroughTests(unittest.TestCase):
+    """the panel thins out over a controller in front of it (2026-10-19:
+    "i can't see my controllers in front of the menu")."""
+
+    PX = (1000, 640)
+    W = 0.42
+
+    def setUp(self):
+        self.see = _seethrough()
+
+    def test_through_panel_scales_toward_the_eye(self):
+        panel = _facing_head()
+        x, y, r, front = geo.through_panel(panel, np.array([0.0, 1.7, 0.0]),
+                                           np.array([0.05, 1.7, -0.25]), 0.05)
+        self.assertTrue(front)
+        self.assertAlmostEqual(x, 0.1)        # halfway to the eye: twice as far out
+        self.assertAlmostEqual(r, 0.1)
+
+    def test_behind_lands_where_it_is(self):
+        panel = _facing_head()
+        x, _y, r, front = geo.through_panel(panel, np.array([0.0, 1.7, 0.0]),
+                                            np.array([0.05, 1.7, -0.6]), 0.05)
+        self.assertFalse(front)
+        self.assertAlmostEqual(x, 0.05)
+        self.assertAlmostEqual(r, 0.05)
+
+    def test_a_controller_in_front_makes_a_window(self):
+        panel = _facing_head()
+        hands = {"right": at(0.0, 1.7, -0.35), "left": None}
+        caps = self.see.holes(panel, np.array([0.0, 1.7, 0.0]), hands, self.W, self.PX)
+        self.assertEqual(len(caps), 1)
+        keep = self.see.mask(caps, self.W, self.PX)
+        g = self.see.GRID
+        self.assertAlmostEqual(float(keep[320 // g, 500 // g]), self.see.FLOOR, places=2)
+        self.assertAlmostEqual(float(keep[0, 0]), 1.0)
+
+    def test_behind_the_panel_or_off_it_makes_none(self):
+        panel = _facing_head()
+        eye = np.array([0.0, 1.7, 0.0])
+        self.assertEqual(self.see.holes(panel, eye, {"right": at(0.0, 1.7, -0.8)}, self.W, self.PX), [])
+        self.assertEqual(self.see.holes(panel, eye, {"right": at(0.0, 0.9, -0.3)}, self.W, self.PX), [])
+
+    def test_cursor_shrinks_as_you_close_in(self):
+        far = self.see.cursor({"right": np.array([0.0, 0.0, 0.09])}, self.W, self.PX, None)
+        near = self.see.cursor({"right": np.array([0.0, 0.0, 0.01])}, self.W, self.PX, None)
+        self.assertLess(far[2], near[2])
+        self.assertAlmostEqual(near[0], 500)
+        self.assertIsNone(self.see.cursor({"right": np.array([0.0, 0.0, 0.3])}, self.W, self.PX, None))
+        pressed = self.see.cursor({"right": np.array([0.0, 0.0, -0.02])}, self.W, self.PX, "right")
+        self.assertTrue(pressed[3])
+
+    def test_compose_thins_the_panel_and_leaves_the_frame_alone(self):
+        import time
+        from PySide6.QtGui import QColor, QGuiApplication, QImage
+        _app = QGuiApplication.instance() or QGuiApplication([])
+        base = QImage(*self.PX, QImage.Format_RGBA8888)
+        base.fill(QColor(20, 20, 20, 255))
+        caps = [(500.0, 320.0, 120.0, 520.0, 600.0, 140.0)]
+        t0 = time.perf_counter()
+        out = self.see.compose(base, caps, (100.0, 100.0, 0.5, False), self.W, "#ffd400")
+        took = time.perf_counter() - t0
+        self.assertLess(QColor.fromRgba(out.pixel(500, 320)).alpha(), 80)
+        self.assertEqual(QColor.fromRgba(out.pixel(900, 50)).alpha(), 255)
+        self.assertEqual(QColor.fromRgba(base.pixel(500, 320)).alpha(), 255)
+        # the ring of the cursor is drawn ~18 px out from its middle
+        ring = QColor.fromRgba(out.pixel(100 + 17, 100))
+        self.assertGreater(ring.red(), 100)
+        self.assertLess(took, 0.02)
+
+    def test_same_skips_tiny_moves(self):
+        a = [(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)]
+        self.assertTrue(self.see.same(a, [(1.5, 2.0, 3.0, 4.0, 5.0, 6.0)]))
+        self.assertFalse(self.see.same(a, [(9.0, 2.0, 3.0, 4.0, 5.0, 6.0)]))
+        self.assertFalse(self.see.same(a, []))
+        self.assertTrue(self.see.same(None, None))
+        self.assertFalse(self.see.same(None, (1.0, 2.0, 0.5, False)))
+
+
 class SpringTests(unittest.TestCase):
     def test_overshoots_then_lands(self):
         values = [geo.ease_out_back(i / 50) for i in range(51)]

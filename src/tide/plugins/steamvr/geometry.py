@@ -25,10 +25,19 @@ WATCH_AIM_CLEAR_DEG = 55.0
 # look-to-open: keep the watch near the middle of your view this long
 DWELL_S = 1.0
 DWELL_LOOK_DEG = 15.0
-POKE_M = 0.025             # fingertip this close to the watch opens the panel
-# roughly where the index fingertip sits on a controller, for when the
-# hand skeleton isn't available
-FINGER_ON_CONTROLLER = np.array([0.0, -0.015, -0.09])
+POKE_M = 0.03              # a controller tip this close to the watch opens the panel
+# the front tip of an index controller, in its own frame (right hand; the
+# left mirrors x). steamvr's model calls it "tip" and the mesh ends there.
+# touch used to come from the skeleton's index fingertip, which floats
+# ~11 cm past the controller (2026-10-19: "move the touch point to the tip
+# of the index controller instead of ahead of it").
+TIP_ON_CONTROLLER = (-0.006, -0.015, 0.02)
+# the controller and the hand round it, as a capsule from the head ring
+# to the bottom of the grip (fitted to the index mesh), for seeing it
+# through the panel
+BODY_HEAD = (0.011, 0.0, 0.054)
+BODY_BASE = (0.005, -0.028, 0.178)
+BODY_RADIUS_M = 0.055
 
 PANEL_DISTANCE_M = 0.55
 PANEL_DROP_DEG = 15.0
@@ -160,12 +169,16 @@ class FlashLimiter:
             self.level = target          # falling is never a flash
         return self.level
 
-def fingertip_from_controller(controller: np.ndarray) -> np.ndarray:
-    return (controller @ np.append(FINGER_ON_CONTROLLER, 1.0))[:3]
+def on_controller(controller: np.ndarray, side: str, point) -> np.ndarray:
+    """a point given for the right controller, on either one."""
+    x, y, z = point
+    if side == "left":
+        x = -x
+    return (controller @ np.array([x, y, z, 1.0]))[:3]
 
 
-def fingertip_from_skeleton(root: np.ndarray, tip_model: list[float]) -> np.ndarray:
-    return (root @ np.append(np.asarray(tip_model, float), 1.0))[:3]
+def controller_tip(controller: np.ndarray, side: str) -> np.ndarray:
+    return on_controller(controller, side, TIP_ON_CONTROLLER)
 
 
 class Shown:
@@ -314,3 +327,55 @@ class Poke:
             out.append(("move", u, v))
         self.hovering = self.pressed or (inside and 0.0 < z < self.HOVER_M)
         return out
+
+
+class TouchMode:
+    """laser or touch, for the open panel. a controller tip right at the
+    panel turns touch on (no laser, so the two don't fight over the
+    cursor); it goes back to the laser once every tip has pulled away.
+
+    this used to go by how far your hands were from the panel's middle,
+    and the panel sits close enough that resting hands kept it in touch
+    mode for good (2026-10-19: "laser doesn't work anymore")."""
+
+    NEAR_M = 0.08              # a tip this close in front: touch
+    FAR_M = 0.14               # every tip this far (or off to the side): laser again
+    EDGE_M = 0.05              # how far past the panel's edge still counts
+    BEHIND_M = -0.08
+
+    def __init__(self) -> None:
+        self.touching = False
+
+    def reset(self) -> None:
+        self.touching = False
+
+    def _near(self, local, reach: float, width: float, height: float) -> bool:
+        x, y, z = (float(c) for c in local)
+        return (abs(x) <= width / 2 + self.EDGE_M and abs(y) <= height / 2 + self.EDGE_M
+                and self.BEHIND_M < z < reach)
+
+    def update(self, tips: list, width: float, height: float, pressed: bool) -> bool:
+        """``tips``: each controller tip in the panel's frame."""
+        if not self.touching:
+            self.touching = any(self._near(t, self.NEAR_M, width, height) for t in tips)
+        elif not pressed and not any(self._near(t, self.FAR_M, width, height) for t in tips):
+            self.touching = False
+        return self.touching
+
+
+def through_panel(panel: np.ndarray, eye: np.ndarray, point: np.ndarray,
+                  radius: float) -> tuple[float, float, float, bool] | None:
+    """where a ball at ``point`` lands on the panel as seen from ``eye``:
+    (x, y, radius) in the panel's frame, and whether it's in front of the
+    panel. None when you're behind the panel yourself."""
+    e = to_local(panel, eye)
+    p = to_local(panel, point)
+    if e[2] <= 0.05:
+        return None
+    in_front = p[2] > 0.0
+    # behind the panel it lands where it is; right at your eye it'd cover
+    # everything, so hold it a little way out
+    pz = min(max(float(p[2]), 0.0), float(e[2]) - 0.05)
+    k = float(e[2]) / (float(e[2]) - pz)
+    return (float(e[0] + (p[0] - e[0]) * k), float(e[1] + (p[1] - e[1]) * k),
+            radius * k, in_front)

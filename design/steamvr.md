@@ -632,6 +632,13 @@ replaces phases 4 and 5 in `plugins.md`.
   every session end lands in the plugin's `sessions.log`. speed is a
   slider. modern gets a springy open, a shrink-and-fade close, a popping
   watch, sliding tabs, press ripples and cover / lyric crossfades.
+- **round 5 (2026-10-19):** touch comes from the front tip of the
+  controller (steamvr's own "tip" point on the index model), not the
+  skeleton fingertip that floated 11 cm past it. the panel turns into a
+  touch surface only with a tip under 8 cm from it, and back to a laser
+  target once every tip is 14 cm away (or off its edge). it thins out to
+  22% over your controllers, seen from your eyes, and a cursor ring
+  shrinks onto the spot a tip is about to touch.
 
 ## spike findings
 
@@ -718,6 +725,21 @@ running log from `tools/vr-spike`. each one changes the plan above.
 - **2026-10-19 · laser input confirmed:** with only the texture flipped,
   click, hold and drag all work on the gl panel. the laser path (overlay
   mouse events → synthesized qt mouse events) is proven.
+- **2026-10-19 · round 4's touch switch killed the laser:** it went by
+  hand distance from the panel's middle (off under 30 cm, back over
+  45 cm). the panel spawns 55 cm out, so hands held up to point sat
+  inside that for good. now it goes by the tip's distance to the panel's
+  surface (see round 5).
+- **2026-10-19 · overlays hide the game's controllers:** steamvr draws
+  every overlay over the scene, with no depth, so a hand in front of the
+  panel disappears behind it. the panel's frame is thinned where each
+  controller projects onto it (a capsule fitted to the index mesh, head
+  ring to grip), recomposed on the vr thread at up to 45 hz so it keeps
+  up without a round trip to the gui.
+- **2026-10-19 · the index tip:** `valve_controller_knu_1_0_*.json` in
+  the indexcontroller driver gives a `tip` component at (±0.006, −0.015,
+  0.02) in the controller's frame, and the low-res mesh's front-most
+  vertex is right there. the raw pose origin sits inside the head ring.
 
 ## risks, on top of plugins.md
 
