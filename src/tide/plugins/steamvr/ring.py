@@ -41,8 +41,8 @@ INSET = 0.86
 HALO = 0.45               # how far the glow spills outward, as a share of its reach
 SMOOTHING = 2             # rounds of corner cutting on the outline
 
-MODES = ("off", "kick", "breathing")
-STRENGTH = {"subtle": 0.45, "normal": 0.7, "loud": 1.0}
+from tide.plugin_api import PULSE_MODES as MODES  # noqa: E402
+from tide.plugin_api import STRENGTH, Envelope, Kicks, cover_colors, glow_level  # noqa: E402,F401
 
 
 def ellipse_uv(n: int = 96) -> list[tuple[float, float]]:
@@ -230,131 +230,32 @@ def panel_glow(size: tuple[int, int], radius: int, colors: tuple, style: str = "
     return small.scaled(tw, th, Qt.IgnoreAspectRatio, Qt.SmoothTransformation), tw / w
 
 
-def cover_colors(img) -> tuple | None:
-    """two colours for the rim from a cover: its most vivid colour and the
-    next most vivid one of a different hue. None for a grey cover."""
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QColor
-    if img is None or img.isNull():
-        return None
-    small = img.scaled(16, 16, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    picks = []
-    for y in range(small.height()):
-        for x in range(small.width()):
-            c = QColor(small.pixel(x, y))
-            h, s, v, _a = c.getHsvF()
-            if s > 0.25 and v > 0.3:
-                picks.append((s * v, h, c))
-    if not picks:
-        return None
-    picks.sort(key=lambda p: -p[0])
-    first = picks[0]
-    second = next((p for p in picks[1:] if min(abs(p[1] - first[1]), 1 - abs(p[1] - first[1])) > 0.08),
-                  first)
-
-    def lift(c: QColor) -> tuple:
-        # glows want light, saturated colour: push value up, keep the hue
-        h, s, v, _a = c.getHsvF()
-        out = QColor.fromHsvF(max(0.0, h), min(1.0, s * 1.1), max(0.85, v))
-        return (out.redF(), out.greenF(), out.blueF())
-    return lift(first[2]), lift(second[2])
-
-
-def glow_level(mode: str, pulse: float, playing: bool) -> float:
-    """how bright the glow is for a pulse level (0..1), before strength.
-    kick: barely there between hits. breathing: always softly there."""
-    if mode == "off" or not playing:
-        return 0.0
-    pulse = max(0.0, min(1.0, pulse))
-    if mode == "kick":
-        return 0.12 + 0.35 * pulse
-    return 0.3 + 0.7 * pulse
-
-
 # old name, kept for the tests and anything poking at it
 level = glow_level
 
 
-class Envelope:
-    """the pulse at the headset's rate, shaped like tide's own backdrop
-    (central_bg): straight up on a hit, a 30 ms glide down. tide's beat
-    clock ticks at 60 Hz from the gui thread; a 144 Hz headset showed
-    each step (2026-10-19: "ever so slightly choppy"), and a slower
-    release blurred quick beats together."""
-
-    RELEASE_S = 0.030
-
-    def __init__(self) -> None:
-        self.level = 0.0
-        self._last: float | None = None
-
-    def update(self, now: float, target: float) -> float:
-        dt = 0.0 if self._last is None else min(0.1, max(0.0, now - self._last))
-        self._last = now
-        target = float(target)
-        if target >= self.level:
-            self.level = target
-        else:
-            self.level += (target - self.level) * (1.0 - math.exp(-dt / self.RELEASE_S))
-        return self.level
-
-
 class Ripple:
     """the rim on a kick: a flash that travels a little way inward and
-    fades.
+    fades. kicks come from tide.plugin_api.Kicks, the way tide's backdrop
+    shows them (it used to need the pulse to cross 0.62 after dipping
+    under 0.4, which missed soft kicks and fast songs, 2026-10-19). three
+    full flashes a second at most; a kick past that still ripples, softer."""
 
-    a kick is the pulse rising ``RISE`` above its recent low (a trough
-    that follows the pulse straight down and only slowly up, so a rise
-    spread over a few frames still counts), the way tide's backdrop shows
-    one (it used to need the pulse to cross
-    0.62 after dipping under 0.4, which missed soft kicks and fast songs
-    that never dip, 2026-10-19). ``per_second`` full flashes a second at
-    most (photosensitivity: always on); a kick past that still ripples,
-    softer."""
-
-    RISE = 0.12
-    MIN = 0.22                # quieter than this isn't a kick
-    GAP_S = 0.07              # one kick, not two, for a ragged attack
-    LIFT_S = 0.12             # how slowly the trough follows the pulse up
     SOFT = 0.45
     FADE_S = 0.38
     TRAVEL = 0.07             # how far inward it ripples, as a share of the quad
-    per_second = 3
 
     def __init__(self) -> None:
+        self.kicks = Kicks()
         self.started = -1e9
         self.strength = 1.0
-        self._trough = 0.0
-        self._rising = False          # still this kick's attack
-        self._last: float | None = None
-        self._starts: list[float] = []
 
     def update(self, now: float, pulse: float) -> tuple[float, float]:
         """(alpha 0..1, scale 0..1 of the quad) for the rim now."""
-        dt = 0.0 if self._last is None else min(0.1, max(0.0, now - self._last))
-        self._last = now
-        pulse = max(0.0, min(1.0, float(pulse)))
-        self._starts = [t for t in self._starts if now - t < 1.0]
-        if self._rising and pulse >= self._trough:
-            # still this kick's attack, however long it takes to peak: it
-            # can't count twice
-            self._trough = pulse
-        elif now - self.started < self.GAP_S:
-            self._rising = False
-            self._trough = max(self._trough, pulse)
-        elif pulse - self._trough >= self.RISE and pulse >= self.MIN:
-            full = len(self._starts) < self.per_second
-            if full:
-                self._starts.append(now)
+        hit = self.kicks.update(now, pulse)
+        if hit is not None:
             self.started = now
-            self.strength = 1.0 if full else self.SOFT
-            self._trough = pulse
-            self._rising = True
-        elif pulse <= self._trough:
-            self._rising = False
-            self._trough = pulse
-        else:
-            self._trough += (pulse - self._trough) * (1.0 - math.exp(-dt / self.LIFT_S))
+            self.strength = 1.0 if hit == "full" else self.SOFT
         age = now - self.started
         if age > self.FADE_S * 4:
             return 0.0, 1.0

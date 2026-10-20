@@ -117,3 +117,161 @@ def item_info(kind: str, entry) -> ItemInfo | None:
         return ItemInfo("artist", g("channel_id"), g("name"), g("subscribers"), g("thumbnail"),
                         entry)
     return None
+
+
+# ---------------------------------------------------------------------------
+# the beat, shaped for lights and glows
+#
+# ctx.beats.pulse gives tide's bass envelope, 0..1, about 60 times a second.
+# these turn it into what tide's own backdrop shows, with a hard cap on
+# flashing. steamvr, lights and the stream overlay all use them, so a beat
+# looks the same everywhere.
+# ---------------------------------------------------------------------------
+
+import math as _math
+
+PULSE_MODES: tuple[str, ...] = ("off", "kick", "breathing")
+STRENGTH: dict[str, float] = {"subtle": 0.45, "normal": 0.7, "loud": 1.0}
+
+
+def glow_level(mode: str, pulse: float, playing: bool) -> float:
+    """how bright a glow is for a pulse (0..1), before strength. kick:
+    barely there between hits. breathing: always softly there."""
+    if mode == "off" or not playing:
+        return 0.0
+    pulse = max(0.0, min(1.0, pulse))
+    if mode == "kick":
+        return 0.12 + 0.35 * pulse
+    return 0.3 + 0.7 * pulse
+
+
+class FlashLimiter:
+    """no more than ``per_second`` flashes a second, whatever the music
+    does. a flash is the level jumping by ``jump`` or more. past the limit
+    a hit still shows, as a step just under a flash, so no beat goes
+    missing. photosensitive seizure guidance draws the line at three a
+    second. use it on anything that lights up a room or fills your view."""
+
+    SOFT = 0.8                 # a hit past the limit: this share of a flash
+
+    def __init__(self, per_second: int = 3, jump: float = 0.3,
+                 slow_rise_per_s: float = 1.5) -> None:
+        self.per_second, self.jump, self.slow = per_second, jump, slow_rise_per_s
+        self.level = 0.0
+        self._flashes: list[float] = []
+        self._last: float | None = None
+
+    def update(self, now: float, target: float) -> float:
+        dt = 0.0 if self._last is None else max(0.0, now - self._last)
+        self._last = now
+        self._flashes = [t for t in self._flashes if now - t < 1.0]
+        target = max(0.0, min(1.0, float(target)))
+        if target - self.level >= self.jump:
+            if len(self._flashes) < self.per_second:
+                self._flashes.append(now)
+                self.level = target
+            else:
+                self.level = min(target, self.level + max(self.jump * self.SOFT, self.slow * dt))
+        else:
+            self.level = target          # small rises and every fall pass straight
+        return self.level
+
+
+class Envelope:
+    """the pulse at your own frame rate, shaped like tide's backdrop:
+    straight up on a hit, a 30 ms glide down. feed it every frame (the
+    peak since the last one), not just when a pulse arrives."""
+
+    RELEASE_S = 0.030
+
+    def __init__(self, release_s: float | None = None) -> None:
+        self.release_s = self.RELEASE_S if release_s is None else release_s
+        self.level = 0.0
+        self._last: float | None = None
+
+    def update(self, now: float, target: float) -> float:
+        dt = 0.0 if self._last is None else min(0.1, max(0.0, now - self._last))
+        self._last = now
+        target = float(target)
+        if target >= self.level:
+            self.level = target
+        else:
+            self.level += (target - self.level) * (1.0 - _math.exp(-dt / self.release_s))
+        return self.level
+
+
+class Kicks:
+    """which pulses are kicks. a kick is the pulse rising ``RISE`` above
+    its recent low (a trough that follows the pulse straight down and only
+    slowly up, so a rise spread over a few frames still counts); one kick
+    per attack however long it takes to peak. ``per_second`` of them are
+    full, the rest soft (for flashes)."""
+
+    RISE = 0.12
+    MIN = 0.22                # quieter than this isn't a kick
+    GAP_S = 0.07
+    LIFT_S = 0.12             # how slowly the trough follows the pulse up
+    per_second = 3
+
+    def __init__(self) -> None:
+        self.last = -1e9
+        self._trough = 0.0
+        self._rising = False
+        self._last_t: float | None = None
+        self._starts: list[float] = []
+
+    def update(self, now: float, pulse: float) -> str | None:
+        """"full", "soft" or None for this frame's pulse."""
+        dt = 0.0 if self._last_t is None else min(0.1, max(0.0, now - self._last_t))
+        self._last_t = now
+        pulse = max(0.0, min(1.0, float(pulse)))
+        self._starts = [t for t in self._starts if now - t < 1.0]
+        hit = None
+        if self._rising and pulse >= self._trough:
+            self._trough = pulse
+        elif now - self.last < self.GAP_S:
+            self._rising = False
+            self._trough = max(self._trough, pulse)
+        elif pulse - self._trough >= self.RISE and pulse >= self.MIN:
+            hit = "full" if len(self._starts) < self.per_second else "soft"
+            if hit == "full":
+                self._starts.append(now)
+            self.last = now
+            self._trough = pulse
+            self._rising = True
+        elif pulse <= self._trough:
+            self._rising = False
+            self._trough = pulse
+        else:
+            self._trough += (pulse - self._trough) * (1.0 - _math.exp(-dt / self.LIFT_S))
+        return hit
+
+
+def cover_colors(img) -> tuple | None:
+    """two colours from a cover (a QImage) as rgb 0..1 tuples: its most
+    vivid colour and the next most vivid one of a different hue, lifted
+    for light. None for a grey cover (use the theme's accent)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+    if img is None or img.isNull():
+        return None
+    small = img.scaled(16, 16, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    picks = []
+    for y in range(small.height()):
+        for x in range(small.width()):
+            c = QColor(small.pixel(x, y))
+            h, s, v, _a = c.getHsvF()
+            if s > 0.25 and v > 0.3:
+                picks.append((s * v, h, c))
+    if not picks:
+        return None
+    picks.sort(key=lambda p: -p[0])
+    first = picks[0]
+    second = next((p for p in picks[1:]
+                   if min(abs(p[1] - first[1]), 1 - abs(p[1] - first[1])) > 0.08), first)
+
+    def lift(c: QColor) -> tuple:
+        h, s, v, _a = c.getHsvF()
+        out = QColor.fromHsvF(max(0.0, h), min(1.0, s * 1.1), max(0.85, v))
+        return (out.redF(), out.greenF(), out.blueF())
+    return lift(first[2]), lift(second[2])

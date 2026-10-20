@@ -459,6 +459,55 @@ aur/source only.
 
 ---
 
+## the first update's plugins (2026-10-19)
+
+steamvr, lights and stream overlay ship in the tree, all off by default.
+more come later, each one optional. none of these three needed new core
+hooks.
+
+### the beat, shared
+
+`tide.plugin_api` has what turns `ctx.beats.pulse` into what tide's
+backdrop shows, so a beat looks the same in vr, on your lights and on
+stream: `Envelope` (straight up, 30 ms down), `FlashLimiter` (three full
+flashes a second; past that a hit still shows, as a step just under a
+flash), `Kicks` (a rise over a trough, one per attack), `glow_level`,
+`STRENGTH`, `PULSE_MODES`, `cover_colors(img)`. anything that lights a
+room or fills a view should go through `FlashLimiter`.
+
+### lights
+
+- `plugins/lights/`: OpenRGB over its sdk protocol (tcp 6742, protocol
+  version 0 so every server answers in the simplest layout; no library)
+  and WLED over its realtime udp protocol (21324; DRGB, DNRGB past 490
+  leds). the cover's two colours as a slow gradient along each device,
+  at the beat's brightness.
+- the show runs on a thread of its own at 60 fps; devices connect on
+  short threads of their own, so one that doesn't answer never stalls
+  the rest. failed ones retry every 5 s.
+- letting go: OpenRGB devices get the colours they had back (their mode
+  stays direct); WLED takes its own effect back two seconds after the
+  last packet.
+- settings: pulse (kick / breathing), brightness, colours (cover /
+  accent), when paused (dim / dark), openrgb on + address, wled
+  addresses, "flash them once".
+- tests: a fake OpenRGB server speaking protocol 0, a fake WLED (http
+  info + udp).
+
+### stream overlay
+
+- `plugins/overlay/`: a page for an obs browser source on
+  `http://127.0.0.1:7311/`, three layouts (card, lyrics, slim bar; pick
+  per source with `?layout=`), live through server-sent events: the song,
+  the cover, tide's colours and type roles, the lyric lines, the beat
+  (flash-capped before it leaves, ~30 a second).
+- 127.0.0.1 only, read only, and requests naming another host are
+  refused (a page elsewhere can't read what you play through a name
+  pointed at 127.0.0.1). `?preview` puts a checkerboard behind it for
+  looking at it in a browser.
+- the page runs its own position clock; tide corrects it on seeks and
+  every 5 s.
+
 ## 4. steamvr plugin sketch
 
 > how it should feel (summoning, attention, poke, pin) and its build order

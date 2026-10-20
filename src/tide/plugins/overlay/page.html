@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tide · now playing</title>
+<style>
+  :root {
+    --bg: #0b0b0b; --fg: #e6e6e6; --dim: #8a8a8a; --accent: #ffd400; --border: #e6e6e6;
+    --glow1: 255, 212, 0; --glow2: 255, 120, 60;
+    --title: sans-serif; --body: sans-serif; --numbers: monospace;
+    --radius: 22px; --edge: 0px; --p: 0;
+  }
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  /* ?preview: something behind it, for looking at it in a browser */
+  body.preview { background: repeating-conic-gradient(#2a2d33 0 25%, #23262b 0 50%) 0 0 / 32px 32px;
+                 min-height: 100vh; }
+  body { font-family: var(--body); color: var(--fg); -webkit-font-smoothing: antialiased; }
+  .hidden { opacity: 0 !important; transform: translateY(8px); }
+  .stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+           padding: 28px; box-sizing: border-box; }
+
+  /* the glow: two shadows in the cover's colours, beating */
+  .glow { box-shadow:
+      calc(-6px - 10px * var(--p)) 0 calc(16px + 44px * var(--p)) calc(var(--p) * 6px) rgba(var(--glow1), calc(0.18 + 0.55 * var(--p))),
+      calc(6px + 10px * var(--p)) 0 calc(16px + 44px * var(--p)) calc(var(--p) * 6px) rgba(var(--glow2), calc(0.18 + 0.55 * var(--p))); }
+  .noglow .glow { box-shadow: none; }
+
+  /* card */
+  .card { display: flex; gap: 22px; align-items: center; width: 100%; max-width: 760px;
+          background: var(--bg); border: var(--edge) solid var(--border); border-radius: var(--radius);
+          padding: 18px; box-sizing: border-box; transition: opacity .4s, transform .4s; }
+  .cover { position: relative; flex: none; width: 148px; height: 148px; border-radius: calc(var(--radius) * .6);
+           overflow: hidden; background: rgba(127,127,127,.15); }
+  .cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover;
+               transition: opacity .5s; }
+  .text { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .title { font-family: var(--title); font-weight: 700; font-size: 34px; line-height: 1.1;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta { color: var(--dim); font-size: 19px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .line { font-size: 21px; font-weight: 600; min-height: 1.3em; white-space: nowrap; overflow: hidden;
+          text-overflow: ellipsis; transition: opacity .25s; }
+  .progress { display: flex; align-items: center; gap: 12px; margin-top: 4px; font-family: var(--numbers);
+              color: var(--dim); font-size: 15px; }
+  .track { flex: 1; height: 5px; background: rgba(127,127,127,.25); border-radius: 3px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: var(--accent); border-radius: 3px; }
+
+  /* lyrics */
+  .lyrics { text-align: center; max-width: 1200px; width: 100%; transition: opacity .4s; }
+  .lyrics .around { color: var(--fg); opacity: .45; font-size: 26px; min-height: 1.3em; white-space: nowrap;
+                    overflow: hidden; text-overflow: ellipsis; }
+  .lyrics .now { font-family: var(--title); font-weight: 700; font-size: 52px; line-height: 1.2; min-height: 1.2em;
+                 padding: 6px 0; text-shadow: 0 0 calc(10px + 30px * var(--p)) rgba(var(--glow1), calc(.25 + .6 * var(--p))),
+                 0 2px 12px rgba(0,0,0,.6); transition: opacity .25s; }
+  .lyrics .who { color: var(--dim); font-size: 18px; margin-top: 6px; }
+  .noglow .lyrics .now { text-shadow: 0 2px 12px rgba(0,0,0,.6); }
+
+  /* slim bar */
+  .bar { display: flex; align-items: center; gap: 14px; width: 100%; max-width: 1220px;
+         background: var(--bg); border: var(--edge) solid var(--border); border-radius: var(--radius);
+         padding: 8px 16px 8px 8px; box-sizing: border-box; position: relative; overflow: hidden;
+         transition: opacity .4s, transform .4s; }
+  .bar .cover { width: 44px; height: 44px; border-radius: calc(var(--radius) * .5); }
+  .bar .title { font-size: 22px; flex: none; max-width: 55%; }
+  .bar .meta { font-size: 18px; flex: 1; }
+  .bar .fill { position: absolute; left: 0; bottom: 0; height: 3px; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage"></div>
+
+<template id="t-card">
+  <div class="card glow hidden" id="box">
+    <div class="cover"><img id="art-a" alt=""><img id="art-b" alt=""></div>
+    <div class="text">
+      <div class="title" id="title"></div>
+      <div class="meta" id="meta"></div>
+      <div class="line" id="line"></div>
+      <div class="progress"><span id="at">0:00</span><div class="track"><div class="fill" id="fill"></div></div><span id="len">0:00</span></div>
+    </div>
+  </div>
+</template>
+
+<template id="t-lyrics">
+  <div class="lyrics hidden" id="box">
+    <div class="around" id="prev"></div>
+    <div class="now" id="line"></div>
+    <div class="around" id="next"></div>
+    <div class="who" id="meta"></div>
+  </div>
+</template>
+
+<template id="t-bar">
+  <div class="bar glow hidden" id="box">
+    <div class="cover"><img id="art-a" alt=""><img id="art-b" alt=""></div>
+    <div class="title" id="title"></div>
+    <div class="meta" id="meta"></div>
+    <div class="fill" id="fill"></div>
+  </div>
+</template>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const $ = (id) => document.getElementById(id);
+  let layout = null, state = {}, artShown = "a", artVersion = -1;
+  let posAt = 0, posBase = 0;            // position clock
+  let target = 0, shown = 0, last = performance.now();
+
+  function build(name) {
+    if (name === layout) return;
+    layout = name;
+    const t = document.getElementById("t-" + name) || document.getElementById("t-card");
+    const stage = $("stage");
+    stage.replaceChildren(t.content.cloneNode(true));
+    artVersion = -1;
+    apply();
+  }
+
+  function fmt(s) {
+    s = Math.max(0, Math.floor(s || 0));
+    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+  }
+
+  function setText(id, text) {
+    const el = $(id);
+    if (el && el.textContent !== text) el.textContent = text || "";
+  }
+
+  function apply() {
+    const th = state.theme || {}, root = document.documentElement.style;
+    for (const [k, v] of Object.entries({bg: th.bg, fg: th.fg, dim: th.dim, accent: th.accent, border: th.border}))
+      if (v) root.setProperty("--" + k, v);
+    const f = th.fonts || {};
+    const fam = (x, fallback) => x ? `'${x.replace(/'/g, "")}', ${fallback}` : fallback;
+    root.setProperty("--title", fam(f.title, "sans-serif"));
+    root.setProperty("--body", fam(f.ui, "sans-serif"));
+    root.setProperty("--numbers", fam(f.numbers, "monospace"));
+    root.setProperty("--radius", th.modern === false ? "0px" : "22px");
+    root.setProperty("--edge", th.modern === false ? "3px" : "0px");
+    if (state.glow) {
+      root.setProperty("--glow1", state.glow[0].join(", "));
+      root.setProperty("--glow2", state.glow[1].join(", "));
+    }
+    document.body.classList.toggle("noglow", params.has("pulse") ? params.get("pulse") === "0" : !state.pulse);
+
+    const box = $("box");
+    if (!box) return;
+    const tr = state.track;
+    box.classList.toggle("hidden", !tr);
+    if (!tr) return;
+    setText("title", tr.title);
+    setText("meta", [tr.artists, layout === "lyrics" ? "" : tr.album].filter(Boolean).join(" · "));
+    const showLyrics = params.has("lyrics") ? params.get("lyrics") !== "0" : state.lyrics !== false;
+    const ly = (showLyrics && state.lyric) || {};
+    if (layout === "lyrics") {
+      setText("prev", ly.prev); setText("line", ly.now || (ly.next ? "" : "♪")); setText("next", ly.next);
+      setText("meta", [tr.title, tr.artists].filter(Boolean).join(" · "));
+    } else {
+      setText("line", ly.now || "");
+    }
+    if (state.art_version !== artVersion && $("art-a")) {
+      artVersion = state.art_version;
+      const next = artShown === "a" ? "b" : "a";
+      const img = $("art-" + next), old = $("art-" + artShown);
+      if (state.art_version > 0) {
+        img.onload = () => { img.style.opacity = 1; old.style.opacity = 0; artShown = next; };
+        img.style.opacity = 0;
+        img.src = "/art?v=" + state.art_version;
+      } else {
+        img.style.opacity = 0; old.style.opacity = 0;
+      }
+    }
+  }
+
+  function tick(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    // the beat: straight up, a short glide down (tide's backdrop does the same)
+    shown = target >= shown ? target : shown + (target - shown) * (1 - Math.exp(-dt / 0.06));
+    document.documentElement.style.setProperty("--p", shown.toFixed(3));
+    const tr = state.track;
+    if (tr && $("fill")) {
+      const pos = posBase + (state.playing ? (now - posAt) / 1000 * (state.speed || 1) : 0);
+      const dur = state.duration || 0;
+      $("fill").style.width = dur > 0 ? Math.min(100, 100 * pos / dur) + "%" : "0";
+      setText("at", fmt(pos)); setText("len", fmt(dur));
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function connect() {
+    const es = new EventSource("/events");
+    es.addEventListener("state", (e) => {
+      state = JSON.parse(e.data);
+      posBase = state.position || 0; posAt = performance.now();
+      build(params.get("layout") || state.layout || "card");
+      apply();
+    });
+    es.addEventListener("pulse", (e) => { target = JSON.parse(e.data).l || 0; });
+    es.addEventListener("lyric", (e) => { state.lyric = JSON.parse(e.data); apply(); });
+    es.addEventListener("position", (e) => {
+      const d = JSON.parse(e.data);
+      posBase = d.position; posAt = performance.now(); state.playing = d.playing; state.speed = d.speed;
+    });
+    es.onerror = () => { target = 0; };
+  }
+
+  document.body.classList.toggle("preview", params.has("preview"));
+  build(params.get("layout") || "card");
+  connect();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

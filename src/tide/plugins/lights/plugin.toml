@@ -1,0 +1,64 @@
+[plugin]
+slug        = "lights"
+name        = "lights"
+description = "your rgb lights pulse with the bass in the cover's colours. openrgb and wled."
+version     = "0.1.0"
+api         = 1
+entry       = "plugin:Lights"
+uses        = ["playback", "network"]
+default     = false
+
+[[setting]]
+key     = "mode"
+label   = "pulse"
+kind    = "choice"
+choices = [["kick", "on the kick"], ["breathing", "breathing"]]
+default = "kick"
+tooltip = "never more than three flashes a second. a faster beat still shows, just softer."
+
+[[setting]]
+key     = "strength"
+label   = "brightness"
+kind    = "choice"
+choices = [["subtle", "subtle"], ["normal", "normal"], ["loud", "loud"]]
+default = "normal"
+
+[[setting]]
+key     = "colours"
+label   = "colours"
+kind    = "choice"
+choices = [["cover", "from the cover"], ["accent", "the theme's accent"]]
+default = "cover"
+
+[[setting]]
+key     = "paused"
+label   = "when paused"
+kind    = "choice"
+choices = [["dim", "glow dimly"], ["off", "go dark"]]
+default = "dim"
+
+[[setting]]
+key     = "openrgb"
+label   = "openrgb"
+kind    = "bool"
+default = true
+tooltip = "needs openrgb's sdk server: start openrgb with --server, or switch it on in openrgb's sdk server tab. your lights get their old colours back when tide lets go."
+
+[[setting]]
+key     = "openrgb_address"
+label   = "openrgb at"
+kind    = "str"
+default = "127.0.0.1:6742"
+
+[[setting]]
+key     = "wled"
+label   = "wled"
+kind    = "str"
+default = ""
+tooltip = "the address of each wled strip, comma separated (192.168.1.40, wled-desk.local). they go back to their own effect two seconds after tide stops."
+
+[[setting]]
+key     = "test"
+label   = "flash them once"
+kind    = "action"
+tooltip = "a quick sweep through the colours, to see what's connected."
