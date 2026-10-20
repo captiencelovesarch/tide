@@ -51,6 +51,7 @@ VR_SETTINGS_COLUMNS = (
 )
 VR_SETTINGS = tuple(k for col in VR_SETTINGS_COLUMNS for k in col)
 RECENT_MAX = 8
+ROW_TEXT_W = 430           # a song row's title, beside its radio and next buttons
 
 
 def _fmt(seconds: float) -> str:
@@ -453,11 +454,12 @@ class _Segments(QWidget):
 # ---------------------------------------------------------------------------
 
 class _SongRow(QFrame):
-    """cover, title, artist, length; tap plays it now. "next" queues it
-    after the current song."""
+    """cover, title, artist, length; tap plays it now. "radio" starts a
+    radio from it, "next" queues it after the current song."""
 
     activated = Signal(object)
     queued = Signal(object)
+    radioed = Signal(object)
 
     def __init__(self, ctx, track, look: _Look) -> None:
         super().__init__()
@@ -476,8 +478,9 @@ class _SongRow(QFrame):
         length.setObjectName("dim")
         look.apply(length, 18, role="numbers")
         _passive(title, sub, length)
-        _elide(title, ctx.theme.case(track.title), 520)
-        _elide(sub, ctx.theme.case(" · ".join(x for x in (track.artists, track.album) if x)), 520)
+        _elide(title, ctx.theme.case(track.title), ROW_TEXT_W)
+        _elide(sub, ctx.theme.case(" · ".join(x for x in (track.artists, track.album) if x)),
+               ROW_TEXT_W)
         text = QVBoxLayout()
         text.setSpacing(2)
         text.addWidget(title)
@@ -487,12 +490,18 @@ class _SongRow(QFrame):
         look.apply(nxt, 18, True)
         nxt.setFixedSize(96, 52)
         nxt.clicked.connect(lambda: self.queued.emit(self.track))
+        radio = QPushButton(ctx.theme.case("radio"))
+        radio.setObjectName("small")
+        look.apply(radio, 18, True)
+        radio.setFixedSize(96, 52)
+        radio.clicked.connect(lambda: self.radioed.emit(self.track))
         lay = QHBoxLayout(self)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(16)
         lay.addWidget(self.cover)
         lay.addLayout(text, 1)
         lay.addWidget(length)
+        lay.addWidget(radio)
         lay.addWidget(nxt)
         self._pressed = False
 
@@ -564,7 +573,7 @@ class _List(QScrollArea):
         self.verticalScrollBar().setValue(0)
         return content
 
-    def songs(self, ctx, tracks, look: _Look, on_play, on_next) -> None:
+    def songs(self, ctx, tracks, look: _Look, on_play, on_next, on_radio=None) -> None:
         col = QVBoxLayout(self._fresh())
         col.setContentsMargins(0, 0, 14, 0)
         col.setSpacing(6)
@@ -572,6 +581,7 @@ class _List(QScrollArea):
             row = _SongRow(ctx, t, look)
             row.activated.connect(lambda _t, i=i: on_play(i))
             row.queued.connect(on_next)
+            row.radioed.connect(on_radio or ctx.music.radio)
             col.addWidget(row)
         col.addStretch(1)
 
@@ -1051,7 +1061,8 @@ class _Search(QWidget):
     def _load_recent(self) -> list[str]:
         try:
             data = json.loads(self._recent_path().read_text(encoding="utf-8"))
-            return [str(q) for q in data][:RECENT_MAX]
+            # "[blank_audio]": silence once got searched for (2026-10-19)
+            return [str(q) for q in data if not str(q).startswith("[")][:RECENT_MAX]
         except Exception:  # noqa: BLE001 - none yet
             return []
 

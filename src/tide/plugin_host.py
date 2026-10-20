@@ -677,9 +677,22 @@ class _Music:
     def _tracks(infos) -> list:
         return [i.ref for i in infos if i is not None and i.ref is not None]
 
-    def play_now(self, track: TrackInfo) -> None:
+    def play_now(self, track: TrackInfo, radio: bool | None = None) -> None:
+        """play ``track`` on its own. ``radio``: keep going with songs like
+        it once it ends. None does what tide does when you play a song from
+        search (radio on, unless the user turned that off). without it a
+        song from a plugin played once and the queue stopped (2026-10-19)."""
+        if track is None or track.ref is None:
+            return
+        host = self._ctx._host
+        seed = (bool(getattr(host.window, "_auto_radio_on_play", True)) if radio is None
+                else bool(radio))
+        host.call_window("_play_now", track.ref, seed)
+
+    def radio(self, track: TrackInfo) -> None:
+        """start a radio from ``track``: it plays now, songs like it follow."""
         if track is not None and track.ref is not None:
-            self._ctx._host.call_window("_play_now", track.ref)
+            self._ctx._host.call_window("_start_radio", track.ref)
 
     def play_next(self, track: TrackInfo) -> None:
         if track is not None and track.ref is not None:

@@ -230,6 +230,8 @@ class VrThread(QThread):
         self.keyboard_open = False
         self.input = None
         self.pulse = 0.0
+        self.pulse_peak = 0.0
+        self.beat = 0.0           # this frame's pulse: the peak since the last one
         self.playing = False
         self.rings: list[_Overlay] = []
         self.ring_width = 0.0
@@ -462,6 +464,8 @@ class VrThread(QThread):
                 except openvr.OpenVRError:
                     pass
             self._guard("commands", self._commands, frames)
+            self.beat = max(self.pulse, self.pulse_peak) if self.playing else 0.0
+            self.pulse_peak = 0.0
             if self.panel_open:
                 self._guard("panel", self._panel_tick, now)
             else:
@@ -564,7 +568,10 @@ class VrThread(QThread):
                 if self.panel_open:
                     self._keyboard(cmd[1])
             elif kind == "pulse":
+                # several can land between two vr frames: keep the highest,
+                # like tide's backdrop does, or a beat in the middle is lost
                 self.pulse = float(cmd[1])
+                self.pulse_peak = max(self.pulse_peak, self.pulse)
             elif kind == "playing":
                 self.playing = bool(cmd[1])
             elif kind == "ring_frames":
@@ -830,7 +837,7 @@ class VrThread(QThread):
         if mode == "off" or not self._animate():
             return 0.0
         strength = ringmod.STRENGTH.get(self.settings.get("ring_strength", "normal"), 0.7)
-        pulse = self.pulse if self.playing else 0.0
+        pulse = self.beat
         limited = self.glow_flash.update(now, ringmod.glow_level(mode, pulse, self.playing))
         return self.glow_env.update(now, limited) * strength
 
@@ -912,7 +919,7 @@ class VrThread(QThread):
                 o.show(False)
             return
         strength = ringmod.STRENGTH.get(self.settings.get("ring_strength", "normal"), 0.7)
-        pulse = self.pulse if self.playing else 0.0
+        pulse = self.beat
         # the flash limit judges the real jumps; the envelope then smooths
         # what's left to the headset's frame rate
         limited = self.flash.update(now, ringmod.glow_level(mode, pulse, self.playing))

@@ -209,6 +209,7 @@ mostly thin wrappers.
 | `motion` | `dur("short")`, `ease("out")`, `intensity()`, `profile()` | `ui/motion.py`. plugins animate through this like core does, so intensity off still means nothing moves |
 | `jobs` | `run(fn, on_done)` off the GUI thread, joined at stop/quit | `qthreads.py`. a plugin owning a raw QThread is how you get the "QThread destroyed while running" abort |
 | `paths` | `data_dir`, `cache_dir` (per plugin, created 0700) | `config.py` |
+| `music` | `search`, `library`, `open`, `play_now(track, radio=None)` (None: radio as tide's search does), `radio(track)`, `play_next`, `play(tracks, start, shuffle)` | `window._play_now` / `_start_radio` / `_queue_next` |
 | `log` | `logging.getLogger("tide.plugin.<slug>")` | |
 | `tide_version`, `manifest.version` | tide's version and the plugin's own, for an about line | `tide.__version__` |
 

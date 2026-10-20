@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import urllib.request
 from pathlib import Path
@@ -254,5 +255,17 @@ def transcribe(audio: np.ndarray) -> str:
             break
         out.append(nxt)
         ids.append(nxt)
-    text = tok.decode(out)
-    return " ".join(text.replace("\n", " ").split()).strip().lower().rstrip(".!?,")
+    return clean(tok.decode(out))
+
+
+# whisper's notes about sound that isn't speech: [BLANK_AUDIO], (music),
+# [Music], *laughs*. silence came back as "[blank_audio]" and got searched
+# for (2026-10-19)
+_NOT_SPEECH = re.compile(r"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|♪+")
+
+
+def clean(text: str) -> str:
+    """what was said, without whisper's sound notes: lowercase, one line,
+    no closing full stop. empty when nothing was said."""
+    text = _NOT_SPEECH.sub(" ", text)
+    return " ".join(text.replace("\n", " ").split()).strip().lower().rstrip(".!?,").strip()

@@ -242,15 +242,18 @@ class RingTests(unittest.TestCase):
         self.assertLess(alpha2, alpha)
         self.assertLess(scale2, 1.0)
 
-    def test_ripple_caps_at_three_a_second(self):
+    def test_ripple_caps_full_flashes_at_three_a_second(self):
         r = self.ring.Ripple()
-        starts = 0
+        starts = full = 0
         for i in range(90):                             # 8 kicks a second for 1 s
             t = i / 90
             before = r.started
             r.update(t, 1.0 if (i % 11) < 2 else 0.0)
-            starts += r.started != before
-        self.assertLessEqual(starts, 3)
+            if r.started != before:
+                starts += 1
+                full += r.strength >= 1.0
+        self.assertLessEqual(full, 3)
+        self.assertEqual(starts, 9)                     # every kick still shows, softer
 
     def test_cover_colors(self):
         from PySide6.QtGui import QColor, QImage
@@ -602,6 +605,13 @@ class GuardTests(unittest.TestCase):
 
 
 class WhisperTests(unittest.TestCase):
+    def test_sound_notes_are_not_words(self):
+        from tide import speech_whisper as sw
+        self.assertEqual(sw.clean(" [BLANK_AUDIO]"), "")
+        self.assertEqual(sw.clean("(music) Surreal."), "surreal")
+        self.assertEqual(sw.clean("♪ Like Him ♪"), "like him")
+        self.assertEqual(sw.clean("Tyler, the Creator"), "tyler, the creator")
+
     def test_features_have_whispers_shape(self):
         from tide import speech_whisper as sw
         mel = sw.log_mel(np.zeros(16000, dtype=np.float32))
@@ -646,17 +656,67 @@ class RingFeelTests(unittest.TestCase):
         sys.modules["tide_plugins_ringfeel_steamvr"] = pkg
         self.ring = importlib.import_module("tide_plugins_ringfeel_steamvr.ring")
 
-    def test_envelope_glides_between_steps(self):
+    def test_envelope_hits_then_glides_down(self):
         env = self.ring.Envelope()
-        levels = []
-        # a 60 Hz staircase read at 144 Hz
-        for i in range(144):
-            now = i / 144
-            step = 1.0 if int(now * 60) % 20 < 3 else 0.1
-            levels.append(env.update(now, step))
-        jumps = [abs(b - a) for a, b in zip(levels, levels[1:])]
-        self.assertLess(max(jumps), 0.6)
-        self.assertGreater(max(levels), 0.85)     # a kick still gets there
+        self.assertEqual(env.update(0.0, 0.9), 0.9)               # straight up, like the app
+        falling = [env.update(i / 144, 0.1) for i in range(1, 6)]
+        self.assertTrue(all(b < a for a, b in zip(falling, falling[1:])))
+        self.assertGreater(falling[0], 0.5)                       # a glide, not a drop
+        self.assertLess(env.update(0.2, 0.1), 0.12)               # gone well before the next beat
+
+    @staticmethod
+    def beat_stream(beats, seconds):
+        """tide's pulse at 60 Hz: each beat jumps to its height and falls
+        away, on top of whatever is still ringing."""
+        out = []
+        for i in range(int(seconds * 60)):
+            t = i / 60
+            level = 0.0
+            for bt, h in beats:
+                if bt <= t:
+                    level = max(level, h * math.exp(-(t - bt) / 0.09))
+            out.append((t, level))
+        return out
+
+    def count_kicks(self, stream, seconds, jitter=True):
+        """run the stream through the vr side like vr.py does: pulses land
+        in uneven batches between 144 Hz frames, the frame keeps the peak."""
+        import random
+        rng = random.Random(5)
+        ripple = self.ring.Ripple()
+        kicks, soft = 0, 0
+        last_start = ripple.started
+        i = 0
+        for f in range(int(seconds * 144)):
+            now = f / 144
+            peak = None
+            # a busy gui thread delivers late, in clumps
+            while i < len(stream) and stream[i][0] <= now - (rng.uniform(0, 0.03) if jitter else 0):
+                peak = stream[i][1] if peak is None else max(peak, stream[i][1])
+                i += 1
+            if peak is None:
+                peak = stream[i - 1][1] if i else 0.0
+            ripple.update(now, peak)
+            if ripple.started != last_start:
+                last_start = ripple.started
+                kicks += 1
+                soft += ripple.strength < 1.0
+        return kicks, soft
+
+    def test_every_beat_the_app_shows_ripples(self):
+        # soft kicks (0.35), a fast roll that never dips under 0.4, loud hits
+        beats = [(0.2, 0.9), (0.7, 0.35), (1.2, 0.8), (1.7, 0.4)]
+        beats += [(2.0 + k / 6, 0.75) for k in range(12)]          # 6 a second
+        beats += [(4.3, 1.0), (4.8, 0.5)]
+        kicks, soft = self.count_kicks(self.beat_stream(beats, 5.2), 5.2)
+        self.assertEqual(kicks, len(beats))
+        # never more than three full flashes a second: the roll's extra hits are soft
+        self.assertGreater(soft, 0)
+
+    def test_a_long_note_is_one_kick(self):
+        stream = [(i / 60, 0.0 if i < 30 else min(0.9, (i - 30) * 0.08)) for i in range(180)]
+        kicks, _soft = self.count_kicks(stream, 3.0, jitter=False)
+        self.assertEqual(kicks, 1)
 
     def test_glow_peaks_inside_the_lens_edge(self):
         from PySide6.QtGui import QGuiApplication
@@ -765,7 +825,7 @@ class VrThreadPanelTests(unittest.TestCase):
     def test_glow_beats_and_switches_off(self):
         self.t.settings.update({"panel_glow": "kick", "ring_strength": "loud"})
         self.t.playing = True
-        self.t.pulse = 1.0
+        self.t.beat = 1.0
         level = 0.0
         for i in range(30):
             level = self.t._glow_level(i / 144)

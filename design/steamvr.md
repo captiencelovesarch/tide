@@ -654,6 +654,11 @@ replaces phases 4 and 5 in `plugins.md`.
   label follow speed changes as they happen. the sung lyric fades by
   painting itself instead of through a QGraphicsOpacityEffect. settings
   sit in two columns so every button stays full size.
+- **round 8 (2026-10-19):** the ring and glow hit the beats tide's
+  backdrop hits (18 of 18 in a test stream where the old logic caught
+  9). song rows get a "radio" button, and a song played from search
+  starts a radio the way tide's own search does. whisper's sound notes
+  ("[blank_audio]") are no longer searched for.
 
 ## spike findings
 
@@ -761,6 +766,15 @@ running log from `tools/vr-spike`. each one changes the plan above.
   so the effect is gone. it didn't reproduce offscreen or on wayland
   here (not even after a 2× grab), so that's the best explanation, not a
   proven one.
+- **2026-10-19 · the ring missed beats the app showed:** three causes.
+  pulses landing between two vr frames were overwritten, not peak-held
+  like the backdrop does; a kick had to cross 0.62 after dipping under
+  0.4 (soft kicks and fast songs that never dip were lost); and past
+  three flashes a second the limiter only let the glow creep. now: the
+  frame keeps the peak, the envelope is the backdrop's (instant up,
+  30 ms down), a kick is a rise of 0.12 over a trough that follows the
+  pulse down at once and up slowly, and hits past the flash limit still
+  show, softer (45% for the rim, a step just under a flash for the glow).
 - **2026-10-19 · overlays are seen from both sides:** from behind, the
   front shows mirrored. the back is its own overlay turned half round,
   and the front's alpha drops to 0 while your head is behind the panel's

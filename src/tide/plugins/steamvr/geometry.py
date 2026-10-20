@@ -148,10 +148,13 @@ class Dwell:
 
 class FlashLimiter:
     """no more than ``per_second`` flashes a second, whatever the music
-    does. a flash is the level jumping by ``jump`` or more; past the limit
-    the level may only rise slowly, so fast hits blur into a swell.
+    does. a flash is the level jumping by ``jump`` or more. past the limit
+    a hit still shows, as a step just under a flash (it used to only
+    creep up, and fast songs lost beats the app showed, 2026-10-19).
     photosensitive seizure guidance draws the line at three a second, and
     in a headset you can't look away from it. always on, not a setting."""
+
+    SOFT = 0.8                 # a hit past the limit: this share of a flash
 
     def __init__(self, per_second: int = 3, jump: float = 0.3, slow_rise_per_s: float = 1.5) -> None:
         self.per_second, self.jump, self.slow = per_second, jump, slow_rise_per_s
@@ -169,7 +172,7 @@ class FlashLimiter:
                 self._flashes.append(now)
                 self.level = target
             else:
-                self.level = min(target, self.level + self.slow * dt)
+                self.level = min(target, self.level + max(self.jump * self.SOFT, self.slow * dt))
         elif target > self.level:
             self.level = target
         else:

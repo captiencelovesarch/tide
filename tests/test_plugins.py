@@ -544,7 +544,9 @@ class MusicAndSpeedTests(Base):
 
         class Win:
             _current = None
-            def _play_now(self, t): played.append(("now", t.video_id))
+            _auto_radio_on_play = True
+            def _play_now(self, t, seed_radio=False): played.append(("now", t.video_id, seed_radio))
+            def _start_radio(self, t): played.append(("radio", t.video_id))
             def _queue_next(self, t): played.append(("next", t.video_id))
             def _play_all(self, ts): played.append(("all", [t.video_id for t in ts]))
         self.write("mine")
@@ -565,9 +567,13 @@ class MusicAndSpeedTests(Base):
         music.open(got["albums"][0], lambda r: got.setdefault("album", r))
         self.run_until(lambda: "album" in got)
         music.play_now(got["songs"][1])
+        music.play_now(got["songs"][1], radio=False)
+        music.radio(got["songs"][0])
         music.play_next(got["songs"][0])
         music.play(got["songs"], start=1)
-        self.assertEqual(played, [("now", "s2"), ("next", "s1"), ("all", ["s2", "s1"])])
+        # a song played on its own keeps going like tide's search does
+        self.assertEqual(played, [("now", "s2", True), ("now", "s2", False), ("radio", "s1"),
+                                  ("next", "s1"), ("all", ["s2", "s1"])])
 
     def test_speed_goes_through_the_button(self):
         class Btn:
