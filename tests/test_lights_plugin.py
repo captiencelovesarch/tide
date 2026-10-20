@@ -228,7 +228,9 @@ class ShowTests(unittest.TestCase):
         finally:
             fake.close()
         self.assertGreater(got, 10)
-        self.assertTrue(any(s.startswith("openrgb 127.0.0.1") for s in said))
+        # says what to do, not "connection refused"
+        self.assertTrue(any(s.startswith("openrgb 127.0.0.1") and "openrgb --server" in s
+                            for s in said), said)
 
     def test_gradient_and_brightness(self):
         leds = show_mod.gradient(4, ((1, 0, 0), (0, 0, 1)), 1.0, 0.0)
