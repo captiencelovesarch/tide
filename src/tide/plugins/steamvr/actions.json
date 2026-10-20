@@ -1,0 +1,39 @@
+{
+  "default_bindings": [
+    {
+      "controller_type": "knuckles",
+      "binding_url": "bindings_knuckles.json"
+    }
+  ],
+  "action_sets": [
+    {
+      "name": "/actions/tide",
+      "usage": "leftright"
+    }
+  ],
+  "actions": [
+    {
+      "name": "/actions/tide/in/hand_left",
+      "type": "skeleton",
+      "skeleton": "/skeleton/hand/left"
+    },
+    {
+      "name": "/actions/tide/in/hand_right",
+      "type": "skeleton",
+      "skeleton": "/skeleton/hand/right"
+    },
+    {
+      "name": "/actions/tide/out/haptic",
+      "type": "vibration"
+    }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/tide": "tide",
+      "/actions/tide/in/hand_left": "left hand",
+      "/actions/tide/in/hand_right": "right hand",
+      "/actions/tide/out/haptic": "haptics"
+    }
+  ]
+}

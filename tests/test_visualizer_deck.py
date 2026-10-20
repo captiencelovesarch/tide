@@ -929,3 +929,32 @@ def test_every_tile_has_a_hover_edit_button_that_opens_its_menu():
         assert plate.isHidden() and not btn.isVisible()
     assert asked == [0, 1, 2, 3]
     v.teardown()
+
+
+def test_a_listener_gets_the_pulse_without_moving_the_backdrop(h):
+    """plugins (the vr ring) listen through add_listener: they get every
+    pulse while the backdrop pulse is off, and the backdrop stays still;
+    switching the backdrop pulse off mid-swell puts it at rest."""
+    class Listener:
+        def __init__(self):
+            self.levels = []
+
+        def set_pulse(self, level):
+            self.levels.append(level)
+
+    ring = Listener()
+    h.controller.add_listener(ring)
+    h.start()
+    h.beats.updated.emit(KEY, flat_beat_map(0.3))
+    h.render(0.05)
+    h.render(0.30)
+    assert h.samples[-1][1] == pytest.approx(1.0, abs=0.02)
+    assert ring.levels[-1] == pytest.approx(1.0, abs=0.02)
+    h.controller.set_pulse_enabled(False)       # backdrop off, the ring still listens
+    assert h.samples[-1][1] == 0.0
+    before = len(h.samples)
+    h.render(0.55)
+    assert len(h.samples) == before             # the backdrop gets nothing more
+    assert len(ring.levels) > 2
+    h.controller.remove_listener(ring)
+    assert ring.levels[-1] == 0.0

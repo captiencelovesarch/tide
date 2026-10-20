@@ -2611,6 +2611,10 @@ class MainWindow(QMainWindow):
         self.like_btn.setGlyph(glyph)
         for w in self._companions():
             w.set_liked(self._liked_current)
+        from .. import plugin_host
+        host = plugin_host.host()
+        if host is not None:
+            host.notify_liked(self._liked_current)
 
     # ---------- v1.5 insights + play reporting ----------
 

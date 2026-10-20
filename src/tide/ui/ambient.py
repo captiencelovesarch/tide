@@ -75,6 +75,11 @@ class AmbientController(QObject):
         # views that read the beat clock without driving the backdrop
         # (the visualizer's deck). they keep the clock and the map alive.
         self._watchers: set[str] = set()
+        # listeners that always get the pulse, whatever the backdrop
+        # setting says (plugins: the vr ring). the backdrop targets stay
+        # gated by adaptive_pulse.
+        self._listeners: list = []
+        self._backdrop_live = False
         self._holding = False
         self._key: str | None = None
         self._generation = 0
@@ -164,6 +169,22 @@ class AmbientController(QObject):
             self._set_pulse(0.0, [central_bg])
             self._reconcile()
 
+    def add_listener(self, obj) -> None:
+        """``obj.set_pulse(level)`` gets every pulse frame while music
+        plays, even with the backdrop pulse off."""
+        if obj is not None and obj not in self._listeners:
+            self._listeners.append(obj)
+            self._reconcile()
+
+    def remove_listener(self, obj) -> None:
+        if obj in self._listeners:
+            self._listeners.remove(obj)
+            try:
+                obj.set_pulse(0.0)
+            except RuntimeError:
+                pass
+            self._reconcile()
+
     def is_enabled(self) -> bool:
         return self._enabled
 
@@ -187,18 +208,39 @@ class AmbientController(QObject):
             self._checkpoint()
         self._reconcile()
 
-    def _wants_pulse(self) -> bool:
+    def _backdrop_pulses(self) -> bool:
         return bool(self._targets) and (self._enabled or self._mini_active)
+
+    def _wants_pulse(self) -> bool:
+        return self._backdrop_pulses() or bool(self._listeners)
 
     def _wants_clock(self) -> bool:
         return self._wants_pulse() or bool(self._watchers)
 
-    def _set_pulse(self, level: float, targets=None) -> None:
-        for target in (self._targets if targets is None else targets):
+    @staticmethod
+    def _send(level: float, targets) -> None:
+        for target in targets:
             try:
                 target.set_pulse(level)
             except RuntimeError:
                 pass
+
+    def _set_pulse(self, level: float, targets=None) -> None:
+        if targets is not None:
+            self._send(level, targets)
+            return
+        # with no listeners the clock only runs for the backdrop, and the
+        # gate is upstream (_wants_pulse) as it always was. a listener can
+        # keep the clock going with the backdrop pulse off
+        backdrop = self._backdrop_pulses() or not self._listeners
+        if backdrop:
+            self._send(level, self._targets)
+        elif self._backdrop_live or level == 0.0:
+            # the backdrop just stopped pulsing (listeners may keep the
+            # clock running): put it at rest instead of freezing mid-swell
+            self._send(0.0, self._targets)
+        self._backdrop_live = backdrop
+        self._send(level, self._listeners)
 
     def _live_value(self, now: float) -> float:
         return self._live if now - self._last_live_at <= MAX_CLOCK_GAP else 0.0
@@ -250,6 +292,10 @@ class AmbientController(QObject):
         self._render_pulse(now)
 
     def _reconcile(self) -> None:
+        if self._backdrop_live and not self._backdrop_pulses():
+            # switched off while a listener keeps the clock: rest it now
+            self._send(0.0, self._targets)
+            self._backdrop_live = False
         if self._wants_clock() and self._is_playing():
             self._acquire()
             if self._wants_pulse():

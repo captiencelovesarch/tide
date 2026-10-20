@@ -1,0 +1,43 @@
+[plugin]
+slug        = "overlay"
+name        = "stream overlay"
+description = "what's playing as a page for obs: the cover, the song, the lyric line, a glow on the beat."
+version     = "0.1.0"
+api         = 1
+entry       = "plugin:Overlay"
+uses        = ["playback", "lyrics", "network"]
+default     = false
+
+[[setting]]
+key     = "layout"
+label   = "layout"
+kind    = "choice"
+choices = [["card", "card"], ["lyrics", "lyrics"], ["bar", "slim bar"]]
+default = "card"
+tooltip = "what the page shows. add ?layout=lyrics (or card, bar) to the link to have more than one."
+
+[[setting]]
+key     = "pulse"
+label   = "glow on the beat"
+kind    = "bool"
+default = true
+tooltip = "in the cover's colours. never more than three flashes a second, for the people watching."
+
+[[setting]]
+key     = "lyrics"
+label   = "lyrics"
+kind    = "bool"
+default = true
+
+[[setting]]
+key     = "port"
+label   = "port"
+kind    = "int"
+default = 7311
+tooltip = "only this computer can open the page."
+
+[[setting]]
+key     = "copy_link"
+label   = "copy the link"
+kind    = "action"
+tooltip = "for obs: add a browser source, paste the link, size it 800 × 240 (or 1280 × 200 for lyrics)."

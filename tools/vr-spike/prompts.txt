@@ -1,0 +1,22 @@
+# what to say | the song that should come back | its artist
+# a mix of easy names and ones a speech model will spell by ear.
+play one more time by daft punk | One More Time | Daft Punk
+play mr brightside by the killers | Mr. Brightside | The Killers
+play bohemian rhapsody by queen | Bohemian Rhapsody | Queen
+play blinding lights by the weeknd | Blinding Lights | The Weeknd
+play smells like teen spirit by nirvana | Smells Like Teen Spirit | Nirvana
+play levitating by dua lipa | Levitating | Dua Lipa
+play hotline bling by drake | Hotline Bling | Drake
+play bad guy by billie eilish | bad guy | Billie Eilish
+play seven nation army by the white stripes | Seven Nation Army | The White Stripes
+play do i wanna know by arctic monkeys | Do I Wanna Know | Arctic Monkeys
+play strobe by deadmau5 | Strobe | deadmau5
+play windowlicker by aphex twin | Windowlicker | Aphex Twin
+play teardrop by massive attack | Teardrop | Massive Attack
+play humble by kendrick lamar | HUMBLE | Kendrick Lamar
+play take on me by a-ha | Take On Me | a-ha
+play running up that hill by kate bush | Running Up That Hill | Kate Bush
+play let down by radiohead | Let Down | Radiohead
+play flowers by miley cyrus | Flowers | Miley Cyrus
+play sandstorm by darude | Sandstorm | Darude
+play pursuit of happiness by kid cudi | Pursuit Of Happiness | Kid Cudi
