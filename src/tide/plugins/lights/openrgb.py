@@ -11,8 +11,10 @@ little-endian u32s, then the data.
 """
 from __future__ import annotations
 
+import select
 import socket
 import struct
+import time
 
 PORT = 6742
 MAGIC = b"ORGB"
@@ -24,6 +26,7 @@ SET_CLIENT_NAME = 50
 DEVICE_LIST_UPDATED = 100
 UPDATE_LEDS = 1050
 SET_CUSTOM_MODE = 1100
+REFRESH_S = 10.0           # look at the device list again this often
 
 
 def parse_address(text: str) -> tuple[str, int]:
@@ -116,6 +119,7 @@ class Server:
         self.devices: list[str] = []
         self.leds: list[int] = []
         self._saved: list[list[tuple[int, int, int]]] = []
+        self._checked = 0.0
 
     # ---- wire ----
 
@@ -146,6 +150,50 @@ class Server:
 
     # ---- what the show calls ----
 
+    def _query(self) -> list[tuple[str, int, list]]:
+        self._send(0, REQUEST_CONTROLLER_COUNT)
+        count = struct.unpack("<I", self._reply(REQUEST_CONTROLLER_COUNT)[:4])[0]
+        rows = []
+        for i in range(count):
+            self._send(i, REQUEST_CONTROLLER_DATA)
+            rows.append(parse_controller(self._reply(REQUEST_CONTROLLER_DATA)))
+        return rows
+
+    def _take(self, rows: list) -> None:
+        """the device list from ``rows``. a device seen before keeps the
+        colours it had before tide (now it shows tide's); a new one, or
+        one whose size changed, is put in direct mode."""
+        saved = dict(zip(self.devices, self._saved))
+        before = dict(zip(self.devices, self.leds))
+        self.devices = [name for name, _n, _c in rows]
+        self.leds = [n for _name, n, _c in rows]
+        self._saved = [saved.get(name, colors) for name, _n, colors in rows]
+        # leds that appeared since (a header given a size) had no colour
+        # of their own before tide: they go dark when tide lets go
+        self._saved = [c + [(0, 0, 0)] * max(0, n - len(c))
+                       for c, n in zip(self._saved, self.leds)]
+        for i, (name, n, _c) in enumerate(rows):
+            if n and before.get(name) != n:
+                self._send(i, SET_CUSTOM_MODE)
+        self.name = f"openrgb ({len(self.devices)})"
+        self._checked = time.monotonic()
+
+    def _news(self) -> bool:
+        """read whatever the server sent on its own, without waiting.
+        True if its device list changed (a zone resized in openrgb, a
+        device plugged in)."""
+        changed = False
+        while self.sock is not None and select.select([self.sock], [], [], 0)[0]:
+            magic, _dev, kind, size = HEADER.unpack(self._recv_exact(HEADER.size))
+            if magic != MAGIC:
+                raise OSError("that isn't an openrgb sdk server")
+            if size:
+                self._recv_exact(size)
+            changed |= kind == DEVICE_LIST_UPDATED
+        return changed
+
+    # ---- what the show calls ----
+
     def connect(self) -> None:
         try:
             self.sock = socket.create_connection((self.host, self.port), timeout=2.0)
@@ -156,21 +204,17 @@ class Server:
                           "start it with openrgb --server") from None
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._send(0, SET_CLIENT_NAME, b"tide\0")
-        self._send(0, REQUEST_CONTROLLER_COUNT)
-        count = struct.unpack("<I", self._reply(REQUEST_CONTROLLER_COUNT)[:4])[0]
         self.devices, self.leds, self._saved = [], [], []
-        for i in range(count):
-            self._send(i, REQUEST_CONTROLLER_DATA)
-            name, leds, colors = parse_controller(self._reply(REQUEST_CONTROLLER_DATA))
-            self.devices.append(name)
-            self.leds.append(leds)
-            self._saved.append(colors)
+        self._take(self._query())
         if not any(self.leds):
             raise OSError("openrgb has no lights to drive")
-        for i, n in enumerate(self.leds):
-            if n:
-                self._send(i, SET_CUSTOM_MODE)
-        self.name = f"openrgb ({len(self.devices)})"
+
+    def maintain(self) -> None:
+        """before each frame: catch a changed device list, so resizing a
+        zone in openrgb (an argb header that said 0 leds) lights up
+        without restarting anything (2026-10-20)."""
+        if self._news() or time.monotonic() - self._checked > REFRESH_S:
+            self._take(self._query())
 
     def send(self, frames: list[list[tuple[int, int, int]]]) -> None:
         for i, colors in enumerate(frames):

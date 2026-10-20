@@ -168,6 +168,9 @@ class Show(threading.Thread):
             if not live:
                 continue
             try:
+                maintain = getattr(out, "maintain", None)
+                if maintain is not None:
+                    maintain()
                 out.send([gradient(n, colors, level, phase) for n in out.leds])
             except (OSError, ValueError) as exc:
                 with self._lock:

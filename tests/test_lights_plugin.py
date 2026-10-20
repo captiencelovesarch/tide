@@ -71,6 +71,7 @@ class FakeOpenRGB(threading.Thread):
     def run(self) -> None:
         conn, _ = self.sock.accept()
         conn.settimeout(5)
+        self.conn = conn
         buf = b""
         try:
             while True:
@@ -99,6 +100,14 @@ class FakeOpenRGB(threading.Thread):
                     self.updates.append((dev, [tuple(data[6 + 4 * i:9 + 4 * i]) for i in range(n)]))
         except OSError:
             return
+
+
+def _resize(server: "FakeOpenRGB", dev: int, n: int) -> None:
+    """what openrgb does when you resize a zone: the device grows and every
+    client hears the device list changed."""
+    name, _colors = server.devices[dev]
+    server.devices[dev] = (name, [(0, 0, 0)] * n)
+    server.conn.sendall(openrgb.packet(0, openrgb.DEVICE_LIST_UPDATED))
 
 
 class FakeWled:
@@ -195,6 +204,28 @@ class ShowTests(unittest.TestCase):
         last = {dev: colors for dev, colors in server.updates}
         self.assertEqual(last, {0: before["keyboard"], 1: before["strip"]})
         self.assertTrue(any("lighting openrgb (2)" in s for s in said))
+
+    def test_a_resized_header_lights_up_without_a_restart(self):
+        server = FakeOpenRGB({"board": [(9, 9, 9)] * 4})
+        server.start()
+        said = []
+        show = show_mod.Show([openrgb.Server(f"127.0.0.1:{server.port}")], said.append)
+        show.configure(playing=True, colors=((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)))
+        show.start()
+        try:
+            t0 = time.monotonic()
+            while not server.updates and time.monotonic() - t0 < 2:
+                time.sleep(0.02)
+            _resize(server, 0, 28)                  # the cooler's header: 0 → 24 more leds
+            time.sleep(0.3)
+            sizes = [len(c) for _dev, c in server.updates[-5:]]
+        finally:
+            show.stop()
+            show.join(3)
+            server.join(2)
+        self.assertEqual(sizes, [28] * 5)
+        # and letting go still gives back the board's own colours
+        self.assertEqual(server.updates[-1][1], [(9, 9, 9)] * 4 + [(0, 0, 0)] * 24)
 
     def test_drives_a_wled_strip(self):
         fake = FakeWled(30)
