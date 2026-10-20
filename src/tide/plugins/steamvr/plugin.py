@@ -12,9 +12,10 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QOffscreenSurface, QSurfaceFormat
 
 from . import ring as ringmod
-from .panel import PANEL_PX, Forwarder, VrPanel, back_face, watch_face
+from .panel import PANEL_PX, Forwarder, VrPanel, back_face, toast_face, watch_face
 from .vr import VrBridge, VrThread
 
+TOAST_SETTLE_MS = 1000   # a song has to stay this long to get a toast
 FRAME_MS = 33          # at most ~30 redraws a second while open
 TICK_MS = 500          # times and the watch ring move this often
 
@@ -66,6 +67,13 @@ class SteamVr:
         self._listen_tick = ctx.adopt(QTimer())
         self._listen_tick.setInterval(250)
         self._listen_tick.timeout.connect(self._listening)
+        # the now playing toast waits a moment: skipping through songs
+        # shows only the one you land on
+        self._toast_track = None
+        self._toast_wait = ctx.adopt(QTimer())
+        self._toast_wait.setSingleShot(True)
+        self._toast_wait.setInterval(TOAST_SETTLE_MS)
+        self._toast_wait.timeout.connect(self._toast_ready)
         self._tick = ctx.adopt(QTimer())
         self._tick.setInterval(TICK_MS)
         self._tick.timeout.connect(self._on_tick)
@@ -141,6 +149,7 @@ class SteamVr:
             "cursor": self.ctx.theme.token("accent", "#ffd400"),
             "touch": s["touch"],
             "panel_glow": s["panel_glow"],
+            "toast": s["toast"],
         }
 
     def _apply_settings(self) -> None:
@@ -304,6 +313,9 @@ class SteamVr:
 
     def _track_changed(self, track) -> None:
         self._refresh()
+        if track is not None and self.ctx.settings["toast"] != "off":
+            self._toast_track = track
+            self._toast_wait.start()
         url = getattr(track, "art_url", "") if track is not None else ""
         if url == self._ring_art:
             return
@@ -325,6 +337,24 @@ class SteamVr:
             self._draw_glow()
 
     # ---- from tide ----
+
+    def _toast_ready(self) -> None:
+        track = self._toast_track
+        current = self.ctx.playback.current()
+        if (track is None or current is None or current.id != track.id
+                or self.panel_open or self.ctx.playback.state() != "playing"):
+            return
+        url = track.art_url
+        if not url:
+            self._send_toast(track, None)
+            return
+        self.ctx.track.art(url, lambda img, t=track: self._send_toast(t, img))
+
+    def _send_toast(self, track, cover) -> None:
+        if self._toast_track is not track or self.panel_open:
+            return
+        self._toast_track = None
+        self.thread.post("toast", toast_face(self.ctx, track.title, track.artists, cover))
 
     def _state(self, state: str) -> None:
         self.thread.post("playing", state == "playing")

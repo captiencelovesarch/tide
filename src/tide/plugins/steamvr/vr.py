@@ -53,6 +53,10 @@ WATCH_PX = 256
 WATCH_WIDTH_M = 0.045
 WATCH_SWELL = 0.35         # how much bigger the watch grows as look-to-open fills
 SIDES = ("left", "right")
+TOAST_PX = (760, 184)
+TOAST_WIDTH_M = 0.42
+TOAST_HOLD_S = 4.0
+TOAST_POP_S = 0.3
 
 
 def to_np(m34) -> np.ndarray:
@@ -342,10 +346,15 @@ class VrThread(QThread):
                                  self._panel_width(), PANEL_PX)
             self.glow = _Overlay(self.ov, self._gl, "tide.vr.glow", "tide glow",
                                  self._panel_width() * self.glow_ratio, PANEL_PX)
+            # the now playing toast: never a laser target, so it can't take
+            # the controllers from a game
+            self.toast = _Overlay(self.ov, self._gl, "tide.vr.toast", "tide now playing",
+                                  TOAST_WIDTH_M, TOAST_PX)
+            self.ov.setOverlaySortOrder(self.toast.h, 2)
             self.ov.setOverlaySortOrder(self.glow.h, 0)
             self.ov.setOverlaySortOrder(self.panel.h, 1)
             self.ov.setOverlaySortOrder(self.back.h, 1)
-            overlays = [self.panel, self.watch, self.back, self.glow]
+            overlays = [self.panel, self.watch, self.back, self.glow, self.toast]
             self._input()
             self.bridge.lens.emit(self._lens())
             self.bridge.status.emit("connected")
@@ -440,6 +449,8 @@ class VrThread(QThread):
         self.drawn = ([], None)
         self.drawn_at = -1e9
         self.behind = False
+        self.toast_at: float | None = None
+        self.toast_follow = geo.LazyFollow()
         self.glow_flash = geo.FlashLimiter()
         self.glow_env = ringmod.Envelope()
         if self.back_img is not None:
@@ -472,7 +483,9 @@ class VrThread(QThread):
                 self._guard("watch", self._watch_tick, now)
             self._guard("closing", self._closing_tick, now)
             self._guard("ring", self._ring_tick, now)
-            for name, ov in (("watch", self.watch), ("back", self.back), ("glow", self.glow)):
+            self._guard("toast", self._toast_tick, now)
+            for name, ov in (("watch", self.watch), ("back", self.back), ("glow", self.glow),
+                             ("toast", self.toast)):
                 img = frames.pop(name, None)
                 if img is not None:
                     self._upload(ov, img)
@@ -557,6 +570,11 @@ class VrThread(QThread):
                 frames["panel"] = cmd[1]          # newest wins
             elif kind == "watch_frame":
                 frames["watch"] = cmd[1]
+            elif kind == "toast":
+                if self.settings.get("toast", "off") != "off" and not self.panel_open:
+                    frames["toast"] = cmd[1]
+                    self.toast_at = time.perf_counter()
+                    self.toast_follow.reset()
             elif kind == "back_frame":
                 self.back_img = frames["back"] = cmd[1]
             elif kind == "glow_frame":
@@ -705,6 +723,8 @@ class VrThread(QThread):
             return
         self.panel_open = True
         self.closing_at = None
+        self.toast_at = None
+        self.toast.show(False)
         for p in self.pokes.values():
             p.reset()
         self.touch.reset()
@@ -809,6 +829,31 @@ class VrThread(QThread):
         self._panel_look(now, alpha, width)
         if close:
             self._close("looked away")
+
+    def _toast_tick(self, now: float) -> None:
+        """the now playing toast: fades in a little under where you're
+        looking, holds, fades out. "follow" trails your view lazily,
+        "stay" keeps where it came up."""
+        if self.toast_at is None:
+            return
+        mode = self.settings.get("toast", "off")
+        age = now - self.toast_at
+        alpha = geo.toast_alpha(age, TOAST_HOLD_S)
+        hmd = self._hmd()
+        if self.panel_open or mode == "off" or hmd is None or (age > 1.0 and alpha <= 0.0):
+            self.toast_at = None
+            self.toast.show(False)
+            return
+        target = geo.toast_spot(hmd)
+        if mode == "stay" and self.toast_follow.pos is not None:
+            pos = self.toast_follow.pos
+        else:
+            pos = self.toast_follow.update(now, target)
+        self.toast.place(geo.facing(pos, hmd[:3, 3]))
+        pop = geo.ease_out_back(age / TOAST_POP_S) if self._springy() else 1.0
+        self.toast.width(TOAST_WIDTH_M * max(0.05, 0.85 + 0.15 * pop))
+        self.toast.alpha(alpha if self._animate() else (1.0 if alpha > 0 else 0.0))
+        self.toast.show(self.toast.has_frame and alpha > 0.0)
 
     def _show_panel(self, on: bool) -> None:
         self.panel.show(on)

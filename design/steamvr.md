@@ -659,6 +659,14 @@ replaces phases 4 and 5 in `plugins.md`.
   9). song rows get a "radio" button, and a song played from search
   starts a radio the way tide's own search does. whisper's sound notes
   ("[blank_audio]") are no longer searched for.
+- **round 9 (2026-10-20):** a now playing toast, off by default. it
+  comes up a second after a song changes (skip through a few and only
+  the one you land on gets one), 1.2 m out and 20° under your gaze (your
+  gaze, not the horizon), holds 4 s and fades. "follows you" trails your
+  view lazily: it holds still through a glance (20 cm dead zone) and
+  glides after you once you turn away. "stays put" keeps where it came
+  up. never a laser target, so it can't take the controllers from a
+  game; no toast while the panel is open.
 
 ## spike findings
 

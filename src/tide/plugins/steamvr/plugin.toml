@@ -33,6 +33,14 @@ default = true
 tooltip = "press the panel with the tip of your controller. off: the laser only."
 
 [[setting]]
+key     = "toast"
+label   = "now playing toast"
+kind    = "choice"
+choices = [["off", "off"], ["follow", "follows you"], ["stay", "stays put"]]
+default = "off"
+tooltip = "a few seconds of the new song when it changes, a little under where you're looking. follows you: it trails your view. stays put: it stays where it came up."
+
+[[setting]]
 key     = "size"
 label   = "panel size"
 kind    = "choice"

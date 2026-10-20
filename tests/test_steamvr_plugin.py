@@ -9,6 +9,7 @@ import math
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -920,3 +921,138 @@ class PanelLookTests(unittest.TestCase):
         edge = int((glow.width() - 1000) / 2)
         self.assertGreater(glow.pixelColor(edge - 6, cy).alpha(), 120)  # bright at its edge
         self.assertLess(glow.pixelColor(4, cy).alpha(), 40)              # gone by the margin
+
+
+class ToastTests(unittest.TestCase):
+    """the now playing toast: a little under your gaze, lazy to follow,
+    a few seconds long, never in the way (2026-10-20)."""
+
+    def test_spot_sits_under_your_gaze_not_the_horizon(self):
+        level = geo.toast_spot(HEAD)
+        self.assertLess(level[1], 1.7)
+        self.assertAlmostEqual(float(np.linalg.norm(level - HEAD[:3, 3])), geo.TOAST_DISTANCE_M)
+        # look 50° down: it's still under where you look, well below the eye line
+        c, s = math.cos(math.radians(-50)), math.sin(math.radians(-50))
+        down = HEAD.copy()
+        down[:3, :3] = np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+        self.assertLess(geo.toast_spot(down)[1], level[1] - 0.5)
+
+    def test_lazy_follow_ignores_a_glance_then_catches_up(self):
+        f = geo.LazyFollow()
+        f.update(0.0, np.zeros(3))
+        f.update(0.1, np.array([0.1, 0.0, 0.0]))       # a glance: stays put
+        self.assertTrue(np.allclose(f.pos, 0.0))
+        target = np.array([0.6, 0.0, 0.0])               # turned away: it follows
+        steps = [f.update(0.1 + i / 90, target)[0] for i in range(1, 200)]
+        self.assertTrue(all(b >= a for a, b in zip(steps, steps[1:])))   # smooth, no jumps back
+        self.assertGreater(steps[-1], 0.57)
+        self.assertLess(steps[3], 0.2)                    # a glide, not a snap
+
+    def test_fade(self):
+        self.assertEqual(geo.toast_alpha(0.0, 4.0), 0.0)
+        self.assertEqual(geo.toast_alpha(2.0, 4.0), 1.0)
+        self.assertGreater(geo.toast_alpha(4.5, 4.0), 0.0)
+        self.assertEqual(geo.toast_alpha(6.0, 4.0), 0.0)
+
+
+class VrToastTests(unittest.TestCase):
+    def setUp(self):
+        _vr_pkg("tide_plugins_vrtoast_steamvr")
+        self.vr = importlib.import_module("tide_plugins_vrtoast_steamvr.vr")
+        g = importlib.import_module("tide_plugins_vrtoast_steamvr.geometry")
+        t = self.vr.VrThread(self.vr.VrBridge(), None, {"log_path": os.devnull, "toast": "follow"})
+        t.toast = _FakeOverlay()
+        t.toast.place = lambda pose: setattr(t.toast, "pose", pose)
+        t.panel_open = False
+        t.toast_follow = g.LazyFollow()
+        self.head = at(0.0, 1.7, 0.0)
+        t._hmd = lambda: self.head
+        self.t = t
+
+    def test_comes_up_follows_and_goes(self):
+        t = self.t
+        t.toast_at = 0.0
+        t._toast_tick(0.5)
+        self.assertTrue(t.toast.visible)
+        first = t.toast.pose[:3, 3].copy()
+        # turn round 90°: it trails after you
+        self.head = at(0.0, 1.7, 0.0)
+        self.head[:3, :3] = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]], float)
+        for i in range(1, 120):
+            t._toast_tick(0.5 + i / 90)
+        moved = t.toast.pose[:3, 3]
+        self.assertGreater(float(np.linalg.norm(moved - first)), 1.0)
+        t._toast_tick(10.0)
+        self.assertFalse(t.toast.visible)
+        self.assertIsNone(t.toast_at)
+
+    def test_stays_put_when_asked(self):
+        t = self.t
+        t.settings["toast"] = "stay"
+        t.toast_at = 0.0
+        t._toast_tick(0.5)
+        first = t.toast.pose[:3, 3].copy()
+        self.head = at(1.0, 1.7, 0.0)
+        for i in range(1, 60):
+            t._toast_tick(0.5 + i / 90)
+        self.assertTrue(np.allclose(t.toast.pose[:3, 3], first))
+
+    def test_the_panel_opening_ends_it(self):
+        t = self.t
+        t.toast_at = 0.0
+        t._toast_tick(0.5)
+        t.panel_open = True
+        t._toast_tick(0.6)
+        self.assertFalse(t.toast.visible)
+        self.assertIsNone(t.toast_at)
+
+
+class ToastPluginTests(unittest.TestCase):
+    """the plugin side: a toast only for the song you land on."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import openvr  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("pyopenvr isn't installed")
+        os.environ["TIDE_VR_OFFLINE"] = "1"
+
+    @classmethod
+    def tearDownClass(cls):
+        os.environ.pop("TIDE_VR_OFFLINE", None)
+
+    def test_skipping_fast_shows_only_where_you_land(self):
+        import types
+        from PySide6.QtWidgets import QApplication
+        from tide.plugin_host import PluginHost
+        from tests.test_plugins import FakePlayer, FakeQueue
+        app = QApplication.instance() or QApplication([])
+        tmp = Path(tempfile.mkdtemp(prefix="tide-vr-"))
+        (tmp / "s").mkdir()
+        (tmp / "s" / "steamvr.toml").write_text('toast = "follow"\nlyrics = false\n')
+        player, queue = FakePlayer(), FakeQueue()
+        player.state = "playing"
+        host = PluginHost(None, player, queue, roots=[(BUNDLED_DIR, "bundled")],
+                          state_file=tmp / "p.toml", settings_dir=tmp / "s",
+                          stamp=tmp / "stamp", data_dir=tmp / "d")
+        try:
+            self.assertTrue(host.set_enabled("steamvr", True))
+            plugin = host.record("steamvr").instance
+            posted = []
+            real = plugin.thread.post
+            plugin.thread.post = lambda *cmd: (posted.append(cmd[0]), real(*cmd))
+            plugin._toast_wait.setInterval(60)
+            for n in ("one", "two", "three"):
+                queue.current = types.SimpleNamespace(video_id=n, title=n, artists="a", album="",
+                                                      duration_seconds=1, thumbnail="", source="ytmusic")
+                plugin._track_changed(host.current_track())
+                app.processEvents()
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 0.4:
+                app.processEvents()
+                time.sleep(0.01)
+            self.assertEqual(posted.count("toast"), 1)
+        finally:
+            host.set_enabled("steamvr", False)
+            host.shutdown()

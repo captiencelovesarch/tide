@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import icons
-from .vr import PANEL_PX, WATCH_PX
+from .vr import PANEL_PX, TOAST_PX, WATCH_PX
 
 COVER_PX = 250
 TEXT_W = 590          # the column right of the cover, for eliding
@@ -46,7 +46,7 @@ TABS = (("now", "note", "now playing"),
 # two columns, each label over its buttons: one long list squeezed the
 # buttons too small to touch
 VR_SETTINGS_COLUMNS = (
-    ("watch_hand", "open_by_looking", "touch", "size", "linger"),
+    ("watch_hand", "open_by_looking", "touch", "size", "linger", "toast"),
     ("ring", "ring_strength", "panel_glow", "lyrics", "haptics", "voice_model"),
 )
 VR_SETTINGS = tuple(k for col in VR_SETTINGS_COLUMNS for k in col)
@@ -1612,5 +1612,60 @@ def back_face(ctx) -> QImage:
     lines = [f"tide {tide_v}".strip(), f"steamvr plugin {ctx.manifest.version}"]
     p.drawText(QRectF(0, y + 30, w, 90), Qt.AlignHCenter | Qt.AlignTop,
                t.case("\n".join(lines)))
+    p.end()
+    return img
+
+
+
+def toast_face(ctx, title: str, artists: str, cover: QImage | None) -> QImage:
+    """the now playing toast: the cover, the song, who it's by."""
+    look = _Look(ctx)
+    t = ctx.theme
+    w, h = TOAST_PX
+    img = QImage(w, h, QImage.Format_RGBA8888)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setRenderHint(QPainter.TextAntialiasing)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    r = look.radius(28)
+    bg = QColor(look.bg)
+    bg.setAlpha(238)
+    p.setPen(QPen(QColor(look.border), 3) if not look.modern else Qt.NoPen)
+    p.setBrush(bg)
+    p.drawRoundedRect(QRectF(1.5, 1.5, w - 3, h - 3), r, r)
+    pad = 20
+    side = h - 2 * pad
+    art = QRectF(pad, pad, side, side)
+    clip = QPainterPath()
+    clip.addRoundedRect(art, look.radius(16), look.radius(16))
+    p.save()
+    p.setClipPath(clip)
+    if cover is not None and not cover.isNull():
+        p.drawImage(art, cover.scaled(side, side, Qt.KeepAspectRatioByExpanding,
+                                      Qt.SmoothTransformation))
+    else:
+        p.fillRect(art, QColor(look.hover))
+    p.restore()
+    x = art.right() + 24
+    text_w = w - x - pad - 6
+    # a small accent mark: this just started
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(look.accent))
+    p.drawEllipse(QRectF(x, pad + 12, 12, 12))
+    p.setFont(look.font(20, True))
+    p.setPen(QColor(look.dim))
+    p.drawText(QRectF(x + 22, pad, text_w - 22, 36), Qt.AlignLeft | Qt.AlignVCenter,
+               t.case("now playing"))
+    title_font = look.font(40, True, "title")
+    p.setFont(title_font)
+    p.setPen(QColor(look.fg))
+    p.drawText(QRectF(x, pad + 38, text_w, 60), Qt.AlignLeft | Qt.AlignVCenter,
+               QFontMetrics(title_font).elidedText(t.case(title), Qt.ElideRight, int(text_w)))
+    body = look.font(26)
+    p.setFont(body)
+    p.setPen(QColor(look.dim))
+    p.drawText(QRectF(x, pad + 98, text_w, 44), Qt.AlignLeft | Qt.AlignVCenter,
+               QFontMetrics(body).elidedText(t.case(artists), Qt.ElideRight, int(text_w)))
     p.end()
     return img

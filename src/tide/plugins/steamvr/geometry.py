@@ -360,3 +360,68 @@ def through_panel(panel: np.ndarray, eye: np.ndarray, point: np.ndarray,
     k = float(e[2]) / (float(e[2]) - pz)
     return (float(e[0] + (p[0] - e[0]) * k), float(e[1] + (p[1] - e[1]) * k),
             radius * k, in_front)
+
+
+# ---- the now playing toast ----
+
+TOAST_DISTANCE_M = 1.2
+TOAST_DROP_DEG = 20.0      # below where you're looking, under the action
+
+
+def toast_spot(hmd: np.ndarray, distance: float = TOAST_DISTANCE_M,
+               drop_deg: float = TOAST_DROP_DEG) -> np.ndarray:
+    """``distance`` out along your gaze, tipped ``drop_deg`` down from it
+    (your gaze, not the horizon: look at the floor and it's still just
+    under what you're looking at)."""
+    d = math.radians(drop_deg)
+    local = np.array([0.0, -math.sin(d) * distance, -math.cos(d) * distance, 1.0])
+    return (hmd @ local)[:3]
+
+
+class LazyFollow:
+    """a point that trails another, VR's "lazy follow": it holds still
+    while the target stays within ``deadzone_m`` (glancing around doesn't
+    drag it), and once the target strays past that it glides after it,
+    ``follow_s`` to close most of the gap, until it's nearly there."""
+
+    def __init__(self, deadzone_m: float = 0.2, follow_s: float = 0.35,
+                 settle_m: float = 0.03) -> None:
+        self.deadzone, self.follow_s, self.settle = deadzone_m, follow_s, settle_m
+        self.pos: np.ndarray | None = None
+        self.moving = False
+        self._last: float | None = None
+
+    def reset(self, pos=None) -> None:
+        self.pos = None if pos is None else np.asarray(pos, float).copy()
+        self.moving = False
+        self._last = None
+
+    def update(self, now: float, target) -> np.ndarray:
+        target = np.asarray(target, float)
+        dt = 0.0 if self._last is None else min(0.1, max(0.0, now - self._last))
+        self._last = now
+        if self.pos is None:
+            self.pos = target.copy()
+            return self.pos
+        gap = float(np.linalg.norm(target - self.pos))
+        if not self.moving and gap > self.deadzone:
+            self.moving = True
+        if self.moving:
+            self.pos = self.pos + (target - self.pos) * (1.0 - math.exp(-dt / self.follow_s))
+            if float(np.linalg.norm(target - self.pos)) < self.settle:
+                self.moving = False
+        return self.pos
+
+
+def toast_alpha(age: float, hold_s: float, fade_in_s: float = 0.25,
+                fade_out_s: float = 0.6) -> float:
+    """a toast's alpha ``age`` seconds after it came up: fade in, hold,
+    fade out. 0 once it's done."""
+    if age < 0:
+        return 0.0
+    if age < fade_in_s:
+        return ease_out(age / fade_in_s)
+    if age < fade_in_s + hold_s:
+        return 1.0
+    t = (age - fade_in_s - hold_s) / fade_out_s
+    return max(0.0, 1.0 - t * t) if t < 1.0 else 0.0
