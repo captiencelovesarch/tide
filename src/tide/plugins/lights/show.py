@@ -138,7 +138,7 @@ class Show(threading.Thread):
             with self._lock:
                 self._connecting.discard(i)
                 self._retry_at[i] = time.monotonic() + RETRY_S
-            self._report(f"{out.kind} {out.host}: {exc}"[:110])
+            self._report(f"{out.kind} {out.host}: {exc}"[:140])
             return
         with self._lock:
             self._connecting.discard(i)

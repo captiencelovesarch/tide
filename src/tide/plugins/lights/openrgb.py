@@ -147,7 +147,13 @@ class Server:
     # ---- what the show calls ----
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self.host, self.port), timeout=2.0)
+        try:
+            self.sock = socket.create_connection((self.host, self.port), timeout=2.0)
+        except (ConnectionRefusedError, TimeoutError, socket.timeout):
+            # the usual reason: openrgb isn't running, or its server is off
+            # (2026-10-20: a bare "connection refused" said nothing useful)
+            raise OSError("not running with its sdk server on. "
+                          "start it with openrgb --server") from None
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._send(0, SET_CLIENT_NAME, b"tide\0")
         self._send(0, REQUEST_CONTROLLER_COUNT)
