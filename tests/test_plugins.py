@@ -377,6 +377,34 @@ class CtxTests(Base):
         self.player.position_changed.emit(3.0)
         self.assertEqual(ctx.playback.position(), 3.0)
 
+    def test_tray_action_comes_and_goes(self):
+        from types import SimpleNamespace
+        tray = SimpleNamespace(actions=[])
+        tray.add_plugin_action = tray.actions.append
+        tray.remove_plugin_action = tray.actions.remove
+        self.write("mine")
+        h = PluginHost(SimpleNamespace(_tray=tray), self.player, self.queue,
+                       roots=[(self.user, "yours")], state_file=self.tmp / "plugins.toml",
+                       settings_dir=self.tmp / "plugin-settings",
+                       stamp=self.tmp / "plugin-starting", data_dir=self.tmp / "data")
+        self.addCleanup(h.shutdown)
+        h.set_enabled("mine", True)
+        got = []
+        item = h.record("mine").ctx.ui.add_tray_action("a thing", got.append, checkable=True)
+        tray.actions[0].setChecked(True)
+        item.set_checked(False)                 # the plugin's own change: no callback
+        self.assertEqual(got, [True])
+        h.set_enabled("mine", False)
+        self.assertEqual(tray.actions, [])
+
+    def test_track_links(self):
+        info = plugin_api.track_info(Track(
+            "abc", "t", "a", extras={"artists": [{"name": "a", "id": "UC1"}],
+                                     "album": {"name": "al", "id": "MP1"}}))
+        self.assertEqual(info.artist_link, "https://music.youtube.com/channel/UC1")
+        self.assertEqual(info.album_link, "https://music.youtube.com/browse/MP1")
+        self.assertEqual(plugin_api.track_info(Track("x", "t", "a", source="local")).link, "")
+
     def test_track_info(self):
         info = plugin_api.track_info(Track("abc", "t", "a", album="al", duration_seconds=200,
                                            thumbnail="https://x/y.jpg"))

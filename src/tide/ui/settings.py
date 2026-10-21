@@ -36,7 +36,6 @@ from .headings import Heading, line_heading
 from . import scale
 
 
-DISCORD_HELP_URL = "https://discord.com/developers/applications"
 
 
 # ---------------------------------------------------------------------------
@@ -113,20 +112,7 @@ _WIDGET_ATTRS: dict[str, str] = {
     "spotify_bitrate": "spotify_bitrate_picker",
     "spotify_audio_device": "spotify_sink_edit",
     "spotify_connect_enabled": "spotify_connect_toggle",
-    "discord_enabled": "discord_toggle",
-    "discord_app_id": "discord_app_id",
-    "discord_lyrics_enabled": "discord_lyrics_toggle",
-    "discord_show_paused": "discord_paused_toggle",
-    "discord_show_progress": "discord_progress_toggle",
-    "discord_activity_type": "discord_activity_picker",
-    "discord_status_display": "discord_status_picker",
-    "discord_links": "discord_links_toggle",
-    "discord_hide_local": "discord_hide_local_toggle",
-    "discord_hidden": "discord_hidden_toggle",
-    "discord_details_template": "discord_details_edit",
-    "discord_state_template": "discord_state_edit",
-    "listenbrainz_enabled": "lb_toggle",
-    "listenbrainz_token": "lb_token",
+    "check_updates": "check_updates_toggle",
     "report_plays": "report_plays_toggle",
     "mini_mode_default": "mini_default_toggle",
     "mini_backdrop_style": "mini_backdrop_picker",
@@ -152,12 +138,6 @@ _INT_SPECS: dict[str, dict] = {
 
 # Line-edit tuning for str descriptors (placeholder / secret echo).
 _STR_SPECS: dict[str, dict] = {
-    "discord_app_id": {"placeholder": "paste discord application id"},
-    "discord_details_template": {"placeholder": "default · {title}"},
-    "discord_state_template": {"placeholder": "default · {artists} · {album}"},
-    "listenbrainz_token": {
-        "placeholder": "paste your listenbrainz user token", "password": True,
-    },
     "spotify_audio_device": {"placeholder": "default sink"},
 }
 
@@ -166,20 +146,6 @@ _STR_SPECS: dict[str, dict] = {
 _ENABLE_RULES: dict[str, tuple[str, ...]] = {
     "adaptive_background": ("adaptive_background_style", "adaptive_pulse"),
     "mini_pulse": ("mini_pulse_resize",),
-    "discord_enabled": (
-        "discord_app_id",
-        "discord_lyrics_enabled",
-        "discord_show_paused",
-        "discord_show_progress",
-        "discord_activity_type",
-        "discord_status_display",
-        "discord_links",
-        "discord_hide_local",
-        "discord_hidden",
-        "discord_details_template",
-        "discord_state_template",
-    ),
-    "listenbrainz_enabled": ("listenbrainz_token",),
 }
 
 # Keys whose change reshapes the DIALOG, not the app (neither `live`
@@ -504,20 +470,7 @@ class SettingsDialog(QDialog):
         """The widget plus its row chrome: per-key extras (help buttons)
         and the ·per personality· marker for STASH_FIELDS descriptors."""
         extras: list[QWidget] = []
-        if desc.key == "discord_app_id":
-            self.discord_help = QPushButton("get an app id  →")
-            self.discord_help.setFlat(True)
-            self.discord_help.clicked.connect(
-                lambda: QDesktopServices.openUrl(QUrl(DISCORD_HELP_URL)))
-            extras.append(self.discord_help)
-        elif desc.key == "listenbrainz_token":
-            self.lb_help = QPushButton("get a token  →")
-            self.lb_help.setFlat(True)
-            self.lb_help.clicked.connect(
-                lambda: QDesktopServices.openUrl(
-                    QUrl("https://listenbrainz.org/profile/")))
-            extras.append(self.lb_help)
-        elif desc.key == "font_family_override":
+        if desc.key == "font_family_override":
             # 2.3: the live browser — search, each face in itself, a sample.
             self.font_browse_btn = QPushButton("browse  →")
             self.font_browse_btn.setFlat(True)

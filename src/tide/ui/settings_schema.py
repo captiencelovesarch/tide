@@ -808,111 +808,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "local-only.",
     ),
 
-    # ---- integrations · discord rich presence ----
-    OptionDesc(
-        key="discord_enabled", label="enable discord rich presence",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_app_id", label="app id", kind="str",
-        tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="create an application at the discord developer portal, "
-                "copy its application id, paste it here. tide shows "
-                "whatever name / image you gave that app.",
-    ),
-    OptionDesc(
-        key="discord_lyrics_enabled", label="show live lyric in presence",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="the current synced line replaces artist · album on your "
-                "profile. fast lines show two at a time so none get "
-                "skipped. everyone can see it, and lyrics can be "
-                "explicit.",
-    ),
-    OptionDesc(
-        key="discord_show_paused",
-        label="keep a '⏸ paused' presence instead of clearing it",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_show_progress",
-        label="show the elapsed / total progress bar",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_activity_type", label="activity verb", kind="choice",
-        tab="integrations", section="discord rich presence",
-        choices=(
-            ("listening", "listening to …"),
-            ("playing", "playing …"),
-            ("watching", "watching …"),
-        ),
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_status_display", label="member list shows", kind="choice",
-        tab="integrations", section="discord rich presence",
-        choices=(
-            ("song", "the song"),
-            ("app", "the app name"),
-        ),
-        live="apply_discord_setting",
-        tooltip="what people see next to your name in a server: "
-                "\"listening to <song>\" or \"listening to <your app's name>\".",
-    ),
-    OptionDesc(
-        key="discord_links", label="link the song and add a listen button",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="title, artist and cover open the track on its service. "
-                "the button shows for everyone else, not on your own "
-                "profile. local files never get links.",
-    ),
-    OptionDesc(
-        key="discord_hide_local", label="don't share local files",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_hidden", label="hide from discord for now",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="clears your presence until you switch it back. the tray "
-                "menu has the same switch.",
-    ),
-    OptionDesc(
-        key="discord_details_template", label="line 1", kind="str",
-        tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="takes {title} {artists} {album} {source} placeholders. "
-                "empty = the classic default, {title}.",
-    ),
-    OptionDesc(
-        key="discord_state_template", label="line 2", kind="str",
-        tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="takes {title} {artists} {album} {source} placeholders. "
-                "empty = {artists} · {album}. a live lyric still takes "
-                "over while one is playing.",
-    ),
-    # ---- integrations · listenbrainz ----
-    OptionDesc(
-        key="listenbrainz_enabled", label="enable listenbrainz scrobbling",
-        kind="bool", tab="integrations", section="listenbrainz scrobbling",
-        live="apply_listenbrainz_setting",
-        tooltip="submits 'playing now' on track start and a 'listen' once "
-                "you've heard 30s (or 50% / 4 minutes).",
-    ),
-    OptionDesc(
-        key="listenbrainz_token", label="user token", kind="str",
-        tab="integrations", section="listenbrainz scrobbling",
-        live="apply_listenbrainz_setting",
-        tooltip="listenbrainz.org → settings → token.",
-    ),
     # ---- integrations · play reporting ----
     OptionDesc(
         key="report_plays", label="report plays to youtube music",
@@ -922,6 +817,15 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "your recommendations learn from tide plays. read at "
                 "play time — no push needed. (the accept path must still "
                 "stamp report_plays_answered when this is touched.)",
+    ),
+
+    # ---- integrations · updates ----
+    OptionDesc(
+        key="check_updates", label="tell me when a new tide is out",
+        kind="bool", tab="integrations", section="updates",
+        tooltip="once at launch, tide asks github for its latest release. "
+                "nothing about you goes with it. takes effect next launch. "
+                "flatpak builds never ask, flathub tells you itself.",
     ),
 
     # ---- windows · mini player ----

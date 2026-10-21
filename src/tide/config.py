@@ -48,6 +48,8 @@ PLUGIN_START_STAMP: Path = CACHE_DIR / "plugin-starting"
 # what the store installed (store.py); its downloads, previews and the
 # signed index it read last live under PLUGIN_CACHE_DIR
 PLUGIN_STORE_DIR: Path = PLUGIN_DATA_DIR / "installed"
+# plugins to install once the store answers (plugin_migrate.py)
+PLUGIN_PENDING_FILE: Path = CONFIG_DIR / "plugins-pending.toml"
 
 
 def ensure_dirs() -> None:

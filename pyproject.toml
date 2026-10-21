@@ -32,7 +32,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-discord = ["pypresence>=4.6"]
 secretservice = ["SecretStorage>=3"]
 local_watch = ["watchdog>=4"]
 lyric_align = ["onnxruntime>=1.17"]

@@ -45,7 +45,7 @@ STREAM_WAIT_S = 30.0
 # The "lyrics offset" setting, in seconds to ADD to the playhead before
 # looking lyrics up (a positive ms setting = lyrics later = a negative
 # value here). Lives here, not in the ui, so the headless lyric tracker
-# (mini ticker, discord) follows it too. Set by ui.lyrics.set_offset_ms.
+# (mini ticker, plugins) follows it too. Set by ui.lyrics.set_offset_ms.
 _offset_s = 0.0
 
 

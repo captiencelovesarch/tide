@@ -167,6 +167,45 @@ class ControllerTests(ViewBase):
         self.assertEqual(c.state("demo"), ("cant", "needs tide 99.0.0"))
 
 
+class PendingTests(ViewBase):
+    """what the upgrade migration or onboarding left gets installed once
+    the store answers."""
+
+    def pending(self, *slugs, moved=()):
+        from tide import plugin_migrate
+        for slug in slugs:
+            plugin_migrate.queue_install(slug, settings_dir=self.settings_dir,
+                                         pending_file=self.tmp / "pending.toml")
+        p = plugin_migrate.pending(self.tmp / "pending.toml")
+        p.moved = list(moved)
+        plugin_migrate._write_pending(self.tmp / "pending.toml", p)
+
+    def ctl(self, host=None):
+        c = super().ctl(host)
+        c.pending_file = self.tmp / "pending.toml"
+        return c
+
+    def test_moved_plugin_is_installed_with_a_toast(self):
+        from tide import plugin_migrate
+        self.publish(self.plugin_zip("discord"), slug="discord")
+        self.pending("discord", moved=["discord"])
+        c = self.ctl()
+        self.fetched(c)
+        self.assertTrue(_wait(lambda: c.state("discord")[0] == "installed"))
+        self.assertEqual(self.toasts[-1][0],
+                         "discord presence is a plugin now. we installed it for you.")
+        self.assertEqual(plugin_migrate.pending(c.pending_file).install, [])
+
+    def test_offline_keeps_it_pending(self):
+        from tide import plugin_migrate
+        self.pending("discord", moved=["discord"])
+        os.environ[store.INDEX_ENV] = (self.web / "gone" / "index.json").as_uri()
+        c = self.ctl()
+        self.fetched(c)
+        self.assertEqual(plugin_migrate.pending(c.pending_file).install, ["discord"])
+        self.assertEqual(self.toasts, [])
+
+
 class WidgetTests(ViewBase):
     def test_grid_filters_and_search(self):
         self.publish(self.plugin_zip(), category="hardware")

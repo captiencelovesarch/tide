@@ -19,7 +19,6 @@ depends=(
   'python-spotipy'
 )
 optdepends=(
-  'python-pypresence: Discord rich presence integration'
   'python-secretstorage: GNOME/libsecret backend for cookie import'
   'kwallet: KDE wallet backend for cookie import'
   'python-watchdog: live re-indexing of the local files source'

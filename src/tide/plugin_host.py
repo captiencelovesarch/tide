@@ -1007,9 +1007,53 @@ class _Jobs:
         qthreads.join(self.group, wait_ms=1000)
 
 
+class _TrayAction:
+    """what add_tray_action hands back: change it later, or read it."""
+
+    def __init__(self, action) -> None:
+        self._a = action
+
+    def set_label(self, text: str) -> None:
+        self._a.setText(str(text))
+
+    def set_checked(self, on: bool) -> None:
+        # a plugin setting its own item mustn't call its own handler back
+        self._a.blockSignals(True)
+        self._a.setChecked(bool(on))
+        self._a.blockSignals(False)
+
+    def checked(self) -> bool:
+        return self._a.isChecked()
+
+    def set_visible(self, on: bool) -> None:
+        self._a.setVisible(bool(on))
+
+
 class _Ui:
-    def __init__(self, host: "PluginHost") -> None:
+    def __init__(self, host: "PluginHost", ctx: "PluginContext | None" = None) -> None:
         self._h = host
+        self._ctx = ctx
+
+    def add_tray_action(self, label: str, fn: Callable, checkable: bool = False,
+                        checked: bool = False) -> _TrayAction:
+        """an item in the tray menu, above quit. ``fn()`` when clicked, or
+        ``fn(on)`` for a checkable one. it goes when the plugin stops. no
+        tray (some desktops have none): the item exists, nobody sees it."""
+        from PySide6.QtGui import QAction
+        ctx = self._ctx
+        action = QAction(str(label))
+        action.setCheckable(bool(checkable))
+        action.setChecked(bool(checked))
+        if checkable:
+            action.toggled.connect(lambda on: ctx._call(fn, bool(on)))
+        else:
+            action.triggered.connect(lambda _c=False: ctx._call(fn))
+        tray = getattr(self._h.window, "_tray", None)
+        if tray is not None and hasattr(tray, "add_plugin_action"):
+            tray.add_plugin_action(action)
+            ctx.on_stop(lambda: tray.remove_plugin_action(action))
+        ctx.adopt(action)
+        return _TrayAction(action)
 
     def toast(self, text: str, action_label: str | None = None,
               on_action: Callable | None = None) -> None:
@@ -1065,7 +1109,7 @@ class PluginContext:
         self.theme = _Theme(self._relay)
         self.motion = _Motion()
         self.jobs = _Jobs(self)
-        self.ui = _Ui(host)
+        self.ui = _Ui(host, self)
         self.paths = _Paths(manifest.slug)
         self._on_stop: list[Callable] = []
         self._adopted: list = []

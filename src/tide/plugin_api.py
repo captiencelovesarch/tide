@@ -49,6 +49,8 @@ class TrackInfo:
     source: str = ""
     link: str = ""             # a web page for the track, "" when there isn't one
     art_url: str = ""
+    artist_link: str = ""      # the first artist's page, "" when there isn't one
+    album_link: str = ""
     # tide's own record, so handing this back to ctx (play it, queue it)
     # plays exactly what was found. opaque to plugins.
     ref: object = field(default=None, compare=False, repr=False)
@@ -74,13 +76,46 @@ class Plugin(Protocol):
 
 def track_link(video_id: str, source: str) -> str:
     """The public page for a track, or "" (local files have none)."""
-    if not video_id:
-        return ""
-    if video_id.startswith(("https://", "http://")):
-        return video_id
-    if source == "ytmusic":
-        return f"https://music.youtube.com/watch?v={video_id}"
+    return links_for(video_id, source)[0]
+
+
+def _first_id(value) -> str:
+    """The ``id`` of an artists list's first entry, or of an album dict."""
+    if isinstance(value, list) and value:
+        value = value[0]
+    if isinstance(value, dict):
+        return str(value.get("id") or "")
     return ""
+
+
+def links_for(video_id: str, source: str, extras: dict | None = None) -> tuple[str, str, str]:
+    """(track, first artist, album) pages, as far as the source has them.
+    https only, so they're safe to hand to discord or a browser. local files
+    and self-hosted servers have none."""
+    from urllib.parse import quote
+    vid = str(video_id or "")
+    extras = extras or {}
+    artist_id = _first_id(extras.get("artists"))
+    album_id = _first_id(extras.get("album"))
+    track = artist = album = ""
+    if vid.startswith("https://"):
+        track = vid                        # soundcloud, bandcamp, mixcloud: the permalink
+    elif source == "ytmusic" and vid:
+        track = f"https://music.youtube.com/watch?v={quote(vid)}"
+        if artist_id:
+            artist = f"https://music.youtube.com/channel/{quote(artist_id)}"
+        if album_id:
+            album = f"https://music.youtube.com/browse/{quote(album_id)}"
+    elif source == "spotify" and vid:
+        track = f"https://open.spotify.com/track/{quote(vid)}"
+        if artist_id:
+            artist = f"https://open.spotify.com/artist/{quote(artist_id)}"
+        if album_id:
+            album = f"https://open.spotify.com/album/{quote(album_id)}"
+
+    def ok(url: str) -> str:
+        return url if url.startswith("https://") and len(url) <= 512 else ""
+    return ok(track), ok(artist), ok(album)
 
 
 def track_info(track) -> TrackInfo | None:
@@ -89,6 +124,7 @@ def track_info(track) -> TrackInfo | None:
         return None
     source = str(getattr(track, "source", "") or "")
     vid = str(getattr(track, "video_id", "") or "")
+    link, artist_link, album_link = links_for(vid, source, getattr(track, "extras", None))
     return TrackInfo(
         id=vid,
         title=str(getattr(track, "title", "") or ""),
@@ -96,8 +132,9 @@ def track_info(track) -> TrackInfo | None:
         album=str(getattr(track, "album", "") or ""),
         duration=int(getattr(track, "duration_seconds", 0) or 0),
         source=source,
-        link=track_link(vid, source),
+        link=link,
         art_url=str(getattr(track, "thumbnail", "") or ""),
+        artist_link=artist_link, album_link=album_link,
         ref=track,
     )
 

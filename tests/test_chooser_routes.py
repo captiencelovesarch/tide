@@ -726,12 +726,12 @@ class SettingsRepickTest(_RouteCase):
         w = self._window(s)
         QTest.qWait(20)
         dlg = self._dialog(s, w)
-        dlg.lb_token.setText("half-typed-token")
+        dlg.spotify_sink_edit.setText("half-typed-sink")
         self._flip_to(dlg, "modern")
-        self.assertEqual(dlg.lb_token.text(), "half-typed-token",
+        self.assertEqual(dlg.spotify_sink_edit.text(), "half-typed-sink",
                          "the flip ate an edit it had no business touching")
         dlg._on_save()
-        self.assertEqual(s.listenbrainz_token, "half-typed-token")
+        self.assertEqual(s.spotify_audio_device, "half-typed-sink")
 
     def test_chooser_button_reopens_the_chooser_deferred(self) -> None:
         s = self._brutalist()

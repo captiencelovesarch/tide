@@ -3,7 +3,7 @@
 > **status: phases a, b and c built (2026-10-21). b and c are on branch
 > `claude/plugin-store-ca174f`, not committed.** written 2026-10-21 against
 > local main (`730ecd3`). builds on design/plugins.md (the host, the ctx,
-> phase 3). phase d waits for your ok: see "what's left" at the end.
+> phase 3). phase d's first part (discord out, listenbrainz dropped) is built; the rest waits for your ok.
 
 the goal: a fresh tide has no plugins. you open the store, look at a
 plugin's previews, click install, and it's running. click uninstall and
@@ -427,13 +427,33 @@ plasma's tools), plus `program:<name>`, `process:<name>` and
 
 ## what's left
 
-**phase d** (needs your ok before anything leaves core)
-1. design/plugins.md phase 3: discord and listenbrainz out, `ctx.lyrics`
-   already exists, `ctx.ui.add_tray_action` still to build.
-2. the upgrade migration: install from the store once, copy settings, toast,
-   retry next launch when offline.
-3. the update check's off switch, sharing the store's daily fetch.
-4. the rest of "what moves out of core", each with its hook.
+**phase d, first part: built 2026-10-21** (uncommitted on the branch)
+- discord presence and listenbrainz left core: `discord_rpc.py`,
+  `listenbrainz.py`, their 15 settings, descriptors, dialog special cases,
+  window appliers, the tray's discord item and the headless lyric tracker.
+  listenbrainz is dropped for good, not a plugin (your call, 2026-10-21):
+  a token left in settings.toml goes with the next save, nothing installs.
+  `python-pypresence` left the PKGBUILD optdepends and the pyproject extra.
+- discord is a plugin in tide-plugins (`discord/`), with store.toml, an
+  icon and tests (core's discord test moved there whole). it vendors
+  pypresence. not published yet: it needs banners.
+- `ctx.ui.add_tray_action` (discord's "hide from discord") and
+  `TrackInfo.artist_link` / `album_link`.
+- `plugin_migrate.py`: at launch, before settings.toml can lose the old
+  keys, a user who had discord on gets their settings
+  copied into the plugin's file and an install queued
+  (`plugins-pending.toml`). the store installs it once it reaches the
+  index, with the toast; offline it waits for next launch. each feature is
+  looked at once, so uninstalling later sticks. onboarding's integrations
+  step (discord only now) queues the install the same way.
+- the update check has its off switch (`check_updates`, integrations →
+  updates). it doesn't share the store's daily fetch yet: it's still one
+  check at launch.
+
+**phase d, the rest** (needs your ok before each leaves core): spotify,
+subsonic, the small sources, local files (with the onboarding row), precise
+lyric timing, voice (into steamvr), more visualizer tiles, instrumental
+finder, powertools. each needs its hook first (see the table above).
 
 **small things noticed while building**
 - `tide --no-plugins` still lets the store install and start a plugin.

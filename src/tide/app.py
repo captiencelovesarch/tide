@@ -37,7 +37,6 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
 
 from . import audio_fx, auth, auth_spotify, cache, config, qthreads, session as session_module, settings as settings_module, theming, ui_sounds as ui_sounds_module
 from .api import Api
-from .discord_rpc import DiscordPresence, presence_options
 from .mpris import MprisService
 from .playback import MpvBackend, PlaybackRouter
 from .playback.librespot_backend import LibrespotBackend
@@ -114,15 +113,12 @@ def run_onboarding_if_needed(user_settings):
         user_settings.subsonic_user = r.subsonic_user
         user_settings.subsonic_pass = r.subsonic_pass
         user_settings.subsonic_auth_style = r.subsonic_auth_style or "salt"
-    # Optional integrations step. Only ever *adds* — the step can't produce
-    # enabled=True without a credential, and an untouched step leaves the
-    # defaults (off) in place.
+    # Optional integrations step. Discord presence is a store plugin since
+    # 3.0: a pick here queues the install (it runs once the store answers)
+    # with the app id already in its settings.
+    from . import plugin_migrate
     if r.discord_enabled and r.discord_app_id:
-        user_settings.discord_enabled = True
-        user_settings.discord_app_id = r.discord_app_id
-    if r.listenbrainz_enabled and r.listenbrainz_token:
-        user_settings.listenbrainz_enabled = True
-        user_settings.listenbrainz_token = r.listenbrainz_token
+        plugin_migrate.queue_install("discord", {"app_id": r.discord_app_id})
     # Play reporting: only persisted when the step was actually answered —
     # a cancelled wizard must not count as a privacy decision.
     if getattr(r, "report_plays_answered", False):
@@ -423,6 +419,14 @@ def run(argv: list[str] | None = None) -> int:
               + (" — asked it to come forward" if delivered else ""))
         sys.exit(0)
 
+    # 3.0: features that became store plugins take their settings with
+    # them, before anything saves settings.toml without those keys
+    from . import plugin_migrate
+    try:
+        plugin_migrate.collect()
+    except Exception:
+        import logging
+        logging.getLogger("tide").exception("couldn't carry moved features' settings over")
     user_settings = settings_module.load()
     # 2.0 downgrade shield: archive the 1.x settings file once, before
     # any 2.0 save stamps preset fields into it (a later 1.x run would
@@ -646,29 +650,6 @@ def run(argv: list[str] | None = None) -> int:
     else:
         window._tray = None
 
-    # Discord rich presence — opt-in, configured via settings dialog.
-    discord = DiscordPresence(player, window.queue)
-    discord.start_wire()
-    discord.set_options(**presence_options(user_settings))
-    discord.configure(user_settings.discord_app_id, user_settings.discord_enabled)
-
-    # Live-lyric feed for the presence state line. Headless (not the lyrics
-    # panel) so it keeps working with the panel closed; gated on BOTH
-    # toggles so a disabled feature never fetches lyrics.
-    from .lyric_tracker import LyricTracker
-    lyric_tracker = LyricTracker(api_obj, player, window.queue)
-    lyric_tracker.start_wire()
-    lyric_tracker.timeline_changed.connect(discord.set_lyric_timeline)
-    lyric_tracker.set_enabled(
-        user_settings.discord_enabled and user_settings.discord_lyrics_enabled
-    )
-
-    # ListenBrainz scrobbling — opt-in via Settings → ListenBrainz.
-    from .listenbrainz import ListenBrainzScrobbler
-    scrobbler = ListenBrainzScrobbler(player, window.queue)
-    scrobbler.configure(user_settings.listenbrainz_token, user_settings.listenbrainz_enabled)
-    window._scrobbler = scrobbler
-
     # Adaptive accent driver — shifts theme accent toward album art.
     from .ui.adaptive import AdaptiveDriver
     adaptive = AdaptiveDriver(window.queue)
@@ -780,14 +761,11 @@ def run(argv: list[str] | None = None) -> int:
     window._update_bridge = update_bridge   # keep alive for the app's lifetime
     # flathub delivers updates itself; a toast pointing at github would
     # send flatpak users the wrong way.
-    if not config.in_flatpak():
+    if not config.in_flatpak() and getattr(user_settings, "check_updates", True):
         try:
             updates.check_in_background(__version__, update_bridge.newer.emit)
         except Exception:
             pass
-    # Expose so the (later) settings dialog can re-configure live.
-    window._discord = discord
-    window._lyric_tracker = lyric_tracker
     _attach_settings(window, user_settings)
 
     # v1.5 play reporting, upgrader path: the choice lives in the wizard,
@@ -926,7 +904,6 @@ def run(argv: list[str] | None = None) -> int:
         plugins.shutdown()
     except Exception:
         pass
-    discord.shutdown()
     mpris.stop()
     try:
         from . import lyric_timing

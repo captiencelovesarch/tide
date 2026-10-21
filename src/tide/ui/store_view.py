@@ -156,7 +156,8 @@ class StoreController(QObject):
 
     def __init__(self, host, *, root: Path | None = None, cache_dir: Path | None = None,
                  settings_dir: Path | None = None, data_dir: Path | None = None,
-                 toast: Callable | None = None, parent: QObject | None = None) -> None:
+                 pending_file: Path | None = None, toast: Callable | None = None,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.host = host
         self.root = root or config.PLUGIN_STORE_DIR
@@ -164,6 +165,8 @@ class StoreController(QObject):
         self.settings_dir = settings_dir or getattr(host, "settings_dir", config.PLUGIN_SETTINGS_DIR)
         self.data_dir = data_dir or getattr(host, "data_dir", config.PLUGIN_DATA_DIR)
         self.trash_dir = self.cache_dir / "trash"
+        self.pending_file = pending_file or config.PLUGIN_PENDING_FILE
+        self._pending_toasts: dict[str, str] = {}
         self._toast = toast
         self.index: store.Index | None = store.cached_index(self.cache_dir)
         self.offline = ""                 # why the store can't be reached, or ""
@@ -186,6 +189,8 @@ class StoreController(QObject):
         """once a day while tide runs, and once now if it's been a day."""
         self._daily.start()
         self.check_daily()
+        if self.index is not None and not self._fetching:
+            self.install_pending()
 
     def check_daily(self) -> None:
         age = store.index_age(self.cache_dir)
@@ -210,6 +215,22 @@ class StoreController(QObject):
         self.offline = ""
         self.index_changed.emit()
         self._count_updates()
+        self.install_pending()
+
+    def install_pending(self) -> None:
+        """what a moved feature or onboarding left for the store. anything
+        that can't go in now stays on the list for next launch."""
+        from .. import plugin_migrate
+        p = plugin_migrate.pending(self.pending_file)
+        for slug in list(p.install):
+            if self.host.record(slug) is not None:
+                plugin_migrate.finished(slug, self.pending_file)
+                continue
+            entry = self.entry(slug)
+            if entry is None or store.cant_install(entry) or slug in self._busy:
+                continue
+            self._pending_toasts[slug] = plugin_migrate.toast_for(slug, slug in p.moved, entry.name)
+            self.install(slug)
 
     def _fetch_failed(self, text: str) -> None:
         self._fetching = False
@@ -337,8 +358,14 @@ class StoreController(QObject):
         self.host.installed(slug)
         self.state_changed.emit(slug)
         self._count_updates()
+        toast = self._pending_toasts.pop(slug, None)
+        if toast is not None:
+            from .. import plugin_migrate
+            plugin_migrate.finished(slug, self.pending_file)
+            self.toast(toast)
 
     def _install_failed(self, slug: str, text: str) -> None:
+        self._pending_toasts.pop(slug, None)      # still pending: next launch
         self._busy.pop(slug, None)
         self._progress.pop(slug, None)
         self._errors[slug] = text

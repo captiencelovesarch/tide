@@ -5207,8 +5207,6 @@ class MainWindow(QMainWindow):
         "apply_mini_setting",
         "apply_fullscreen_setting",
         "apply_prefetch_setting",
-        "apply_discord_setting",
-        "apply_listenbrainz_setting",
         "apply_audio_device_setting",
         "apply_visualizer_setting",
         "apply_pitch_setting",
@@ -5475,46 +5473,6 @@ class MainWindow(QMainWindow):
         """Hover/press prefetch is checked at fire time, so flipping the
         attr is the whole live apply. warm_results is read per-search."""
         self._prefetch.hover_enabled = bool(self._settings.prefetch_hover)
-
-    def apply_discord_setting(self) -> None:
-        """Push presence options to the live client; the presence lyric
-        feed follows both toggles (disabling emits None, which clears any
-        lyric already sitting on the profile)."""
-        s = self._settings
-        discord = getattr(self, "_discord", None)
-        if discord is not None:
-            from ..discord_rpc import presence_options
-            discord.set_options(**presence_options(s))
-            discord.configure(s.discord_app_id, s.discord_enabled)
-        tray = getattr(self, "_tray", None)
-        if tray is not None and hasattr(tray, "sync_discord"):
-            tray.sync_discord()
-        lyric_tracker = getattr(self, "_lyric_tracker", None)
-        if lyric_tracker is not None:
-            lyric_tracker.set_enabled(
-                s.discord_enabled and s.discord_lyrics_enabled
-            )
-
-    def set_discord_hidden(self, hidden: bool) -> None:
-        """The tray's "hide from discord" switch: saved, then applied."""
-        s = getattr(self, "_settings", None)
-        if s is None or bool(s.discord_hidden) == bool(hidden):
-            return
-        s.discord_hidden = bool(hidden)
-        try:
-            from .. import settings as settings_module
-            settings_module.save_fields(s, "discord_hidden")
-        except Exception:
-            pass
-        self.apply_discord_setting()
-
-    def apply_listenbrainz_setting(self) -> None:
-        scrobbler = getattr(self, "_scrobbler", None)
-        if scrobbler is not None:
-            scrobbler.configure(
-                self._settings.listenbrainz_token,
-                self._settings.listenbrainz_enabled,
-            )
 
     def apply_audio_device_setting(self) -> None:
         """Audio device override for the visualizer feed (restarts the

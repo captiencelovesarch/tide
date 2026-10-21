@@ -19,33 +19,6 @@ from . import config
 @dataclass
 class Settings:
     theme: str = "brutalist-mono"
-    discord_enabled: bool = False
-    discord_app_id: str = ""
-    # Show the live synced-lyric line in the presence "state" field
-    # (replaces artist · album while a line is active). Off by default —
-    # lyrics get broadcast to everyone who can see the profile.
-    discord_lyrics_enabled: bool = False
-    # v1.4 — presence customization. Templates are format-style strings with
-    # {title} {artists} {album} {source} placeholders; empty = the classic
-    # defaults ("{title}" / "{artists} · {album}"). A live lyric still takes
-    # over the state line while discord_lyrics_enabled is on.
-    discord_details_template: str = ""
-    discord_state_template: str = ""
-    # Keep a "⏸ paused" presence up instead of clearing it entirely.
-    discord_show_paused: bool = False
-    # Include the elapsed/total progress-bar timestamps.
-    discord_show_progress: bool = True
-    # Presence verb: "listening" | "playing" | "watching".
-    discord_activity_type: str = "listening"
-    # What the member list shows after the verb: "song" (line 1) | "app".
-    discord_status_display: str = "song"
-    # Link title / artist / cover to the track's page, with a listen button.
-    discord_links: bool = True
-    # The tray's "hide from discord" switch. Kept across restarts, so a
-    # hidden presence doesn't come back on its own.
-    discord_hidden: bool = False
-    # Never share a local file.
-    discord_hide_local: bool = False
     volume: int = 80
     sleep_preset_minutes: int = 30
     mini_mode_default: bool = False
@@ -118,8 +91,6 @@ class Settings:
     visualizer_tapper_target: str = "beats"     # "beats" | "downbeats" | "kicks"
     visualizer_tapper_window: str = "normal"    # "tight" | "normal" | "loose"
     visualizer_tapper_offset: int = 0           # ms your taps are judged earlier by
-    listenbrainz_enabled: bool = False
-    listenbrainz_token: str = ""
     layout: str = "classic"
     layout_overrides: dict = field(default_factory=dict)
     adaptive_accent: bool = False
@@ -194,6 +165,9 @@ class Settings:
     # on a light one, from the system's light/dark setting), "app" is the
     # window icon.
     tray_icon: str = "mono"
+    # the once-a-launch github release check (updates.py). off: tide never
+    # asks. flatpak builds skip it whatever this says.
+    check_updates: bool = True
     # Font-family override. Empty = use the active theme's typography.family.
     # When set, the theming manager pushes this family on every theme apply.
     font_family_override: str = ""

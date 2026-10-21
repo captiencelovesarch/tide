@@ -150,12 +150,11 @@ class GenerationTests(_DialogCase):
 
     def test_dependent_rows_follow_their_controller(self) -> None:
         s = Settings()
-        s.discord_enabled = False
+        s.mini_pulse = False
         dlg = self._dialog(s)
-        self.assertFalse(dlg.discord_app_id.isEnabled())
-        dlg.discord_toggle.setChecked(True)
-        self.assertTrue(dlg.discord_app_id.isEnabled())
-        self.assertTrue(dlg.discord_lyrics_toggle.isEnabled())
+        self.assertFalse(dlg.mini_pulse_resize_toggle.isEnabled())
+        dlg.mini_pulse_toggle.setChecked(True)
+        self.assertTrue(dlg.mini_pulse_resize_toggle.isEnabled())
 
 
 class DiffApplyTests(_DialogCase):

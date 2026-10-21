@@ -79,33 +79,30 @@ class TideTray(QObject):
         self.show_action.triggered.connect(self._toggle_window)
         self._menu.addAction(self.show_action)
 
-        # Only there while discord presence is on (see sync_discord).
-        self.discord_action = QAction("hide from discord", self._menu)
-        self.discord_action.setCheckable(True)
-        self.discord_action.toggled.connect(self._on_discord_toggled)
-        self._menu.addAction(self.discord_action)
-        self.sync_discord()
+        # what plugins added (ctx.ui.add_tray_action), in the order they did
+        for action in getattr(self, "_plugin_actions", []):
+            self._menu.addAction(action)
 
-        self._menu.addSeparator()
+        self._plugin_end = self._menu.addSeparator()
         quit_action = QAction("quit tide", self._menu)
         quit_action.triggered.connect(self._real_quit)
         self._menu.addAction(quit_action)
 
-    def sync_discord(self) -> None:
-        """Match the "hide from discord" item to the saved settings."""
-        s = getattr(self.window, "_settings", None)
-        on = bool(s is not None and s.discord_enabled)
-        self.discord_action.setVisible(on)
-        hidden = bool(s is not None and s.discord_hidden)
-        if self.discord_action.isChecked() != hidden:
-            self.discord_action.blockSignals(True)
-            self.discord_action.setChecked(hidden)
-            self.discord_action.blockSignals(False)
+    def add_plugin_action(self, action: QAction) -> None:
+        """a plugin's item, above quit. it stays across menu rebuilds."""
+        if not hasattr(self, "_plugin_actions"):
+            self._plugin_actions = []
+        self._plugin_actions.append(action)
+        self._menu.insertAction(self._plugin_end, action)
 
-    def _on_discord_toggled(self, hidden: bool) -> None:
-        setter = getattr(self.window, "set_discord_hidden", None)
-        if setter is not None:
-            setter(hidden)
+    def remove_plugin_action(self, action: QAction) -> None:
+        actions = getattr(self, "_plugin_actions", [])
+        if action in actions:
+            actions.remove(action)
+        try:
+            self._menu.removeAction(action)
+        except RuntimeError:
+            pass
 
     # ---------- activation ----------
 
