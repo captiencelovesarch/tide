@@ -26,6 +26,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -51,6 +52,7 @@ class _Candidate:
     family: str                  # "chromium" or "firefox"
     config: tuple[str, ...]      # roots under $XDG_CONFIG_HOME
     home: tuple[str, ...] = ()   # roots under $HOME (flatpak, snap, legacy)
+    windows: tuple[str, ...] = ()  # "<ENV VAR>/<path>", e.g. LOCALAPPDATA/...
 
 
 # Order matters: first match is the picker's default suggestion. Native and
@@ -58,23 +60,32 @@ class _Candidate:
 # found under any of the roots is a candidate, newest first.
 _CANDIDATES: tuple[_Candidate, ...] = (
     _Candidate("chromium", "chromium", "chromium", ("chromium",),
-               (".var/app/org.chromium.Chromium/config/chromium",)),
+               (".var/app/org.chromium.Chromium/config/chromium",),
+               ("LOCALAPPDATA/Chromium/User Data",)),
     _Candidate("chrome", "google chrome", "chromium", ("google-chrome",),
-               (".var/app/com.google.Chrome/config/google-chrome",)),
+               (".var/app/com.google.Chrome/config/google-chrome",),
+               ("LOCALAPPDATA/Google/Chrome/User Data",)),
     _Candidate("brave", "brave", "chromium", ("BraveSoftware/Brave-Browser",),
-               (".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",)),
+               (".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",),
+               ("LOCALAPPDATA/BraveSoftware/Brave-Browser/User Data",)),
     _Candidate("vivaldi", "vivaldi", "chromium", ("vivaldi",),
-               (".var/app/com.vivaldi.Vivaldi/config/vivaldi",)),
+               (".var/app/com.vivaldi.Vivaldi/config/vivaldi",),
+               ("LOCALAPPDATA/Vivaldi/User Data",)),
     _Candidate("edge", "microsoft edge", "chromium", ("microsoft-edge",),
-               (".var/app/com.microsoft.Edge/config/microsoft-edge",)),
-    _Candidate("opera", "opera", "chromium", ("opera",)),
-    _Candidate("whale", "whale", "chromium", ("naver-whale",)),
+               (".var/app/com.microsoft.Edge/config/microsoft-edge",),
+               ("LOCALAPPDATA/Microsoft/Edge/User Data",)),
+    _Candidate("opera", "opera", "chromium", ("opera",), (),
+               ("APPDATA/Opera Software/Opera Stable",
+                "APPDATA/Opera Software/Opera GX Stable")),
+    _Candidate("whale", "whale", "chromium", ("naver-whale",), (),
+               ("LOCALAPPDATA/Naver/Naver Whale/User Data",)),
     _Candidate("firefox", "firefox", "firefox",
                ("mozilla/firefox",),          # FF147+ follows XDG
                (".mozilla/firefox",           # everything before that
                 ".var/app/org.mozilla.firefox/config/mozilla/firefox",
                 ".var/app/org.mozilla.firefox/.mozilla/firefox",
-                "snap/firefox/common/.mozilla/firefox")),
+                "snap/firefox/common/.mozilla/firefox"),
+               ("APPDATA/Mozilla/Firefox",)),
 )
 
 # Where each family keeps the cookie db, relative to a root. Chromium moved
@@ -94,8 +105,15 @@ def _mtime(path: Path) -> float:
 
 
 def _cookie_dbs(cand: _Candidate) -> list[Path]:
-    roots = [_config_home() / rel for rel in cand.config]
-    roots += [Path.home() / rel for rel in cand.home]
+    if sys.platform == "win32":
+        roots = []
+        for spec in cand.windows:
+            env, _, rel = spec.partition("/")
+            if os.environ.get(env):
+                roots.append(Path(os.environ[env]) / rel)
+    else:
+        roots = [_config_home() / rel for rel in cand.config]
+        roots += [Path.home() / rel for rel in cand.home]
     found: set[Path] = set()
     for root in roots:
         if not root.is_dir():
@@ -256,6 +274,7 @@ class _Log:
         "kwallet-query",
         "secretstorage not available",
         "exception running kwallet",
+        "failed to decrypt with dpapi",   # windows
     )
     _CHOSEN = re.compile(r"chosen keyring: (\w+)", re.IGNORECASE)
 
@@ -280,8 +299,18 @@ _NO_KEY_NOTE = (
 )
 
 
+_WINDOWS_LOCKED_NOTE = (
+    "chrome and edge on windows keep their cookies locked away from other "
+    "apps. sign in to youtube music in firefox, then import from firefox."
+)
+
+
 def _read_jar(slug: str, profile_dir: Path, keyring: str | None) -> tuple[Iterable, _Log]:
     log = _Log()
+    if sys.platform == "win32" and profile_dir.name == "Network":
+        # yt-dlp takes the browser root (where "Local State" and its key
+        # live) as the profile's parent, so hand it the profile itself
+        profile_dir = profile_dir.parent
     jar = extract_cookies_from_browser(slug, profile=str(profile_dir), logger=log, keyring=keyring)
     return jar, log
 
@@ -289,6 +318,12 @@ def _read_jar(slug: str, profile_dir: Path, keyring: str | None) -> tuple[Iterab
 def _import_one(profile: BrowserProfile, db: Path) -> ImportResult:
     jar, log = _read_jar(profile.slug, db.parent, None)
     result = _result_from_jar(profile, jar)
+    if sys.platform == "win32":
+        # no keyrings to retry; signed out with trouble means app-bound
+        # encryption, which yt-dlp can't open
+        if not result.looks_signed_in and profile.family == "chromium" and log.key_trouble():
+            result.note = _WINDOWS_LOCKED_NOTE
+        return result
     if result.looks_signed_in or profile.family != "chromium" or not log.key_trouble():
         return result
     # Chromium encrypts cookie values with a key parked in the desktop
@@ -340,4 +375,10 @@ def import_cookies(profile: BrowserProfile) -> ImportResult:
             first_miss = result
     if first_miss is not None:
         return first_miss
+    if sys.platform == "win32" and profile.family == "chromium":
+        # the browser holds its cookie file open while it runs
+        raise ImportError_(
+            f"couldn't read {profile.label}. close it completely and try "
+            "again, or sign in with firefox and import from there."
+        )
     raise ImportError_(f"couldn't read cookies from {profile.label}: {last_error}")
