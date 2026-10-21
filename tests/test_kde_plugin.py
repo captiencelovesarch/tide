@@ -56,6 +56,9 @@ class ColourTests(unittest.TestCase):
         self.assertEqual(desk.rgb_text("#7300ff"), "115,0,255")
         self.assertEqual(desk.hex_of("115,0,255"), "#7300ff")
 
+    def test_black_and_white_is_white(self):
+        self.assertEqual(art.accent((0.5, 0.5, 0.5)), "#f0f0f0")
+
     def test_accent_stays_readable_under_white_text(self):
         for rgb in ((1.0, 0.95, 0.4), (0.6, 1.0, 0.7), (0.2, 0.3, 0.9), (1.0, 0.2, 0.4)):
             hx = art.accent(rgb)
@@ -237,7 +240,7 @@ class KdePluginTests(unittest.TestCase):
         self.assertIn("mine.png", self.scripts()[-1])
         self.assertEqual(list(plugin.dir.glob("wallpaper-*.jpg")), [])
 
-    def test_a_colourless_cover_brings_your_accent_back(self):
+    def test_a_black_and_white_cover_is_a_white_accent(self):
         from PySide6.QtGui import QColor
         plugin = self.start()
         self.wait(plugin)
@@ -248,7 +251,7 @@ class KdePluginTests(unittest.TestCase):
             thumbnail="https://example/grey.jpg", source="ytmusic")
         plugin._track_changed(self.host.current_track())
         self.wait(plugin)
-        self.assertEqual(self.accents()[-1], "#7300ff")   # yours, not the last song's
+        self.assertEqual(self.accents()[-1], "#f0f0f0")   # white, not the last song's
 
     def test_a_crash_last_time_is_put_right_first(self):
         crashed = self.data / "kde"

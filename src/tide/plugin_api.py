@@ -316,15 +316,21 @@ def _palette(img, min_s: float, min_v: float, by_vividness: bool):
 SECOND_SHARE = 0.18        # a second colour has to cover this much of the colourful area
 
 
+WHITE = (1.0, 1.0, 1.0)
+
+
 def cover_colors(img) -> tuple | None:
     """two colours from a cover (a QImage) as rgb 0..1 tuples: the colour
     most of it is, and a second one if it covers a real part of it too
-    (else the first twice), lifted for light. None for a grey cover (use
-    the theme's accent)."""
+    (else the first twice), lifted for light. a black-and-white cover is
+    white light (2026-10-21: it used to fall back to the theme's accent,
+    "it can clearly just be white"). None only when there's no image."""
     import colorsys
+    if img is None or img.isNull():
+        return None
     palette = cover_palette(img)
     if not palette:
-        return None
+        return WHITE, WHITE
     first = palette[0][0]
     second = next((hsv for hsv, share in palette[1:] if share >= SECOND_SHARE), first)
 
