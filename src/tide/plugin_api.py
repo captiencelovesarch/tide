@@ -247,31 +247,78 @@ class Kicks:
         return hit
 
 
-def cover_colors(img) -> tuple | None:
-    """two colours from a cover (a QImage) as rgb 0..1 tuples: its most
-    vivid colour and the next most vivid one of a different hue, lifted
-    for light. None for a grey cover (use the theme's accent)."""
+def cover_palette(img) -> list[tuple[tuple[float, float, float], float]]:
+    """a cover's colours by how much of it they cover: up to three
+    (hue, saturation, value) 0..1 with their share of the colourful area,
+    biggest first. greys, blacks and whites don't count; a colour has to
+    cover a real part of the cover, so a small detail (a blue painting on
+    a red cover) doesn't take over (2026-10-21)."""
+    import colorsys
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QColor
+    from PySide6.QtGui import QImage
     if img is None or img.isNull():
-        return None
-    small = img.scaled(16, 16, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    picks = []
+        return []
+    small = img.convertToFormat(QImage.Format_RGB32).scaled(
+        32, 32, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    bins = 24
+    weight = [0.0] * bins
+    sums = [[0.0, 0.0, 0.0, 0.0] for _ in range(bins)]     # sin, cos, s, v (weighted)
     for y in range(small.height()):
         for x in range(small.width()):
-            c = QColor(small.pixel(x, y))
-            h, s, v, _a = c.getHsvF()
-            if s > 0.25 and v > 0.3:
-                picks.append((s * v, h, c))
-    if not picks:
-        return None
-    picks.sort(key=lambda p: -p[0])
-    first = picks[0]
-    second = next((p for p in picks[1:]
-                   if min(abs(p[1] - first[1]), 1 - abs(p[1] - first[1])) > 0.08), first)
+            px = small.pixel(x, y)
+            r, g, b = ((px >> 16) & 255) / 255, ((px >> 8) & 255) / 255, (px & 255) / 255
+            h, sat, v = colorsys.rgb_to_hsv(r, g, b)
+            if sat < 0.18 or v < 0.22:
+                continue
+            w = sat * v
+            k = int(h * bins) % bins
+            weight[k] += w
+            sums[k][0] += w * _math.sin(2 * _math.pi * h)
+            sums[k][1] += w * _math.cos(2 * _math.pi * h)
+            sums[k][2] += w * sat
+            sums[k][3] += w * v
+    total = sum(weight)
+    if total < 0.5:                       # under ~2% of the cover is colour at all
+        return []
+    # each bin with its neighbours, so a hue on a bin edge isn't split in two
+    smooth = [weight[(k - 1) % bins] * 0.5 + weight[k] + weight[(k + 1) % bins] * 0.5
+              for k in range(bins)]
+    picked: list[int] = []
+    for k in sorted(range(bins), key=lambda k: -smooth[k]):
+        if smooth[k] <= 0 or any(min(abs(k - j), bins - abs(k - j)) < 3 for j in picked):
+            continue
+        picked.append(k)
+        if len(picked) == 3:
+            break
+    out = []
+    for k in picked:
+        ks = [(k - 1) % bins, k, (k + 1) % bins]
+        w = sum(weight[j] for j in ks)
+        if w <= 0:
+            continue
+        hue = (_math.atan2(sum(sums[j][0] for j in ks), sum(sums[j][1] for j in ks))
+               / (2 * _math.pi)) % 1.0
+        out.append(((hue, sum(sums[j][2] for j in ks) / w, sum(sums[j][3] for j in ks) / w),
+                    w / total))
+    return out
 
-    def lift(c: QColor) -> tuple:
-        h, s, v, _a = c.getHsvF()
-        out = QColor.fromHsvF(max(0.0, h), min(1.0, s * 1.1), max(0.85, v))
-        return (out.redF(), out.greenF(), out.blueF())
-    return lift(first[2]), lift(second[2])
+
+SECOND_SHARE = 0.18        # a second colour has to cover this much of the colourful area
+
+
+def cover_colors(img) -> tuple | None:
+    """two colours from a cover (a QImage) as rgb 0..1 tuples: the colour
+    most of it is, and a second one if it covers a real part of it too
+    (else the first twice), lifted for light. None for a grey cover (use
+    the theme's accent)."""
+    import colorsys
+    palette = cover_palette(img)
+    if not palette:
+        return None
+    first = palette[0][0]
+    second = next((hsv for hsv, share in palette[1:] if share >= SECOND_SHARE), first)
+
+    def lift(hsv: tuple) -> tuple:
+        h, s, v = hsv
+        return colorsys.hsv_to_rgb(h, min(1.0, s * 1.1), max(0.85, v))
+    return lift(first), lift(second)
