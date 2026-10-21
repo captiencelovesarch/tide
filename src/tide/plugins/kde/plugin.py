@@ -21,8 +21,8 @@ from tide.plugin_api import cover_colors
 
 from . import art, desk
 
-SETTLE_MS = 1200           # a song has to stay this long before the desktop changes
-PAUSE_MS = 3000            # paused this long (with "go back to yours"): your look comes back
+SETTLE_MS = 500            # a song has to stay this long before the desktop changes
+PAUSE_MS = 3000            # paused (or the music ran out) this long: your look comes back
 KEEP_WALLPAPERS = 2
 
 
@@ -39,6 +39,7 @@ class KdeDesktop:
         self._track = None
         self._look: tuple | None = None       # (art url, accent, cover image)
         self._applied = False
+        self._shown: str | None = None        # the art url whose look is on the desktop
         self._serial = 0
         self.status = ctx.adopt(_Said())
         self.status.said.connect(ctx.set_status)
@@ -49,7 +50,7 @@ class KdeDesktop:
         self._pause = ctx.adopt(QTimer())
         self._pause.setSingleShot(True)
         self._pause.setInterval(PAUSE_MS)
-        self._pause.timeout.connect(lambda: self._queue(self._restore))
+        self._pause.timeout.connect(self._back_to_yours)
         self._jobs: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._work, name="tide-kde", daemon=True)
         self._worker.start()
@@ -153,6 +154,17 @@ class KdeDesktop:
         self._applied = True
 
     # ---- from tide (gui thread) ----
+    #
+    # the rules (2026-10-21, after it went back to your colour mid-song):
+    # · on play, the song's colour goes on
+    # · it stays while the song plays. loading between songs counts as
+    #   playing: tide goes idle, then loading, then playing, and that gap
+    #   used to look like a pause
+    # · paused, or the music ran out: the colour stays 3 s, then yours
+    # · a new song (next, skip, radio): its colour, half a second in
+
+    def _playing(self) -> bool:
+        return self.ctx.playback.state() in ("playing", "loading")
 
     def _track_changed(self, track) -> None:
         self._track = track
@@ -161,15 +173,17 @@ class KdeDesktop:
 
     def _song_settled(self) -> None:
         track = self._track
-        if track is None or self._paused_away():
+        if track is None:
             return
         url = track.art_url
-        if not url:
-            return
         if self._look is not None and self._look[0] == url:
-            self._show(*self._look[1:])
-            return
-        self.ctx.track.art(url, lambda img, u=url: self._got_art(u, img))
+            self._present()
+        elif not url:
+            # no cover at all: your own accent while it plays
+            self._look = ("", None, None)
+            self._present()
+        else:
+            self.ctx.track.art(url, lambda img, u=url: self._got_art(u, img))
 
     def _got_art(self, url: str, img) -> None:
         track = self._track
@@ -177,8 +191,20 @@ class KdeDesktop:
             return
         colors = cover_colors(img)
         accent = art.accent(colors[0]) if colors else None
-        self._look = (url, accent, img)
-        self._show(accent, img)
+        self._look = (url, accent, img.copy())
+        self._present()
+
+    def _present(self, force: bool = False) -> None:
+        """the current song's look on the desktop, if music is playing.
+        paused, it waits for play."""
+        look = self._look
+        if look is None or not self._playing():
+            return
+        self._pause.stop()
+        if look[0] == self._shown and not force:
+            return
+        self._shown = look[0]
+        self._show(look[1], look[2])
 
     def _show(self, accent, img) -> None:
         self._serial += 1
@@ -192,20 +218,21 @@ class KdeDesktop:
         title = self._track.title if self._track is not None else ""
         self.ctx.set_status(f"following {self.ctx.theme.case(title)}"[:120])
 
-    def _paused_away(self) -> bool:
-        return (self.ctx.settings["paused"] == "restore"
-                and self.ctx.playback.state() != "playing")
-
     def _state(self, state: str) -> None:
-        if state == "playing":
+        if state in ("playing", "loading"):
             self._pause.stop()
-            if not self._applied and self._look is not None:
-                self._show(*self._look[1:])
-        elif self.ctx.settings["paused"] == "restore":
-            self._pause.start()
+            self._present()
+        elif self._shown is not None:
+            self._pause.start()             # 3 s with the song's colour, then yours
+
+    def _back_to_yours(self) -> None:
+        if self._playing():
+            return
+        self._shown = None
+        self._serial += 1                   # anything still queued for a song is stale
+        self._queue(self._restore)
+        self.ctx.set_status("your desktop follows the music")
 
     def _settings_changed(self, _keys) -> None:
-        if self._paused_away():
-            self._queue(self._restore)
-        elif self._look is not None:
-            self._show(*self._look[1:])
+        if self._shown is not None:
+            self._present(force=True)
