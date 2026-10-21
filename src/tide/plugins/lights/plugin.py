@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor
 
 from tide.plugin_api import cover_colors
 
-from . import openrgb, wled
+from . import launch, openrgb, wled
 from .show import Show
 
 
@@ -42,6 +42,13 @@ class Lights:
 
     def stop(self) -> None:
         self._end_show()
+        self._stop_openrgb()
+
+    def _stop_openrgb(self) -> None:
+        """only an openrgb tide started itself, after the show has given
+        every device its colours back."""
+        launch.stop_server(getattr(self, "_openrgb", None))
+        self._openrgb = None
 
     # ---- the show ----
 
@@ -62,6 +69,15 @@ class Lights:
             self.ctx.set_status("no lights set up: switch on openrgb or add a wled address")
             return
         self.ctx.set_status("looking for your lights")
+        s = self.ctx.settings
+        if s["openrgb"] and s["start_openrgb"] and getattr(self, "_openrgb", None) is None:
+            host, port = openrgb.parse_address(s["openrgb_address"])
+            self._openrgb, said = launch.start_server(host, port)
+            if said:
+                self.ctx.set_status(said)
+        for out in outs:
+            if isinstance(out, openrgb.Server):
+                out.size_headers = bool(s["size_headers"])
         self.show = Show(outs, self.status.said.emit)
         self._configure()
         self._colours()
@@ -83,7 +99,10 @@ class Lights:
         self.show.configure(mode=s["mode"], strength=s["strength"], paused=s["paused"])
 
     def _settings_changed(self, keys) -> None:
-        if {"openrgb", "openrgb_address", "wled"} & set(keys):
+        if {"openrgb", "openrgb_address", "start_openrgb"} & set(keys):
+            self._end_show()
+            self._stop_openrgb()
+        if {"openrgb", "openrgb_address", "wled", "start_openrgb", "size_headers"} & set(keys):
             self._restart()
         else:
             self._configure()

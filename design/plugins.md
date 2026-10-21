@@ -488,6 +488,14 @@ room or fills a view should go through `FlashLimiter`.
 - letting go: OpenRGB devices get the colours they had back (their mode
   stays direct); WLED takes its own effect back two seconds after the
   last packet.
+- no second app to babysit (2026-10-21): if nothing answers on a local
+  OpenRGB address and OpenRGB isn't open, tide starts `openrgb --server`
+  itself (no window) and stops that one when lights goes off. If OpenRGB
+  is open with its server off, the status says so instead of starting a
+  second copy (two would fight over the same usb devices). An
+  addressable header OpenRGB reports at 0 leds gets 24 (more than are
+  plugged in is harmless; OpenRGB keeps the size), so a cooler or fans
+  on it light up. Both are settings, on by default.
 - settings: pulse (kick / breathing), brightness, colours (cover /
   accent), when paused (dim / dark), openrgb on + address, wled
   addresses, "flash them once".

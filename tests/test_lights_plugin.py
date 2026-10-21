@@ -32,15 +32,17 @@ def _s(text: str) -> bytes:
     return struct.pack("<H", len(raw)) + raw
 
 
-def controller_v0(name: str, colors: list, matrix: bool = False) -> bytes:
-    """protocol-0 controller data, laid out like OpenRGB writes it."""
+def controller_v0(name: str, colors: list, matrix: bool = False, headers: list | None = None) -> bytes:
+    """protocol-0 controller data, laid out like OpenRGB writes it.
+    ``headers``: led counts of extra addressable header zones (0..500)."""
+    headers = headers or []
     body = struct.pack("<i", 2) + _s(name) + _s("a device") + _s("1.0") + _s("") + _s("usb")
     modes = [("direct", [0x0000FF]), ("rainbow", [])]
     body += struct.pack("<Hi", len(modes), 1)
     for mname, mcolors in modes:
         body += _s(mname) + struct.pack("<iIIIIIIII", 0, 0, 0, 0, 0, 0, 0, 0, 0)
         body += struct.pack("<H", len(mcolors)) + b"".join(struct.pack("<I", c) for c in mcolors)
-    body += struct.pack("<H", 1)
+    body += struct.pack("<H", 1 + len(headers))
     body += _s("zone") + struct.pack("<iIII", 0, 1, 64, len(colors))
     if matrix:
         h, w = 2, 2
@@ -48,6 +50,10 @@ def controller_v0(name: str, colors: list, matrix: bool = False) -> bytes:
         body += struct.pack("<H", len(mat)) + mat
     else:
         body += struct.pack("<H", 0)
+    for k, n in enumerate(headers):
+        body += _s(f"Addressable RGB Header {k + 1}") + struct.pack("<iIII", 1, 0, 500, n)
+        body += struct.pack("<H", 0)
+    colors = list(colors) + [(0, 0, 0)] * sum(headers)
     body += struct.pack("<H", len(colors))
     for i in range(len(colors)):
         body += _s(f"led {i}") + struct.pack("<I", i)
@@ -67,6 +73,8 @@ class FakeOpenRGB(threading.Thread):
         self.updates: list[tuple[int, list]] = []
         self.custom: set[int] = set()
         self.client_name = b""
+        self.headers: dict[int, list[int]] = {}
+        self.resizes: list[tuple[int, int, int]] = []
 
     def run(self) -> None:
         conn, _ = self.sock.accept()
@@ -92,7 +100,12 @@ class FakeOpenRGB(threading.Thread):
                     conn.sendall(openrgb.packet(0, kind, struct.pack("<I", len(self.devices))))
                 elif kind == openrgb.REQUEST_CONTROLLER_DATA:
                     name, colors = self.devices[dev]
-                    conn.sendall(openrgb.packet(dev, kind, controller_v0(name, colors, matrix=dev == 1)))
+                    conn.sendall(openrgb.packet(dev, kind, controller_v0(
+                        name, colors, matrix=dev == 1, headers=self.headers.get(dev))))
+                elif kind == openrgb.RESIZE_ZONE:
+                    zone, size = struct.unpack("<ii", data[:8])
+                    self.resizes.append((dev, zone, size))
+                    self.headers[dev][zone - 1] = size
                 elif kind == openrgb.SET_CUSTOM_MODE:
                     self.custom.add(dev)
                 elif kind == openrgb.UPDATE_LEDS:
@@ -174,6 +187,66 @@ class OpenRgbTests(unittest.TestCase):
         self.assertEqual(data[6:10], bytes((1, 2, 3, 0)))
 
 
+class LaunchTests(unittest.TestCase):
+    """starting openrgb's server when nothing answers (2026-10-21)."""
+
+    def setUp(self):
+        self.launch = importlib.import_module("tide_plugins_test_lights.launch")
+
+    def test_only_on_this_computer(self):
+        self.assertEqual(self.launch.start_server("192.168.1.9", 6742), (None, ""))
+
+    def test_leaves_a_running_server_alone(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        try:
+            self.assertEqual(self.launch.start_server("127.0.0.1", sock.getsockname()[1]), (None, ""))
+        finally:
+            sock.close()
+
+    def test_says_when_openrgb_is_open_without_its_server(self):
+        from unittest import mock
+        port = _free_port()
+        with mock.patch.object(self.launch, "openrgb_running", return_value=True):
+            proc, said = self.launch.start_server("127.0.0.1", port)
+        self.assertIsNone(proc)
+        self.assertIn("sdk server is off", said)
+
+    def test_says_when_it_isnt_installed(self):
+        from unittest import mock
+        with mock.patch.object(self.launch, "openrgb_running", return_value=False), \
+                mock.patch.object(self.launch.shutil, "which", return_value=None):
+            proc, said = self.launch.start_server("127.0.0.1", _free_port())
+        self.assertIsNone(proc)
+        self.assertIn("isn't installed", said)
+
+    def test_starts_it_and_stops_only_its_own(self):
+        from unittest import mock
+        fake = Path(tempfile.mkdtemp()) / "openrgb"
+        fake.write_text("#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/args\"\nexec sleep 30\n")
+        fake.chmod(0o755)
+        port = _free_port()
+        with mock.patch.object(self.launch, "openrgb_running", return_value=False), \
+                mock.patch.object(self.launch.shutil, "which", return_value=str(fake)):
+            proc, said = self.launch.start_server("127.0.0.1", port)
+        self.assertIsNotNone(proc)
+        self.assertIn("starting openrgb", said)
+        time.sleep(0.3)
+        self.assertEqual((fake.parent / "args").read_text().split(), ["--server", "--server-port", str(port)])
+        self.launch.stop_server(proc)
+        self.assertIsNotNone(proc.poll())
+        self.launch.stop_server(None)                 # nothing of ours: nothing to stop
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
 class ShowTests(unittest.TestCase):
     def run_show(self, outputs, seconds=0.6, **config):
         said = []
@@ -226,6 +299,27 @@ class ShowTests(unittest.TestCase):
         self.assertEqual(sizes, [28] * 5)
         # and letting go still gives back the board's own colours
         self.assertEqual(server.updates[-1][1], [(9, 9, 9)] * 4 + [(0, 0, 0)] * 24)
+
+    def test_empty_headers_get_set_up(self):
+        server = FakeOpenRGB({"board": [(9, 9, 9)] * 4})
+        server.headers = {0: [0, 0, 12]}             # two empty headers, one set up already
+        server.start()
+        out = openrgb.Server(f"127.0.0.1:{server.port}")
+        said = self.run_show([out], seconds=0.3)
+        server.join(2)
+        self.assertEqual(server.resizes, [(0, 1, 24), (0, 2, 24)])
+        self.assertEqual(out.leds, [4 + 24 + 24 + 12])
+        self.assertTrue(any("lighting openrgb (1)" in s for s in said))
+
+    def test_header_setup_can_be_off(self):
+        server = FakeOpenRGB({"board": [(9, 9, 9)] * 4})
+        server.headers = {0: [0]}
+        server.start()
+        out = openrgb.Server(f"127.0.0.1:{server.port}")
+        out.size_headers = False
+        self.run_show([out], seconds=0.3)
+        server.join(2)
+        self.assertEqual(server.resizes, [])
 
     def test_drives_a_wled_strip(self):
         fake = FakeWled(30)
@@ -296,7 +390,8 @@ class LightsPluginTests(unittest.TestCase):
     def test_starts_lights_and_lets_go(self):
         server = FakeOpenRGB({"fans": [(5, 5, 5)] * 3})
         server.start()
-        host = self.host(f'openrgb_address = "127.0.0.1:{server.port}"\n')
+        # the fake takes one connection; the launcher's "anyone there?" would use it
+        host = self.host(f'openrgb_address = "127.0.0.1:{server.port}"\nstart_openrgb = false\n')
         self.assertTrue(host.set_enabled("lights", True), host.record("lights").status)
         plugin = host.record("lights").instance
         self.pump(0.4)
