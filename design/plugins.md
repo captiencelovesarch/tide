@@ -529,7 +529,13 @@ room or fills a view should go through `FlashLimiter`.
   at start (a crash) is put back first. every desktop change runs in
   order on one worker thread. checked on the real desktop: kdeglobals
   came back byte for byte, three screens' wallpapers too.
-- "when paused": keep the song's look, or go back to yours after 3 s.
+- the rules (2026-10-21, the user's own; it used to flip back mid-song):
+  on play the song's colour goes on and stays while it plays; paused or
+  out of music, it stays 3 s and then yours comes back; a new song gets
+  its colour half a second in. loading counts as playing, because a song
+  change goes idle → loading → playing, and a slow stream used to make
+  that gap look like a pause (yours came back, then the old song's
+  colour). no setting for it any more.
 - next: a live wallpaper (tide's own plasma wallpaper plugin, beating
   with the music) as the "all out" level.
 - tests fake plasma's tools as scripts first on PATH, with tide's data

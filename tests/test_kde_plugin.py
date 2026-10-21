@@ -253,6 +253,77 @@ class KdePluginTests(unittest.TestCase):
         self.wait(plugin)
         self.assertEqual(self.accents()[-1], "#f0f0f0")   # white, not the last song's
 
+    # ---- the rules (2026-10-21) ----
+
+    def set_state(self, state: str) -> None:
+        self.player.state = state
+        self.player.state_changed.emit(state)
+
+    def next_song(self, plugin, vid: str, color: str) -> None:
+        from PySide6.QtGui import QColor
+        self.cover.fill(QColor(color))
+        self.queue.current = types.SimpleNamespace(
+            video_id=vid, title=vid, artists="x", album="", duration_seconds=1,
+            thumbnail=f"https://example/{vid}.jpg", source="ytmusic")
+        plugin._track_changed(self.host.current_track())
+
+    def test_pause_keeps_it_3_seconds_then_yours_then_play_brings_it_back(self):
+        plugin = self.start()
+        plugin._pause.setInterval(300)
+        self.wait(plugin, 1.0)
+        song = self.accents()[-1]
+        self.set_state("paused")
+        self.wait(plugin, 0.15)
+        self.assertEqual(self.accents()[-1], song)                  # still the song's
+        self.wait(plugin, 0.6)
+        self.assertEqual(self.accents()[-1], "#7300ff")             # then yours
+        self.set_state("playing")
+        self.wait(plugin, 0.6)
+        self.assertEqual(self.accents()[-1], song)                  # and back on play
+
+    def test_the_gap_between_songs_isnt_a_pause(self):
+        # idle, then loading for longer than the pause wait, then playing:
+        # this used to put your colour back, then the old song's
+        plugin = self.start()
+        plugin._pause.setInterval(300)
+        self.wait(plugin, 1.0)
+        self.set_state("idle")                                      # the song ended
+        self.wait(plugin, 0.1)
+        self.set_state("loading")                                   # the next one loads
+        self.next_song(plugin, "b", "#22aaff")
+        self.wait(plugin, 1.0)                                      # past the pause wait
+        self.set_state("playing")
+        self.wait(plugin, 0.5)
+        self.assertNotIn("#7300ff", self.accents())                 # never yours in between
+        last = self.accents()[-1]
+        self.assertGreater(int(last[5:7], 16), int(last[1:3], 16))  # b's blue, not a's pink
+
+    def test_a_skip_while_paused_waits_for_play(self):
+        plugin = self.start()
+        plugin._pause.setInterval(5000)
+        self.wait(plugin, 1.0)
+        self.set_state("paused")
+        before = len(self.accents())
+        self.next_song(plugin, "c", "#22ff66")
+        self.wait(plugin, 1.0)
+        self.assertEqual(len(self.accents()), before)               # paused: nothing yet
+        self.set_state("playing")
+        self.wait(plugin, 0.6)
+        self.assertEqual(len(self.accents()), before + 1)           # its colour on play
+
+    def test_the_music_running_out_brings_yours_back(self):
+        plugin = self.start()
+        plugin._pause.setInterval(300)
+        self.wait(plugin, 1.0)
+        self.set_state("idle")
+        self.wait(plugin, 0.8)
+        self.assertEqual(self.accents()[-1], "#7300ff")
+
+    def test_an_old_settings_file_still_loads(self):
+        plugin = self.start('level = "accent"\npaused = "restore"\n')
+        self.wait(plugin, 1.0)
+        self.assertEqual(len(self.accents()), 1)
+
     def test_a_crash_last_time_is_put_right_first(self):
         crashed = self.data / "kde"
         crashed.mkdir(parents=True, exist_ok=True)
