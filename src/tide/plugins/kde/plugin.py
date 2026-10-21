@@ -1,7 +1,10 @@
 """kde desktop: your plasma desktop follows the music.
 
-The accent colour takes a colour from the cover; with the wallpaper level
-the wallpaper becomes a soft blur of it on every screen. What you had is
+The accent colour is tide's own adaptive colour, the one its backdrop
+pulses in, shown plain (2026-10-21: picking from the cover separately
+lagged and sometimes kept the song before's colour; tide's pick changes
+with the song and is good already). With the wallpaper level the
+wallpaper becomes a soft blur of the cover on every screen. What you had is
 saved before the first change (to restore.json, so a crash doesn't lose
 it either) and put back when the plugin is switched off or tide quits.
 
@@ -17,11 +20,11 @@ import threading
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 
-from tide.plugin_api import cover_colors
-
 from . import art, desk
 
 SETTLE_MS = 500            # a song has to stay this long before the desktop changes
+THEME_SETTLE_MS = 350      # tide's colours can step a few times as a cover comes in
+NEUTRAL = "#f0f0f0"        # a cover with no real colour: white
 PAUSE_MS = 3000            # paused (or the music ran out) this long: your look comes back
 KEEP_WALLPAPERS = 2
 
@@ -37,9 +40,9 @@ class KdeDesktop:
         self.dir = ctx.paths.data_dir
         self.restore_file = self.dir / "restore.json"
         self._track = None
-        self._look: tuple | None = None       # (art url, accent, cover image)
+        self._cover: tuple | None = None      # (art url, image), for the wallpaper
         self._applied = False
-        self._shown: str | None = None        # the art url whose look is on the desktop
+        self._shown: tuple | None = None      # (accent, art url) on the desktop now
         self._serial = 0
         self.status = ctx.adopt(_Said())
         self.status.said.connect(ctx.set_status)
@@ -51,6 +54,10 @@ class KdeDesktop:
         self._pause.setSingleShot(True)
         self._pause.setInterval(PAUSE_MS)
         self._pause.timeout.connect(self._back_to_yours)
+        self._theme_settle = ctx.adopt(QTimer())
+        self._theme_settle.setSingleShot(True)
+        self._theme_settle.setInterval(THEME_SETTLE_MS)
+        self._theme_settle.timeout.connect(self._present)
         self._jobs: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._work, name="tide-kde", daemon=True)
         self._worker.start()
@@ -67,12 +74,15 @@ class KdeDesktop:
         pb.track_changed.connect(self._track_changed)
         pb.state_changed.connect(self._state)
         ctx.settings_changed.connect(self._settings_changed)
+        # tide's adaptive colours change with the song; theme.changed says so
+        ctx.theme.changed.connect(self._theme_settle.start)
         ctx.set_status("your desktop follows the music")
         self._track_changed(pb.current())
 
     def stop(self) -> None:
         self._settle.stop()
         self._pause.stop()
+        self._theme_settle.stop()
         if not self._off:
             self._queue(self._restore)
         self._jobs.put(None)
@@ -166,6 +176,14 @@ class KdeDesktop:
     def _playing(self) -> bool:
         return self.ctx.playback.state() in ("playing", "loading")
 
+    def _accent(self) -> str:
+        """tide's colour right now: the adaptive accent its pulse uses, or
+        white when tide found no real colour on the cover."""
+        t = self.ctx.theme
+        if str(t.token("ambient_neutral", "")).strip() == "1":
+            return NEUTRAL
+        return t.token("accent", "") or NEUTRAL
+
     def _track_changed(self, track) -> None:
         self._track = track
         if track is not None:
@@ -176,35 +194,33 @@ class KdeDesktop:
         if track is None:
             return
         url = track.art_url
-        if self._look is not None and self._look[0] == url:
-            self._present()
-        elif not url:
-            # no cover at all: your own accent while it plays
-            self._look = ("", None, None)
-            self._present()
-        else:
+        if self.ctx.settings["level"] == "wallpaper" and url and (
+                self._cover is None or self._cover[0] != url):
             self.ctx.track.art(url, lambda img, u=url: self._got_art(u, img))
+        self._present()
 
     def _got_art(self, url: str, img) -> None:
         track = self._track
         if track is None or track.art_url != url or img is None or img.isNull():
             return
-        colors = cover_colors(img)
-        accent = art.accent(colors[0]) if colors else None
-        self._look = (url, accent, img.copy())
+        self._cover = (url, img.copy())
         self._present()
 
     def _present(self, force: bool = False) -> None:
-        """the current song's look on the desktop, if music is playing.
-        paused, it waits for play."""
-        look = self._look
-        if look is None or not self._playing():
+        """the song's look on the desktop, if music is playing. paused, it
+        waits for play."""
+        if self._track is None or not self._playing():
             return
         self._pause.stop()
-        if look[0] == self._shown and not force:
+        accent = self._accent()
+        wallpaper = self.ctx.settings["level"] == "wallpaper"
+        cover = self._cover if wallpaper and self._cover is not None \
+            and self._cover[0] == self._track.art_url else None
+        key = (accent, cover[0] if cover else None)
+        if key == self._shown and not force:
             return
-        self._shown = look[0]
-        self._show(look[1], look[2])
+        self._shown = key
+        self._show(accent, cover[1] if cover else None)
 
     def _show(self, accent, img) -> None:
         self._serial += 1
@@ -235,4 +251,5 @@ class KdeDesktop:
 
     def _settings_changed(self, _keys) -> None:
         if self._shown is not None:
+            self._song_settled()                # the wallpaper level may need the cover
             self._present(force=True)
