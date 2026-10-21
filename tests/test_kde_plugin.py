@@ -56,6 +56,17 @@ class ColourTests(unittest.TestCase):
         self.assertEqual(desk.rgb_text("#7300ff"), "115,0,255")
         self.assertEqual(desk.hex_of("115,0,255"), "#7300ff")
 
+    def test_vivid_keeps_the_hue_at_full_strength(self):
+        import colorsys
+        out = art.vivid("#5854aa")                     # tide's muted blue-violet
+        r, g, b = (int(out[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        h, s, v = colorsys.rgb_to_hsv(r, g, b)
+        h0 = colorsys.rgb_to_hsv(0x58 / 255, 0x54 / 255, 0xaa / 255)[0]
+        self.assertAlmostEqual(h, h0, places=2)
+        self.assertGreaterEqual(s, 0.9)
+        self.assertEqual(v, 1.0)
+        self.assertEqual(art.vivid("#808080"), "#808080")   # no colour: left alone
+
     def test_wallpaper_is_a_soft_dimmed_fill(self):
         from PySide6.QtGui import QColor, QGuiApplication, QImage
         QGuiApplication.instance() or QGuiApplication([])
@@ -244,7 +255,7 @@ class KdePluginTests(unittest.TestCase):
     def test_a_black_and_white_cover_is_a_white_accent(self):
         plugin = self.start()
         self.wait(plugin)
-        self.assertEqual(self.accents(), ["#ff2266"])     # tide's colour, plain
+        self.assertEqual(self.accents(), [art.vivid("#ff2266")])     # tide's colour, plain
         self.queue.current = types.SimpleNamespace(
             video_id="b", title="Grey", artists="x", album="", duration_seconds=1,
             thumbnail="https://example/grey.jpg", source="ytmusic")
@@ -262,8 +273,8 @@ class KdePluginTests(unittest.TestCase):
             self.tide_picks(plugin, c)
             self.app.processEvents()
         self.wait(plugin, 0.6)
-        self.assertEqual(self.accents()[-1], "#33ccaa")
-        self.assertNotIn("#222222", self.accents())
+        self.assertEqual(self.accents()[-1], art.vivid("#33ccaa"))
+        self.assertNotIn(art.vivid("#222222"), self.accents())
 
     # ---- the rules (2026-10-21) ----
 
@@ -308,7 +319,7 @@ class KdePluginTests(unittest.TestCase):
         self.set_state("playing")
         self.wait(plugin, 0.5)
         self.assertNotIn("#7300ff", self.accents())                 # never yours in between
-        self.assertEqual(self.accents()[-1], "#22aaff")             # b's colour, not a's
+        self.assertEqual(self.accents()[-1], art.vivid("#22aaff"))             # b's colour, not a's
 
     def test_a_skip_changes_the_colour_while_the_stream_is_found(self):
         # a skip stops the old song (idle) and spends 1-3 s finding the new
@@ -316,17 +327,17 @@ class KdePluginTests(unittest.TestCase):
         plugin = self.start()
         plugin._pause.setInterval(300)
         self.wait(plugin, 0.6)
-        self.assertEqual(self.accents(), ["#ff2266"])
+        self.assertEqual(self.accents(), [art.vivid("#ff2266")])
         self.set_state("idle")                         # the skip stops song a
         self.next_song(plugin, "b", "#22aaff")         # b chosen, tide picks its colour
         self.wait(plugin, 0.5)                         # still idle: finding b's stream
-        self.assertEqual(self.accents()[-1], "#22aaff")
+        self.assertEqual(self.accents()[-1], art.vivid("#22aaff"))
         self.wait(plugin, 0.5)
         self.assertNotIn("#7300ff", self.accents())    # and no "go back to yours"
         self.set_state("loading")
         self.set_state("playing")
         self.wait(plugin, 0.3)
-        self.assertEqual(self.accents()[-1], "#22aaff")
+        self.assertEqual(self.accents()[-1], art.vivid("#22aaff"))
 
     def test_a_skip_that_never_starts_still_gives_yours_back(self):
         plugin = self.start()

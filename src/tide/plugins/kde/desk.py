@@ -13,11 +13,17 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
 
 ACCENT_KEYS = ("AccentColor", "LastUsedCustomAccentColor", "accentColorFromWallpaper")
-TOOLS = ("plasma-apply-colorscheme", "kreadconfig6", "kwriteconfig6", "qdbus6")
+TOOLS = ("plasma-apply-colorscheme", "kreadconfig6", "kwriteconfig6", "qdbus6", "dbus-send")
+# plasma's panel reloads its colours when told the palette changed, but can
+# read them a step behind: the taskbar showed the colour before the current
+# one (2026-10-21: "your colour while playing, the album's when paused").
+# a second "palette changed" a moment later makes it read them settled.
+NUDGE_S = 0.3
 
 
 def _run(cmd: list[str]) -> str:
@@ -64,6 +70,14 @@ class Desk:
 
     def set_accent(self, hex_color: str) -> None:
         self.run(["plasma-apply-colorscheme", "--accent-color", hex_color])
+        time.sleep(NUDGE_S)
+        self.nudge()
+
+    def nudge(self) -> None:
+        """tell every kde app, the panel included, the palette changed
+        (KGlobalSettings, PaletteChanged), as system settings does."""
+        self.run(["dbus-send", "--session", "--type=signal", "/KGlobalSettings",
+                  "org.kde.KGlobalSettings.notifyChange", "int32:0", "int32:0"])
 
     def _scheme_highlight(self, scheme: str) -> str | None:
         """the colour scheme's own selection colour, for putting back an
