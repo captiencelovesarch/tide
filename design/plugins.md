@@ -461,9 +461,11 @@ aur/source only.
 
 ## the first update's plugins (2026-10-19)
 
-steamvr, lights and stream overlay ship in the tree, all off by default.
-more come later, each one optional. none of these three needed new core
-hooks.
+steamvr, lights and kde desktop ship as the first update's three, all
+off by default (2026-10-21: kde desktop took the overlay's place, since
+arch's obs-studio is built without the browser source and the overlay
+couldn't be tried; the overlay stays in the tree as an extra). more come
+later, each one optional. none of them needed new core hooks.
 
 ### the beat, shared
 
@@ -472,7 +474,10 @@ backdrop shows, so a beat looks the same in vr, on your lights and on
 stream: `Envelope` (straight up, 30 ms down), `FlashLimiter` (three full
 flashes a second; past that a hit still shows, as a step just under a
 flash), `Kicks` (a rise over a trough, one per attack), `glow_level`,
-`STRENGTH`, `PULSE_MODES`, `cover_colors(img)`. anything that lights a
+`STRENGTH`, `PULSE_MODES`, `cover_colors(img)`, `cover_palette(img)`.
+`cover_colors` goes by area: the colour most of the cover is, and a
+second only if it covers a real part of it (a small blue painting on a
+red cover used to light half of everything blue). anything that lights a
 room or fills a view should go through `FlashLimiter`.
 
 ### lights
@@ -499,8 +504,37 @@ room or fills a view should go through `FlashLimiter`.
 - settings: pulse (kick / breathing), brightness, colours (cover /
   accent), when paused (dim / dark), openrgb on + address, wled
   addresses, "flash them once".
+- colours for leds (2026-10-21): leds can't do pastel, a soft colour is
+  mostly white and comes out washed out (igor's pink came out salmon).
+  `led_color` keeps the hue at full strength, pastel pinks lean to
+  magenta (how leds make pink), and the gradient travels the colour
+  wheel the short way instead of blending through grey.
 - tests: a fake OpenRGB server speaking protocol 0, a fake WLED (http
   info + udp).
+
+### kde desktop
+
+- `plugins/kde/`: the plasma accent colour takes the cover's main colour
+  (pushed until white text on it reads at 3:1); with the wallpaper level
+  every screen's wallpaper becomes a soft blur of the cover (a new file
+  name each song, so plasma crossfades). a song has to stay 1.2 s before
+  the desktop changes.
+- only plasma's own tools: `plasma-apply-colorscheme --accent-color`
+  (it bakes the accent into the colour groups and leaves
+  `[General] AccentColor` alone, so read the groups, not that key, to see
+  it), kreadconfig6 / kwriteconfig6, and plasmashell's evaluateScript
+  over qdbus6 for wallpapers. all of it works on wayland.
+- your look is saved to restore.json before the first change and put
+  back when the plugin goes off or tide quits; a leftover restore.json
+  at start (a crash) is put back first. every desktop change runs in
+  order on one worker thread. checked on the real desktop: kdeglobals
+  came back byte for byte, three screens' wallpapers too.
+- "when paused": keep the song's look, or go back to yours after 3 s.
+- next: a live wallpaper (tide's own plasma wallpaper plugin, beating
+  with the music) as the "all out" level.
+- tests fake plasma's tools as scripts first on PATH, with tide's data
+  folder pointed at a temp one: nothing a test runs can reach the real
+  desktop.
 
 ### stream overlay
 
