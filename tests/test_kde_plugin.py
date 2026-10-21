@@ -237,6 +237,19 @@ class KdePluginTests(unittest.TestCase):
         self.assertIn("mine.png", self.scripts()[-1])
         self.assertEqual(list(plugin.dir.glob("wallpaper-*.jpg")), [])
 
+    def test_a_colourless_cover_brings_your_accent_back(self):
+        from PySide6.QtGui import QColor
+        plugin = self.start()
+        self.wait(plugin)
+        self.assertEqual(len(self.accents()), 1)          # the pink cover's colour
+        self.cover.fill(QColor("#808080"))
+        self.queue.current = types.SimpleNamespace(
+            video_id="b", title="Grey", artists="x", album="", duration_seconds=1,
+            thumbnail="https://example/grey.jpg", source="ytmusic")
+        plugin._track_changed(self.host.current_track())
+        self.wait(plugin)
+        self.assertEqual(self.accents()[-1], "#7300ff")   # yours, not the last song's
+
     def test_a_crash_last_time_is_put_right_first(self):
         crashed = self.data / "kde"
         crashed.mkdir(parents=True, exist_ok=True)
