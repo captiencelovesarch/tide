@@ -42,7 +42,21 @@ key     = "openrgb"
 label   = "openrgb"
 kind    = "bool"
 default = true
-tooltip = "needs openrgb's sdk server: start openrgb with --server, or switch it on in openrgb's sdk server tab. your lights get their old colours back when tide lets go."
+tooltip = "pc rgb through openrgb: keyboards, mice, ram, the motherboard and what's plugged into it. your lights get their old colours back when tide lets go."
+
+[[setting]]
+key     = "start_openrgb"
+label   = "start openrgb for me"
+kind    = "bool"
+default = true
+tooltip = "if openrgb isn't running, tide starts its server in the background (no window) and stops it again when you switch lights off."
+
+[[setting]]
+key     = "size_headers"
+label   = "set up empty rgb headers"
+kind    = "bool"
+default = true
+tooltip = "a motherboard's addressable rgb headers start at 0 leds in openrgb, so a cooler or fans on them stay dark. tide gives an empty one 24 (extra ones are harmless). openrgb remembers it."
 
 [[setting]]
 key     = "openrgb_address"
