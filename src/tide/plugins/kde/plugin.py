@@ -203,7 +203,8 @@ class KdeDesktop:
         t = self.ctx.theme
         if str(t.token("ambient_neutral", "")).strip() == "1":
             return NEUTRAL
-        return t.token("accent", "") or NEUTRAL
+        accent = t.token("accent", "")
+        return art.vivid(accent) if accent else NEUTRAL
 
     def _track_changed(self, track) -> None:
         same = (track is not None and self._track is not None and track.id == self._track.id)

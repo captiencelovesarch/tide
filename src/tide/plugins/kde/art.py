@@ -54,3 +54,21 @@ def wallpaper(cover, width: int, height: int):
     noisy = np.clip(b.astype(np.int16) + rng.integers(-2, 3, b.shape, dtype=np.int16), 0, 255)
     noisy = np.ascontiguousarray(noisy.astype(np.uint8))
     return QImage(noisy.data, width, height, width * 3, QImage.Format_RGB888).copy()
+
+
+def vivid(hex_color: str) -> str:
+    """tide's accent at full strength, for the desktop. tide tones its
+    accent down to sit quietly in its own window; across a whole desktop
+    that read as dull (2026-10-21: a cover in bright purple got a muted
+    blue-violet). same hue, full colour. plasma puts black text on a light
+    accent itself, so this stays readable. a colourless one stays as is."""
+    import colorsys
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+    hue, s, v = colorsys.rgb_to_hsv(r, g, b)
+    if s < 0.08:
+        return hex_color
+    r, g, b = colorsys.hsv_to_rgb(hue, max(s, 0.9), 1.0)
+    return "#" + "".join(f"{round(c * 255):02x}" for c in (r, g, b))
