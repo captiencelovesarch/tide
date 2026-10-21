@@ -5,6 +5,9 @@ name: windows build
 # Windows build's updater looks for it there, so every release needs one.
 on:
   workflow_dispatch:
+  # the first builds come from this branch, before the workflow is on main
+  push:
+    branches: [windows-release]
   release:
     types: [published]
 
