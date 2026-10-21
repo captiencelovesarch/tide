@@ -310,6 +310,35 @@ class KdePluginTests(unittest.TestCase):
         self.assertNotIn("#7300ff", self.accents())                 # never yours in between
         self.assertEqual(self.accents()[-1], "#22aaff")             # b's colour, not a's
 
+    def test_a_skip_changes_the_colour_while_the_stream_is_found(self):
+        # a skip stops the old song (idle) and spends 1-3 s finding the new
+        # stream before it loads; the old colour used to hold all that time
+        plugin = self.start()
+        plugin._pause.setInterval(300)
+        self.wait(plugin, 0.6)
+        self.assertEqual(self.accents(), ["#ff2266"])
+        self.set_state("idle")                         # the skip stops song a
+        self.next_song(plugin, "b", "#22aaff")         # b chosen, tide picks its colour
+        self.wait(plugin, 0.5)                         # still idle: finding b's stream
+        self.assertEqual(self.accents()[-1], "#22aaff")
+        self.wait(plugin, 0.5)
+        self.assertNotIn("#7300ff", self.accents())    # and no "go back to yours"
+        self.set_state("loading")
+        self.set_state("playing")
+        self.wait(plugin, 0.3)
+        self.assertEqual(self.accents()[-1], "#22aaff")
+
+    def test_a_skip_that_never_starts_still_gives_yours_back(self):
+        plugin = self.start()
+        plugin._pause.setInterval(200)
+        plugin._starting.setInterval(400)
+        self.wait(plugin, 0.6)
+        self.set_state("idle")
+        self.next_song(plugin, "b", "#22aaff")
+        plugin._starting_until = time.monotonic() + 0.3
+        self.wait(plugin, 1.4)                         # never loads: an error
+        self.assertEqual(self.accents()[-1], "#7300ff")
+
     def test_a_skip_while_paused_waits_for_play(self):
         plugin = self.start()
         plugin._pause.setInterval(5000)

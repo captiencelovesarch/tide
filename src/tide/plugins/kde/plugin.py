@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
@@ -23,7 +24,11 @@ from PySide6.QtGui import QGuiApplication
 from . import art, desk
 
 SETTLE_MS = 500            # a song has to stay this long before the desktop changes
-THEME_SETTLE_MS = 350      # tide's colours can step a few times as a cover comes in
+THEME_SETTLE_MS = 150      # tide's colours can step a few times as a cover comes in
+# after a song change tide stops the old one and spends a moment finding
+# the new stream (1-3 s, idle the whole time) before it loads: that's a
+# song starting, not music stopping
+STARTING_S = 20.0
 NEUTRAL = "#f0f0f0"        # a cover with no real colour: white
 PAUSE_MS = 3000            # paused (or the music ran out) this long: your look comes back
 KEEP_WALLPAPERS = 2
@@ -40,6 +45,7 @@ class KdeDesktop:
         self.dir = ctx.paths.data_dir
         self.restore_file = self.dir / "restore.json"
         self._track = None
+        self._starting_until = 0.0
         self._cover: tuple | None = None      # (art url, image), for the wallpaper
         self._applied = False
         self._shown: tuple | None = None      # (accent, art url) on the desktop now
@@ -54,6 +60,12 @@ class KdeDesktop:
         self._pause.setSingleShot(True)
         self._pause.setInterval(PAUSE_MS)
         self._pause.timeout.connect(self._back_to_yours)
+        # a song that never got going (a stream error): once the starting
+        # window is over, idle is music stopped after all
+        self._starting = ctx.adopt(QTimer())
+        self._starting.setSingleShot(True)
+        self._starting.setInterval(int(STARTING_S * 1000))
+        self._starting.timeout.connect(lambda: self._state(self.ctx.playback.state()))
         self._theme_settle = ctx.adopt(QTimer())
         self._theme_settle.setSingleShot(True)
         self._theme_settle.setInterval(THEME_SETTLE_MS)
@@ -77,11 +89,15 @@ class KdeDesktop:
         # tide's adaptive colours change with the song; theme.changed says so
         ctx.theme.changed.connect(self._theme_settle.start)
         ctx.set_status("your desktop follows the music")
-        self._track_changed(pb.current())
+        # whatever is on already: not a song change, so no starting window
+        self._track = pb.current()
+        if self._track is not None:
+            self._settle.start()
 
     def stop(self) -> None:
         self._settle.stop()
         self._pause.stop()
+        self._starting.stop()
         self._theme_settle.stop()
         if not self._off:
             self._queue(self._restore)
@@ -174,7 +190,12 @@ class KdeDesktop:
     # · a new song (next, skip, radio): its colour, half a second in
 
     def _playing(self) -> bool:
-        return self.ctx.playback.state() in ("playing", "loading")
+        state = self.ctx.playback.state()
+        if state in ("playing", "loading"):
+            return True
+        # idle right after a song change: the new stream is being found
+        # (2026-10-21: a skip held the old colour for those seconds)
+        return state == "idle" and time.monotonic() < self._starting_until
 
     def _accent(self) -> str:
         """tide's colour right now: the adaptive accent its pulse uses, or
@@ -185,8 +206,11 @@ class KdeDesktop:
         return t.token("accent", "") or NEUTRAL
 
     def _track_changed(self, track) -> None:
+        same = (track is not None and self._track is not None and track.id == self._track.id)
         self._track = track
-        if track is not None:
+        if track is not None and not same:
+            self._starting_until = time.monotonic() + STARTING_S
+            self._starting.start()
             self._settle.start()
 
     def _song_settled(self) -> None:
@@ -235,10 +259,14 @@ class KdeDesktop:
         self.ctx.set_status(f"following {self.ctx.theme.case(title)}"[:120])
 
     def _state(self, state: str) -> None:
-        if state in ("playing", "loading"):
+        if state == "playing":
+            self._starting_until = 0.0
+        if self._playing():
             self._pause.stop()
             self._present()
         elif self._shown is not None:
+            if state == "paused":
+                self._starting_until = 0.0
             self._pause.start()             # 3 s with the song's colour, then yours
 
     def _back_to_yours(self) -> None:
