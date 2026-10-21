@@ -514,8 +514,13 @@ room or fills a view should go through `FlashLimiter`.
 
 ### kde desktop
 
-- `plugins/kde/`: the plasma accent colour takes the cover's main colour
-  (pushed until white text on it reads at 3:1); with the wallpaper level
+- `plugins/kde/`: the plasma accent colour is tide's own adaptive accent
+  (the colour its backdrop pulses in), plain, read from `ctx.theme` when
+  `theme.changed` fires; white when the adaptive driver flags the cover
+  as neutral (`ambient_neutral`). it used to pick from the cover itself,
+  which lagged the song and sometimes kept the song before's colour
+  (2026-10-21). plasma flips selection text to black on light accents, so
+  no contrast fix is needed. with the wallpaper level
   every screen's wallpaper becomes a soft blur of the cover (a new file
   name each song, so plasma crossfades). a song has to stay 1.2 s before
   the desktop changes.

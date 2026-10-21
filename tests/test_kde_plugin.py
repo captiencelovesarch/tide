@@ -56,15 +56,6 @@ class ColourTests(unittest.TestCase):
         self.assertEqual(desk.rgb_text("#7300ff"), "115,0,255")
         self.assertEqual(desk.hex_of("115,0,255"), "#7300ff")
 
-    def test_black_and_white_is_white(self):
-        self.assertEqual(art.accent((0.5, 0.5, 0.5)), "#f0f0f0")
-
-    def test_accent_stays_readable_under_white_text(self):
-        for rgb in ((1.0, 0.95, 0.4), (0.6, 1.0, 0.7), (0.2, 0.3, 0.9), (1.0, 0.2, 0.4)):
-            hx = art.accent(rgb)
-            c = tuple(int(hx[i:i + 2], 16) / 255 for i in (1, 3, 5))
-            self.assertGreaterEqual(1.05 / (art._luminance(c) + 0.05), 3.0, hx)
-
     def test_wallpaper_is_a_soft_dimmed_fill(self):
         from PySide6.QtGui import QColor, QGuiApplication, QImage
         QGuiApplication.instance() or QGuiApplication([])
@@ -182,6 +173,7 @@ class KdePluginTests(unittest.TestCase):
         self.cover = QImage(64, 64, QImage.Format_RGB32)
         self.cover.fill(QColor("#ff2266"))
         self.host = None
+        self.tokens = {"accent": "#ff2266", "ambient_neutral": ""}
 
     def tearDown(self):
         if self.host is not None:
@@ -209,8 +201,17 @@ class KdePluginTests(unittest.TestCase):
         plugin = self.host.record("kde").instance
         self.assertTrue(str(plugin.dir).startswith(str(self.tmp)))    # never the real folder
         plugin._settle.setInterval(10)
+        plugin._theme_settle.setInterval(20)
         plugin.ctx.track.art = lambda url, cb: cb(self.cover)
+        # tide's adaptive colours, as the theme would give them
+        plugin.ctx.theme.token = lambda name, default="": self.tokens.get(name, default)
         return plugin
+
+    def tide_picks(self, plugin, accent: str, neutral: bool = False) -> None:
+        """tide's adaptive driver settling on a colour for the cover."""
+        self.tokens["accent"] = accent
+        self.tokens["ambient_neutral"] = "1" if neutral else ""
+        plugin.ctx.theme.changed.emit()
 
     def wait(self, plugin, seconds=2.0):
         t0 = time.monotonic()
@@ -241,17 +242,28 @@ class KdePluginTests(unittest.TestCase):
         self.assertEqual(list(plugin.dir.glob("wallpaper-*.jpg")), [])
 
     def test_a_black_and_white_cover_is_a_white_accent(self):
-        from PySide6.QtGui import QColor
         plugin = self.start()
         self.wait(plugin)
-        self.assertEqual(len(self.accents()), 1)          # the pink cover's colour
-        self.cover.fill(QColor("#808080"))
+        self.assertEqual(self.accents(), ["#ff2266"])     # tide's colour, plain
         self.queue.current = types.SimpleNamespace(
             video_id="b", title="Grey", artists="x", album="", duration_seconds=1,
             thumbnail="https://example/grey.jpg", source="ytmusic")
         plugin._track_changed(self.host.current_track())
+        self.tide_picks(plugin, "#4a5d8f", neutral=True)  # tide found no real colour
         self.wait(plugin)
         self.assertEqual(self.accents()[-1], "#f0f0f0")   # white, not the last song's
+
+    def test_follows_tides_colour_as_it_settles(self):
+        plugin = self.start()
+        self.wait(plugin, 0.6)
+        # a cover coming in can step tide's colour a few times quickly:
+        # the desktop takes the one it lands on, once
+        for c in ("#111111", "#222222", "#33ccaa"):
+            self.tide_picks(plugin, c)
+            self.app.processEvents()
+        self.wait(plugin, 0.6)
+        self.assertEqual(self.accents()[-1], "#33ccaa")
+        self.assertNotIn("#222222", self.accents())
 
     # ---- the rules (2026-10-21) ----
 
@@ -266,6 +278,7 @@ class KdePluginTests(unittest.TestCase):
             video_id=vid, title=vid, artists="x", album="", duration_seconds=1,
             thumbnail=f"https://example/{vid}.jpg", source="ytmusic")
         plugin._track_changed(self.host.current_track())
+        self.tide_picks(plugin, color)
 
     def test_pause_keeps_it_3_seconds_then_yours_then_play_brings_it_back(self):
         plugin = self.start()
@@ -295,8 +308,7 @@ class KdePluginTests(unittest.TestCase):
         self.set_state("playing")
         self.wait(plugin, 0.5)
         self.assertNotIn("#7300ff", self.accents())                 # never yours in between
-        last = self.accents()[-1]
-        self.assertGreater(int(last[5:7], 16), int(last[1:3], 16))  # b's blue, not a's pink
+        self.assertEqual(self.accents()[-1], "#22aaff")             # b's colour, not a's
 
     def test_a_skip_while_paused_waits_for_play(self):
         plugin = self.start()

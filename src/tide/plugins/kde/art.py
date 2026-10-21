@@ -1,4 +1,5 @@
-"""The wallpaper and the accent, from a cover.
+"""The wallpaper, from a cover. (the accent is tide's own adaptive colour,
+read from the theme.)
 
 The wallpaper is the cover filling the screen, blurred far enough that
 it reads as colour and light rather than a picture, a touch darker so
@@ -7,8 +8,6 @@ band. Blurred at a small size with numpy and scaled up smoothly: cheap,
 and a blur has no detail to lose.
 """
 from __future__ import annotations
-
-import colorsys
 
 import numpy as np
 
@@ -55,28 +54,3 @@ def wallpaper(cover, width: int, height: int):
     noisy = np.clip(b.astype(np.int16) + rng.integers(-2, 3, b.shape, dtype=np.int16), 0, 255)
     noisy = np.ascontiguousarray(noisy.astype(np.uint8))
     return QImage(noisy.data, width, height, width * 3, QImage.Format_RGB888).copy()
-
-
-def _luminance(rgb: tuple[float, float, float]) -> float:
-    def lin(c):
-        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
-    r, g, b = (lin(c) for c in rgb)
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
-
-
-def accent(color: tuple[float, float, float]) -> str:
-    """a cover colour (rgb 0..1) made into a usable accent: vivid enough
-    to read as a colour, dark enough that white text on it (selections,
-    the default button) stays readable at 3:1 or better."""
-    h, s, v = colorsys.rgb_to_hsv(*color)
-    if s < 0.08:
-        # a black-and-white cover: a white accent. plasma softens it for
-        # selections and puts black text on it, so it stays readable
-        return "#f0f0f0"
-    s = max(s, 0.55)
-    v = min(max(v, 0.5), 0.92)
-    rgb = colorsys.hsv_to_rgb(h, s, v)
-    while (1.05 / (_luminance(rgb) + 0.05)) < 3.0 and v > 0.3:
-        v -= 0.03
-        rgb = colorsys.hsv_to_rgb(h, s, v)
-    return "#" + "".join(f"{round(c * 255):02x}" for c in rgb)
