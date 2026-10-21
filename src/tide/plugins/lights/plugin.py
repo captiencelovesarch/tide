@@ -7,13 +7,15 @@ settings.
 """
 from __future__ import annotations
 
+import colorsys
+
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QColor
 
 from tide.plugin_api import cover_colors
 
 from . import launch, openrgb, wled
-from .show import Show
+from .show import Show, led_color
 
 
 class _Status(QObject):
@@ -152,4 +154,11 @@ class Lights:
         if self.show is None:
             return
         use_cover = self.ctx.settings["colours"] == "cover" and self._cover is not None
-        self.show.configure(colors=self._cover if use_cover else self._accent())
+        a, b = self._cover if use_cover else self._accent()
+        a, b = led_color(a), led_color(b)
+        if a == b:
+            # one colour on the cover: drift a little either side of it,
+            # so the lights still move without leaving it
+            h, s_, v = colorsys.rgb_to_hsv(*a)
+            b = colorsys.hsv_to_rgb((h + 0.04) % 1.0, s_, v)
+        self.show.configure(colors=(a, b))

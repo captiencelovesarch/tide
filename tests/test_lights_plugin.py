@@ -366,6 +366,52 @@ class ShowTests(unittest.TestCase):
         self.assertAlmostEqual(show_mod.brightness("kick", 1.0), 1.0)
 
 
+class ColourChoiceTests(unittest.TestCase):
+    """bright, true colours on leds (2026-10-21: igor's pink came out a
+    weird salmon, and a red cover lit half the leds blue)."""
+
+    def setUp(self):
+        from PySide6.QtWidgets import QApplication
+        self.app = QApplication.instance() or QApplication([])
+
+    def cover(self, base: str, patch: str | None = None, patch_px: int = 0):
+        from PySide6.QtGui import QColor, QImage
+        img = QImage(100, 100, QImage.Format_RGB32)
+        img.fill(QColor(base))
+        if patch:
+            for y in range(patch_px):
+                for x in range(patch_px):
+                    img.setPixelColor(40 + x, 40 + y, QColor(patch))
+        return img
+
+    def test_pastel_pink_becomes_bright_pink(self):
+        r, g, b = show_mod.led_color((242 / 255, 161 / 255, 188 / 255))   # igor's pink
+        self.assertEqual(r, 1.0)
+        self.assertLess(g, 0.2)
+        self.assertGreater(b, 0.45)                     # pink, not red
+
+    def test_leds_get_full_strength(self):
+        r, g, b = show_mod.led_color((0.55, 0.62, 0.8))  # a dusty blue
+        self.assertEqual(max(r, g, b), 1.0)
+        self.assertLess(min(r, g, b), 0.15)
+
+    def test_a_small_detail_doesnt_take_over(self):
+        from tide.plugin_api import cover_colors
+        a, b = cover_colors(self.cover("#e8102c", "#3a7bd5", 18))   # red, a small blue square
+        self.assertGreater(a[0], a[2])
+        self.assertGreater(b[0], b[2])                  # both red
+
+    def test_a_real_second_colour_counts(self):
+        from tide.plugin_api import cover_colors
+        a, b = cover_colors(self.cover("#e8102c", "#3a7bd5", 60))   # a third of it blue
+        self.assertNotEqual(a, b)
+
+    def test_blends_through_colour_not_grey(self):
+        mid = show_mod.gradient(3, ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 1.0, 0.25)[0]
+        self.assertGreater(max(mid), 200)               # a vivid purple, not a muddy grey
+        self.assertLess(mid[1], 40)
+
+
 class LightsPluginTests(unittest.TestCase):
     def host(self, settings: str):
         from PySide6.QtWidgets import QApplication

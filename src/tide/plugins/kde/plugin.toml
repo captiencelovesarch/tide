@@ -1,0 +1,24 @@
+[plugin]
+slug        = "kde"
+name        = "kde desktop"
+description = "your kde desktop follows the music: the accent colour, and the wallpaper if you like. yours comes back when you switch it off."
+version     = "0.1.0"
+api         = 1
+entry       = "plugin:KdeDesktop"
+uses        = ["playback", "files"]
+default     = false
+
+[[setting]]
+key     = "level"
+label   = "how far it goes"
+kind    = "choice"
+choices = [["accent", "the accent colour"], ["wallpaper", "the accent and the wallpaper"]]
+default = "accent"
+tooltip = "the accent colour: highlights, buttons and sliders in every kde app take a colour from the cover. the wallpaper too: a soft blur of the cover on every screen."
+
+[[setting]]
+key     = "paused"
+label   = "when paused"
+kind    = "choice"
+choices = [["keep", "keep the song's look"], ["restore", "go back to yours"]]
+default = "keep"

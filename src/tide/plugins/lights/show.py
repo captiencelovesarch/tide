@@ -9,6 +9,7 @@ every few seconds; the others carry on.
 """
 from __future__ import annotations
 
+import colorsys
 import math
 import threading
 import time
@@ -31,18 +32,44 @@ def brightness(mode: str, pulse: float) -> float:
     return 0.12 + 0.88 * pulse
 
 
+def led_color(rgb: tuple[float, float, float]) -> tuple[float, float, float]:
+    """a cover colour made into one an rgb led can show. leds can't do
+    pastel: a soft colour is mostly white light and comes out washed out
+    (2026-10-21: igor's pink came out a weird salmon). so the hue stays and
+    the colour goes to full strength; a pastel pink leans toward magenta,
+    which is how leds make pink."""
+    h, s, v = colorsys.rgb_to_hsv(*rgb)
+    if s < 0.08:
+        return (1.0, 1.0, 1.0)            # a grey cover: white light
+    deg = h * 360.0
+    if s < 0.55 and v > 0.6 and (deg >= 330.0 or deg < 12.0):
+        # pastel pink / rose: full strength at its own hue reads as red
+        deg = 328.0 if deg >= 330.0 or deg < 12.0 else deg
+    return colorsys.hsv_to_rgb((deg / 360.0) % 1.0, max(s, 0.9), 1.0)
+
+
+def _mix_hue(a: tuple, b: tuple, t: float) -> tuple[float, float, float]:
+    """between two colours the short way round the colour wheel, at full
+    strength: red to blue passes through purple, not through grey."""
+    ha, sa, va = colorsys.rgb_to_hsv(*a)
+    hb, sb, vb = colorsys.rgb_to_hsv(*b)
+    if sa < 0.08 or sb < 0.08:          # white has no hue to travel along
+        return tuple(x + (y - x) * t for x, y in zip(a, b))
+    d = ((hb - ha + 0.5) % 1.0) - 0.5
+    return colorsys.hsv_to_rgb((ha + d * t) % 1.0, sa + (sb - sa) * t, va + (vb - va) * t)
+
+
 def gradient(n: int, colors: tuple, level: float, phase: float) -> list[tuple[int, int, int]]:
     """``n`` leds from colour a to b and back, shifted by ``phase`` (0..1),
     at ``level`` (0..1)."""
-    (r1, g1, b1), (r2, g2, b2) = colors
+    a, b = colors
     level = max(0.0, min(1.0, level))
     out = []
     for i in range(n):
         x = (i / max(1, n) + phase) % 1.0
         t = 0.5 - 0.5 * math.cos(2 * math.pi * x)
-        out.append((int(255 * level * (r1 + (r2 - r1) * t)),
-                    int(255 * level * (g1 + (g2 - g1) * t)),
-                    int(255 * level * (b1 + (b2 - b1) * t))))
+        r, g, bl = _mix_hue(a, b, t)
+        out.append((int(255 * level * r), int(255 * level * g), int(255 * level * bl)))
     return out
 
 
