@@ -45,6 +45,9 @@ PLUGIN_SETTINGS_DIR: Path = CONFIG_DIR / "plugin-settings"
 PLUGIN_DATA_DIR: Path = DATA_DIR / "plugins"
 PLUGIN_CACHE_DIR: Path = CACHE_DIR / "plugins"
 PLUGIN_START_STAMP: Path = CACHE_DIR / "plugin-starting"
+# what the store installed (store.py); its downloads, previews and the
+# signed index it read last live under PLUGIN_CACHE_DIR
+PLUGIN_STORE_DIR: Path = PLUGIN_DATA_DIR / "installed"
 
 
 def ensure_dirs() -> None:

@@ -228,6 +228,14 @@ def _dim(label: QLabel) -> QLabel:
     return label
 
 
+def _plugins_moved() -> QLabel:
+    label = QLabel("plugins live in the store now: the plugins button in the rail, "
+                   "above settings. their settings are on each plugin's page.")
+    label.setProperty("class", "dim")
+    label.setWordWrap(True)
+    return label
+
+
 def _page(*items) -> QScrollArea:
     """One tab page: a scrollable column of widgets/layouts, so no
     section is ever buried a full page-scroll away."""
@@ -353,16 +361,10 @@ class SettingsDialog(QDialog):
                 items.extend(self._section_chrome(tab, section))
             items.extend(self._tab_chrome(tab))
             tabs.addTab(_page(*items), tab)
-        # Plugins: their switches and plugin.toml settings. Dialog chrome
-        # like about (not a schema tab), so the Settings meta-test is
-        # untouched; plugin settings live in their own files.
-        from .. import plugin_host
-        from .plugins_tab import PluginsPage
-        self._plugins_page = None
-        host = plugin_host.host()
-        if host is not None:
-            self._plugins_page = PluginsPage(host)
-            tabs.addTab(_page(*self._plugins_page.items()), "plugins")
+        # Plugins moved to the store page in 3.0 (ui/store_view.py), their
+        # settings with them. The tab stays one line long so people who
+        # look here find them.
+        tabs.addTab(_page(_plugins_moved()), "plugins")
         # About is dialog chrome, not options — its own quiet tab.
         tabs.addTab(_page(*self._about_items()), "about")
         self._tabs = tabs
@@ -1165,9 +1167,6 @@ class SettingsDialog(QDialog):
         self._accepted = True
         if changed:
             settings_module.save_fields(s, *changed)
-        if self._plugins_page is not None:
-            self._plugins_page.commit()
-            self._plugins_page.close()
         self.accept()
 
     def changed_keys(self) -> tuple[str, ...]:
@@ -1187,8 +1186,6 @@ class SettingsDialog(QDialog):
         if not self._accepted and not self._reverted:
             self._reverted = True
             self._revert_previews()
-        if getattr(self, "_plugins_page", None) is not None:
-            self._plugins_page.close()
         super().reject()
 
     def _revert_previews(self) -> None:

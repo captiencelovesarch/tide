@@ -888,6 +888,7 @@ def run(argv: list[str] | None = None) -> int:
     window._plugins = plugins
     if not args.no_plugins:
         plugins.start_enabled()
+    window.attach_store(plugins)
 
     rc = app.exec()
     # release the single-instance name first — a relaunch racing this

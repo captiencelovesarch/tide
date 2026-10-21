@@ -661,6 +661,8 @@ class MainWindow(QMainWindow):
         # The audio FX panel existed since v1.2.2 but only behind a hotkey —
         # a full view the rail never admitted to. Now a first-class tab.
         self.nav_fx_btn = BracketButton("fx")
+        # tide 3: the plugin store, its own page (ui/store_view.py)
+        self.nav_plugins_btn = BracketButton("plugins")
         self.nav_settings_btn = BracketButton("settings")
         # Slot map used by _apply_nav_icons to walk both ways (button → slot
         # for picking the icon, slot → button for hot-swap).
@@ -673,6 +675,7 @@ class MainWindow(QMainWindow):
             "visualizer": self.nav_visualizer_btn,
             "source": self.nav_source_btn,
             "audio_fx": self.nav_fx_btn,
+            "plugins": self.nav_plugins_btn,
             "settings": self.nav_settings_btn,
         }
         self.nav_home_btn.clicked.connect(lambda: self._switch_view("home"))
@@ -683,6 +686,7 @@ class MainWindow(QMainWindow):
         self.nav_visualizer_btn.clicked.connect(lambda: self._switch_view("visualizer"))
         self.nav_source_btn.clicked.connect(lambda: self._switch_view("source"))
         self.nav_fx_btn.clicked.connect(lambda: self._switch_view("audio_fx"))
+        self.nav_plugins_btn.clicked.connect(lambda: self._switch_view("plugins"))
         self.nav_settings_btn.clicked.connect(self.open_settings)
 
         nav_col = QVBoxLayout()
@@ -696,6 +700,7 @@ class MainWindow(QMainWindow):
         nav_col.addWidget(self.nav_source_btn)
         nav_col.addWidget(self.nav_fx_btn)
         nav_col.addStretch(1)
+        nav_col.addWidget(self.nav_plugins_btn)
         nav_col.addWidget(self.nav_settings_btn)
         # modern: icon + bare label rows (brutalist ignores the role).
         for _btn in self._nav_buttons.values():
@@ -1060,6 +1065,11 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.source_view)       # 9
         self.stack.addWidget(self.audio_fx_view)     # 10 — v1.2.2 audio FX rack
         self.stack.addWidget(self.song_view)         # 11 — v1.5 song page
+        # 12 — the plugin store. a placeholder until app.py hands over the
+        # plugin host (attach_store)
+        self.store_view: QWidget = QWidget()
+        self.stack.addWidget(self.store_view)
+        self._store = None
 
         # Simple back stack of previous indices so AlbumView/ArtistView can pop.
         self._view_history: list[int] = []
@@ -1827,7 +1837,7 @@ class MainWindow(QMainWindow):
     # the marker stays on the root they were opened from.
     _NAV_ROOT_VIEWS: dict[int, str] = {
         0: "home", 1: "library", 2: "queue", 3: "lyrics", 4: "history",
-        8: "visualizer", 9: "source", 10: "audio_fx",
+        8: "visualizer", 9: "source", 10: "audio_fx", 12: "plugins",
     }
 
     def _mark_nav_current(self, index: int) -> None:
@@ -1950,6 +1960,11 @@ class MainWindow(QMainWindow):
             self.source_view.refresh_statuses()
         elif name == "audio_fx":
             self._set_stack_index(10)
+        elif name == "plugins":
+            self._set_stack_index(12)
+            shown = getattr(self.store_view, "shown", None)
+            if callable(shown):
+                shown()
         # Reset back-stack on root-level navigation so [back] doesn't
         # bounce between top-level views.
         if prev in (6, 7, 11) and self.stack.currentIndex() not in (6, 7, 11):
@@ -5531,6 +5546,21 @@ class MainWindow(QMainWindow):
             pass
 
     # ---------- settings dialog ----------
+
+    def attach_store(self, host) -> None:
+        """the plugin store page, once the plugin host exists."""
+        from .store_view import StoreController, StoreView, UpdateDot
+        self._store = StoreController(host, parent=self)
+        view = StoreView(self._store)
+        old = self.store_view
+        self.stack.insertWidget(12, view)
+        self.stack.removeWidget(old)
+        old.deleteLater()
+        self.store_view = view
+        self._store_dot = UpdateDot(self.nav_plugins_btn)
+        self._store.updates_changed.connect(self._store_dot.set_count)
+        self._store_dot.set_count(self._store.update_count())
+        self._store.start_daily()
 
     def open_settings(self) -> None:
         # Defer the modal past the click handler — a QDialog opened

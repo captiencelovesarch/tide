@@ -130,7 +130,8 @@ class GenerationTests(_DialogCase):
     def test_tab_pages_follow_the_schema_taxonomy(self) -> None:
         dlg = self._dialog()
         labels = [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())]
-        self.assertEqual(labels, list(schema.TABS) + ["about"])
+        # plugins: one line pointing at the store (3.0), then about
+        self.assertEqual(labels, list(schema.TABS) + ["plugins", "about"])
 
     def test_preview_keys_pin_the_schema_flags(self) -> None:
         from tide.ui.settings import SettingsDialog

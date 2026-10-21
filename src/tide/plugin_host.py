@@ -2,9 +2,15 @@
 restart, and hands each one its ``ctx``. design/plugins.md is the why.
 
 Where plugins live (later roots override earlier ones, like themes):
-bundled in ``tide/plugins/``, ``/usr/share/tide/plugins/`` from packages,
-and ``~/.config/tide/plugins/``. Only bundled plugins can be on by
-default; anything else starts off until the user switches it on.
+what the store installed in ``<data>/plugins/installed/`` (store.py),
+``/usr/share/tide/plugins/`` from packages, and ``~/.config/tide/plugins/``.
+A store plugin is on once it's installed (uninstalling is how you switch
+it off); anything else starts off until the user switches it on. tide 3
+ships no plugins of its own.
+
+A plugin's ``vendor/`` folder (python modules it carries in its zip) goes
+first on ``sys.path`` while it runs and comes off when it stops, with
+every module imported from it.
 
 Undo by construction: each plugin connects to signals on its own relay
 object, never to the player or queue directly. Switching it off deletes
@@ -19,6 +25,7 @@ switched off and the user told. ``tide --no-plugins`` skips them all.
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
 import importlib.util
 import logging
 import os
@@ -42,7 +49,6 @@ from .plugin_api import (
 
 log = logging.getLogger("tide.plugins")
 
-BUNDLED_DIR = Path(__file__).parent / "plugins"
 SYSTEM_DIR = Path("/usr/share/tide/plugins")
 MODULE_ROOT = "tide_plugins"
 # this many uncaught errors from one plugin inside the window switches it off
@@ -56,7 +62,8 @@ _ENTRY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Z
 
 
 def plugin_roots() -> list[tuple[Path, str]]:
-    return [(BUNDLED_DIR, "bundled"), (SYSTEM_DIR, "system"), (config.USER_PLUGINS_DIR, "yours")]
+    return [(config.PLUGIN_STORE_DIR, "store"), (SYSTEM_DIR, "system"),
+            (config.USER_PLUGINS_DIR, "yours")]
 
 
 # ---------------------------------------------------------------------------
@@ -94,13 +101,17 @@ class Manifest:
     origin: str
     requires: tuple[str, ...] = ()
     uses: tuple[str, ...] = ()
-    default: bool = False
     settings: tuple[SettingDesc, ...] = ()
 
     @property
     def ident(self) -> str:
         """the slug as a python identifier (module name)."""
         return self.slug.replace("-", "_")
+
+    @property
+    def vendor(self) -> Path:
+        """python modules the plugin carries with it."""
+        return self.path / "vendor"
 
 
 def _choices(raw, key: str):
@@ -198,8 +209,6 @@ def parse_manifest(folder: Path, origin: str = "yours") -> Manifest:
         slug=slug, name=meta["name"], description=meta["description"],
         version=meta["version"], api=api, entry=meta["entry"], path=folder.resolve(),
         origin=origin, requires=tuple(requires), uses=tuple(uses),
-        # only tide's own plugins may start switched on
-        default=bool(meta.get("default", False)) and origin == "bundled",
         settings=settings,
     )
 
@@ -223,6 +232,7 @@ def discover(roots: list[tuple[Path, str]] | None = None) -> Discovered:
             try:
                 m = parse_manifest(child, origin)
             except ManifestError as exc:
+                log.warning("plugin folder %s skipped: %s", child, exc)
                 out.broken.append((child, str(exc)))
                 continue
             if m.slug in out.manifests:
@@ -1129,6 +1139,10 @@ class PluginRecord:
     errors: deque = field(default_factory=deque)
     overrides: str = ""            # the origin this one replaced, if any
     detail: str = ""               # the plugin's own status line, while it runs
+    stamp: float = 0.0             # plugin.toml's mtime when it was read
+
+    def __post_init__(self) -> None:
+        self.stamp = _toml_stamp(self.manifest)
 
     @property
     def running(self) -> bool:
@@ -1136,9 +1150,12 @@ class PluginRecord:
 
     def missing(self) -> list[str]:
         out = []
+        vendor = self.manifest.vendor
         for name in self.manifest.requires:
             try:
-                found = importlib.util.find_spec(name) is not None
+                found = (vendor.is_dir() and importlib.machinery.PathFinder.find_spec(
+                    name.split(".")[0], [str(vendor)]) is not None) \
+                    or importlib.util.find_spec(name) is not None
             except (ImportError, ValueError):
                 found = False
             if not found:
@@ -1155,9 +1172,17 @@ class PluginRecord:
         return ""
 
 
+def _toml_stamp(m: Manifest) -> float:
+    try:
+        return (m.path / "plugin.toml").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 class PluginHost(QObject):
     notice = Signal(str)        # a line for a toast
     changed = Signal(str)       # a plugin's status or switch changed
+    listing_changed = Signal()  # a plugin was installed or removed
     _too_many = Signal(str)     # crosses threads: errors from plugin threads
 
     def __init__(self, window=None, player=None, queue=None, *,
@@ -1185,6 +1210,7 @@ class PluginHost(QObject):
         self._prev_thread_hook = None
         self._logged: set[str] = set()
         self._too_many.connect(self._switch_off_for_errors)
+        self._vendor_paths: dict[str, str] = {}
         found = discover(roots)
         self.broken = found.broken
         self._records: dict[str, PluginRecord] = {}
@@ -1209,7 +1235,9 @@ class PluginHost(QObject):
         rec = self._records.get(slug)
         if rec is None:
             return False
-        return self._enabled.get(slug, rec.manifest.default)
+        # installed from the store = on, unless safe mode or too many
+        # errors switched it off since
+        return self._enabled.get(slug, rec.manifest.origin == "store")
 
     def records(self) -> list[PluginRecord]:
         return sorted(self._records.values(), key=lambda r: r.manifest.name.lower())
@@ -1373,7 +1401,9 @@ class PluginHost(QObject):
             self.changed.emit(slug)
             return False
         rec.manifest = m
+        rec.stamp = _toml_stamp(m)
         rec.settings = PluginSettings(m, self.settings_dir / f"{slug}.toml")
+        self.changed.emit(slug)
         return self._start(rec) if self.is_enabled(slug) else True
 
     def apply_settings(self, slug: str, keys) -> None:
@@ -1387,12 +1417,77 @@ class PluginHost(QObject):
                 self._stop(rec)
         self.uninstall_hooks()
 
+    # ---- the store adds and removes plugins while tide runs ----
+
+    def rescan(self) -> list[str]:
+        """read the roots again: start what's new and switched on, stop and
+        forget what's gone, restart what changed folder (an update) or had
+        its plugin.toml edited. returns the slugs that came, went or
+        changed."""
+        found = discover(self._roots)
+        broken_changed = found.broken != self.broken
+        self.broken = found.broken
+        touched = []
+        for slug in [s for s in self._records if s not in found.manifests]:
+            rec = self._records.pop(slug)
+            if rec.running:
+                self._stop(rec)
+            touched.append(slug)
+        for slug, m in found.manifests.items():
+            rec = self._records.get(slug)
+            if rec is not None and rec.manifest.path == m.path \
+                    and rec.manifest.version == m.version and rec.stamp == _toml_stamp(m):
+                rec.overrides = found.overrides.get(slug, "")
+                continue
+            was_running = rec is not None and rec.running
+            if was_running:
+                self._stop(rec)
+            new = PluginRecord(m, PluginSettings(m, self.settings_dir / f"{slug}.toml"))
+            new.overrides = found.overrides.get(slug, "")
+            self._records[slug] = new
+            touched.append(slug)
+            if self.is_enabled(slug):
+                self._start(new)
+        if touched or broken_changed:
+            self.listing_changed.emit()
+        return touched
+
+    def installed(self, slug: str) -> bool:
+        """after the store unpacked ``slug``: pick it up and switch it on.
+        False if it didn't start (its status says why)."""
+        self._enabled.pop(slug, None)      # installing is switching it on
+        self._save_state()
+        self.rescan()
+        rec = self._records.get(slug)
+        if rec is None:
+            return False
+        if not rec.running and self.is_enabled(slug):
+            return self._start(rec)
+        return rec.running
+
+    def release(self, slug: str) -> None:
+        """before the store moves ``slug``'s folder: stop it."""
+        rec = self._records.get(slug)
+        if rec is not None and rec.running:
+            self._stop(rec)
+
+    def uninstalled(self, slug: str) -> None:
+        """after the store removed ``slug``'s folder."""
+        self._enabled.pop(slug, None)
+        self._save_state()
+        self.rescan()
+
     # ---- start / stop ----
 
     def _module_prefix(self, m: Manifest) -> str:
         return f"{MODULE_ROOT}.{m.ident}"
 
     def _import_entry(self, m: Manifest):
+        if m.vendor.is_dir():
+            path = str(m.vendor)
+            if path not in sys.path:
+                sys.path.insert(0, path)
+            self._vendor_paths[m.slug] = path
         if MODULE_ROOT not in sys.modules:
             root = types.ModuleType(MODULE_ROOT)
             root.__path__ = []
@@ -1410,6 +1505,16 @@ class PluginHost(QObject):
         prefix = self._module_prefix(m)
         for name in [n for n in sys.modules if n == prefix or n.startswith(prefix + ".")]:
             del sys.modules[name]
+        vendor = self._vendor_paths.pop(m.slug, None)
+        if vendor is not None:
+            while vendor in sys.path:
+                sys.path.remove(vendor)
+            sys.path_importer_cache.pop(vendor, None)
+            under = vendor + os.sep
+            for name, mod in list(sys.modules.items()):
+                where = getattr(mod, "__file__", None) or ""
+                if where.startswith(under):
+                    del sys.modules[name]
         importlib.invalidate_caches()
 
     def _start(self, rec: PluginRecord) -> bool:

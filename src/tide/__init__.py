@@ -7,8 +7,15 @@ from __future__ import annotations
 # and made the About box + update check lie). The literal fallback covers
 # running straight from a source checkout with no installed metadata.
 try:
-    from importlib.metadata import version as _pkg_version
+    from importlib.metadata import distribution as _distribution
+    from pathlib import Path as _Path
 
-    __version__ = _pkg_version("tide")
+    _dist = _distribution("tide")
+    # a source checkout run next to an installed tide (python -m tide from
+    # src/) would report the installed one's version, and the plugin store
+    # judges min_tide by it
+    if _Path(_dist.locate_file("tide/__init__.py")).resolve() != _Path(__file__).resolve():
+        raise LookupError("not the installed copy")
+    __version__ = _dist.version
 except Exception:
-    __version__ = "2.3.0"
+    __version__ = "3.0.0"
