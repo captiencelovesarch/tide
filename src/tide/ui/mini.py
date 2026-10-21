@@ -1166,7 +1166,7 @@ class MiniPlayer(QWidget):
         if platform.startswith("wayland"):
             if self.isVisible():
                 self._kwin_pin(on)
-        elif platform == "xcb":
+        elif platform in ("xcb", "windows"):
             if bool(self.windowFlags() & Qt.WindowStaysOnTopHint) != on:
                 was_visible = self.isVisible()
                 self.setWindowFlag(Qt.WindowStaysOnTopHint, on)

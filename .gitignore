@@ -22,3 +22,6 @@ src/*.tar.gz
 *.pkg.tar.zst
 *.pkg.tar.xz
 *.tar.gz
+
+# windows build: icon is generated from assets/icon-*.png
+/windows/tide.ico

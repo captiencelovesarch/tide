@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -21,9 +22,22 @@ def _xdg(env: str, default: str) -> Path:
     return Path(os.environ.get(env) or Path.home() / default)
 
 
-CONFIG_DIR: Path = _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME
-CACHE_DIR: Path = _xdg("XDG_CACHE_HOME", ".cache") / APP_NAME
-DATA_DIR: Path = _xdg("XDG_DATA_HOME", ".local/share") / APP_NAME
+if sys.platform == "win32":
+    # An XDG variable still wins (tests set them), else the usual Windows
+    # spots: config and data roam, cache stays on this machine.
+    _roaming = Path(os.environ.get("APPDATA") or Path.home() / "AppData/Roaming")
+    _local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local")
+    CONFIG_DIR: Path = Path(os.environ.get("XDG_CONFIG_HOME") or _roaming) / APP_NAME
+    DATA_DIR: Path = Path(os.environ.get("XDG_DATA_HOME") or _roaming) / APP_NAME
+    CACHE_DIR: Path = (
+        Path(os.environ["XDG_CACHE_HOME"]) / APP_NAME
+        if os.environ.get("XDG_CACHE_HOME")
+        else _local / APP_NAME / "cache"
+    )
+else:
+    CONFIG_DIR: Path = _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME
+    CACHE_DIR: Path = _xdg("XDG_CACHE_HOME", ".cache") / APP_NAME
+    DATA_DIR: Path = _xdg("XDG_DATA_HOME", ".local/share") / APP_NAME
 
 OAUTH_FILE: Path = CONFIG_DIR / "oauth.json"
 BROWSER_AUTH_FILE: Path = CONFIG_DIR / "browser.json"
