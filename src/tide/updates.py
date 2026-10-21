@@ -7,11 +7,16 @@ toast with a `[view]` action if newer. Result is cached in
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
+from pathlib import Path
 from typing import Callable
 
 from . import __version__, config
@@ -116,3 +121,116 @@ def check_in_background(current_version: str, on_newer: Callable[[str, str], Non
         on_newer(tag, url)
 
     threading.Thread(target=run, name="tide-update-check", daemon=True).start()
+
+
+# ---------- Windows: quiet self-update ----------
+#
+# The Windows build updates itself with no questions asked: each launch
+# checks the latest release, downloads its tide-setup.exe in the background
+# and says so once. A running exe can't replace its own files, so the
+# installer runs silently when tide quits (or right away from the toast's
+# restart, which also opens tide again afterwards).
+
+SETUP_ASSET = "tide-setup.exe"
+_DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
+UPDATE_DIR = config.CACHE_DIR / "update"
+_pending: Path | None = None
+
+
+def windows_updates() -> bool:
+    """True in the installed Windows build, the only place it applies."""
+    return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+
+def _fetch_latest_setup() -> tuple[str, str, int, str] | None:
+    """(tag, download url, size, sha256 or "") of the latest release's
+    installer, or None."""
+    req = urllib.request.Request(LATEST_URL, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read(4 * 1024 * 1024).decode("utf-8"))
+    except Exception:
+        return None
+    tag = data.get("tag_name") or ""
+    for asset in data.get("assets") or []:
+        if asset.get("name") != SETUP_ASSET:
+            continue
+        url = asset.get("browser_download_url") or ""
+        if not url.startswith(_DOWNLOAD_PREFIX):
+            return None
+        digest = asset.get("digest") or ""
+        sha = digest[7:] if digest.startswith("sha256:") else ""
+        return tag, url, int(asset.get("size") or 0), sha
+    return None
+
+
+def _download(url: str, size: int, sha: str, dest: Path) -> bool:
+    part = dest.with_name(dest.name + ".part")
+    h = hashlib.sha256()
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp, open(part, "wb") as f:
+            while chunk := resp.read(1 << 16):
+                f.write(chunk)
+                h.update(chunk)
+        if (size and part.stat().st_size != size) or (sha and h.hexdigest() != sha):
+            part.unlink(missing_ok=True)
+            return False
+        os.replace(part, dest)
+        return True
+    except Exception:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
+def auto_update_in_background(current_version: str, on_ready: Callable[[str], None]) -> None:
+    """Windows build only. Fetches a newer installer if there is one and
+    calls ``on_ready(tag)`` from a worker thread once it's on disk. Silent
+    on every failure; the next launch simply tries again."""
+    cur = _parse_semver(current_version)
+    if cur is None:
+        return
+
+    def run() -> None:
+        global _pending
+        UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+        # an installer for this version or older already ran; clear it out
+        for old in UPDATE_DIR.glob("tide-setup-*.exe"):
+            v = _parse_semver(old.stem.removeprefix("tide-setup-"))
+            if v is None or not _version_gt(v, cur):
+                old.unlink(missing_ok=True)
+        found = _fetch_latest_setup()
+        if not found:
+            return
+        tag, url, size, sha = found
+        remote = _parse_semver(tag)
+        if remote is None or not _version_gt(remote, cur):
+            return
+        dest = UPDATE_DIR / f"tide-setup-{tag.lstrip('v')}.exe"
+        if not dest.is_file() and not _download(url, size, sha, dest):
+            return
+        _pending = dest
+        on_ready(tag)
+
+    threading.Thread(target=run, name="tide-auto-update", daemon=True).start()
+
+
+def install_pending(relaunch: bool) -> None:
+    """Start the downloaded installer, silently, as tide exits. It waits
+    for this process to close, replaces the files, and with ``relaunch``
+    opens tide again."""
+    if _pending is None or not _pending.is_file():
+        return
+    args = [str(_pending), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/NOCANCEL"]
+    if relaunch:
+        args.append("/RELAUNCH=1")
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    try:
+        subprocess.Popen(args, creationflags=flags, close_fds=True)
+    except OSError:
+        pass

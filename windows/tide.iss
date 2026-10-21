@@ -1,7 +1,8 @@
 ; Inno Setup script for tide-setup.exe. Built by the windows workflow:
 ;   iscc /DAppVersion=2.3.0 windows\tide.iss
 ; Installs for the current user only, so there's no admin prompt. The
-; wizard is just: desktop icon checkbox, install, "launch tide".
+; wizard is just: desktop icon checkbox, install, "launch tide". tide's
+; Windows build also runs it silently to update itself (updates.py).
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -51,3 +52,12 @@ Name: "{autodesktop}\tide"; Filename: "{app}\tide.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\tide.exe"; Description: "Open tide now"; Flags: nowait postinstall skipifsilent
+; tide's own updater runs this silently as it quits; /RELAUNCH=1 (the
+; toast's restart button) opens it again when the files are in place
+Filename: "{app}\tide.exe"; Flags: nowait; Check: Relaunch
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
