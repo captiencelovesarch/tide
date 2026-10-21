@@ -1,11 +1,12 @@
 name: windows build
 
-# Builds tide-setup.exe. Runs by hand from the Actions tab, and on every
-# version tag, where the installer also goes onto that tag's release.
+# Builds tide-setup.exe. Runs by hand from the Actions tab, and whenever a
+# release is published, where the installer goes onto that release. The
+# Windows build's updater looks for it there, so every release needs one.
 on:
   workflow_dispatch:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -64,13 +65,8 @@ jobs:
           path: build/windows/installer/tide-setup.exe
 
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" build/windows/installer/tide-setup.exe --clobber
-          else
-            echo "no release for $GITHUB_REF_NAME yet; the installer is in this run's artifacts"
-          fi
+        run: gh release upload "${{ github.event.release.tag_name }}" build/windows/installer/tide-setup.exe --clobber

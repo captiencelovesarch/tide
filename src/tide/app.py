@@ -763,6 +763,7 @@ def run(argv: list[str] | None = None) -> int:
 
     class _UpdateBridge(_QObject):
         newer = _Signal(str, str)   # tag, url
+        ready = _Signal(str)        # tag (windows: installer downloaded)
 
     def _show_update_toast(tag: str, url: str) -> None:
         # Only wire the "view" action to a validated GitHub URL (updates.py
@@ -781,7 +782,29 @@ def run(argv: list[str] | None = None) -> int:
     window._update_bridge = update_bridge   # keep alive for the app's lifetime
     # flathub delivers updates itself; a toast pointing at github would
     # send flatpak users the wrong way.
-    if not config.in_flatpak():
+    # The Windows build fetches the installer itself and only says when
+    # it's ready; restart closes tide and the installer reopens it.
+    restart_for_update = [False]
+
+    def _show_update_ready(tag: str) -> None:
+        def restart() -> None:
+            restart_for_update[0] = True
+            window.request_quit()
+        show_toast(
+            window.toast_host(),
+            f"tide {tag.lstrip('v')} is ready. restart to update",
+            action_label="restart",
+            on_action=restart,
+            lifetime_ms=15000,
+        )
+
+    update_bridge.ready.connect(_show_update_ready)
+    if updates.windows_updates():
+        try:
+            updates.auto_update_in_background(__version__, update_bridge.ready.emit)
+        except Exception:
+            pass
+    elif not config.in_flatpak():
         try:
             updates.check_in_background(__version__, update_bridge.newer.emit)
         except Exception:
@@ -926,4 +949,6 @@ def run(argv: list[str] | None = None) -> int:
         qthreads.join(wait_ms=1500)
     except Exception:
         pass
+    if updates.windows_updates():
+        updates.install_pending(relaunch=restart_for_update[0])
     return rc

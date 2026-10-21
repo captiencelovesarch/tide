@@ -110,9 +110,14 @@ Built so far (all in `windows/`, plus `.github/workflows/windows.yml`):
 - Errors that currently only go to stderr (mpris failure, missing ffmpeg)
   either go away on Windows or show up as a plain toast. No one will
   ever see stderr there.
-- Updates: `updates.py` shows an "update available" button that
-  downloads the new `tide-setup.exe` and runs it. No commands, no AUR or
-  flatpak text on Windows.
+- [x] Updates, with nothing to click through: on every launch the
+      Windows build checks the latest release, downloads its
+      `tide-setup.exe` in the background (size and sha256 checked), and
+      shows one toast, "tide X is ready. restart to update". Restart quits,
+      the installer runs silently and reopens tide. If the toast is
+      ignored, the update installs silently the next time tide quits.
+      The workflow runs on "release published", so every release gets an
+      installer attached. Without one, nothing updates.
 - Builds run on a GitHub Actions `windows-latest` runner, so nobody needs
   a Windows box to make a release. The installer goes on the GitHub
   release next to the Linux bundles, with one obvious download link on
