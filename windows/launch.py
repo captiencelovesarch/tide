@@ -78,8 +78,13 @@ def _selftest() -> int:
     try:
         import mpv  # noqa: F401  (loads libmpv-2.dll)
         import tide.app  # noqa: F401
-        from tide import config, theming, layout, plugin_host
-        for d in (theming.BUNDLED_THEMES_DIR, layout.BUNDLED_LAYOUTS_DIR, plugin_host.BUNDLED_DIR):
+        import importlib.util
+        from tide import config, theming, layout
+        dirs = [theming.BUNDLED_THEMES_DIR, layout.BUNDLED_LAYOUTS_DIR]
+        if importlib.util.find_spec("tide.plugin_host"):  # newer than 2.3.0
+            from tide import plugin_host
+            dirs.append(plugin_host.BUNDLED_DIR)
+        for d in dirs:
             if not Path(d).is_dir():
                 problems.append(f"bundled dir missing: {d}")
         print("config dir:", config.CONFIG_DIR)
