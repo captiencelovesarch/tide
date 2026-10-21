@@ -9,9 +9,9 @@ the listening pattern.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -19,6 +19,11 @@ from pathlib import Path
 
 from . import config
 from .api import Track
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 
 MAX_LINES_RETAINED = 5000   # rotate when the file grows past this
@@ -70,7 +75,11 @@ def _acquire_lock(path: Path) -> int | None:
     except OSError:
         return None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if sys.platform == "win32":
+            # locks the first byte; LK_LOCK retries for ~10 s, then raises
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX)
     except OSError:
         os.close(fd)
         return None
@@ -112,7 +121,7 @@ def append(track: Track) -> None:
     finally:
         if lock_fd is not None:
             try:
-                os.close(lock_fd)  # closing drops the flock
+                os.close(lock_fd)  # closing drops the lock
             except OSError:
                 pass
 

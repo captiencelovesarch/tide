@@ -38,7 +38,6 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QStyleFactory
 from . import audio_fx, auth, auth_spotify, cache, config, qthreads, session as session_module, settings as settings_module, theming, ui_sounds as ui_sounds_module
 from .api import Api
 from .discord_rpc import DiscordPresence, presence_options
-from .mpris import MprisService
 from .playback import MpvBackend, PlaybackRouter
 from .playback.librespot_backend import LibrespotBackend
 from .player import Player
@@ -633,9 +632,13 @@ def run(argv: list[str] | None = None) -> int:
         window.show()
 
     # System integration: MPRIS2 (media keys + KDE/GNOME panel controls).
-    mpris = MprisService(player, window.queue, window)
-    if not mpris.start():
-        print("tide: MPRIS2 registration failed (no session bus?)", file=sys.stderr)
+    # mpris.py needs QtDBus, which the Windows PySide6 wheels don't ship.
+    mpris = None
+    if sys.platform.startswith("linux"):
+        from .mpris import MprisService
+        mpris = MprisService(player, window.queue, window)
+        if not mpris.start():
+            print("tide: MPRIS2 registration failed (no session bus?)", file=sys.stderr)
 
     # System tray (KDE/GNOME panel). Falls back silently if no tray host.
     from PySide6.QtWidgets import QSystemTrayIcon
@@ -926,7 +929,8 @@ def run(argv: list[str] | None = None) -> int:
     except Exception:
         pass
     discord.shutdown()
-    mpris.stop()
+    if mpris is not None:
+        mpris.stop()
     try:
         from . import lyric_timing
         if lyric_timing._service is not None:
