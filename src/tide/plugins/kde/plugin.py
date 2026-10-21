@@ -134,6 +134,10 @@ class KdeDesktop:
             self._save(saved)
         if accent:
             self.desk.set_accent(accent)
+        else:
+            # a cover with no colour at all: yours, not the last song's
+            # (2026-10-21: a night cover kept the song before's orange)
+            self.desk.restore_accent(saved["accent"])
         if level == "wallpaper" and cover is not None and not cover.isNull():
             path = self.dir / f"wallpaper-{serial}.jpg"
             art.wallpaper(cover, *size).save(str(path), "JPG", 92)

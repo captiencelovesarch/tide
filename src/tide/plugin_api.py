@@ -252,7 +252,17 @@ def cover_palette(img) -> list[tuple[tuple[float, float, float], float]]:
     (hue, saturation, value) 0..1 with their share of the colourful area,
     biggest first. greys, blacks and whites don't count; a colour has to
     cover a real part of the cover, so a small detail (a blue painting on
-    a red cover) doesn't take over (2026-10-21)."""
+    a red cover) doesn't take over (2026-10-21).
+
+    a dark, moody cover (a night scene in navy) has nothing vivid enough
+    to count; then its quieter tint is used, so it still reads as night
+    blue (it used to give nothing, and the desktop kept the last song's
+    colour). [] only for a cover with no colour at all."""
+    return (_palette(img, min_s=0.18, min_v=0.22, by_vividness=True)
+            or _palette(img, min_s=0.07, min_v=0.08, by_vividness=False))
+
+
+def _palette(img, min_s: float, min_v: float, by_vividness: bool):
     import colorsys
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QImage
@@ -268,9 +278,9 @@ def cover_palette(img) -> list[tuple[tuple[float, float, float], float]]:
             px = small.pixel(x, y)
             r, g, b = ((px >> 16) & 255) / 255, ((px >> 8) & 255) / 255, (px & 255) / 255
             h, sat, v = colorsys.rgb_to_hsv(r, g, b)
-            if sat < 0.18 or v < 0.22:
+            if sat < min_s or v < min_v:
                 continue
-            w = sat * v
+            w = sat * v if by_vividness else sat
             k = int(h * bins) % bins
             weight[k] += w
             sums[k][0] += w * _math.sin(2 * _math.pi * h)
@@ -278,7 +288,7 @@ def cover_palette(img) -> list[tuple[tuple[float, float, float], float]]:
             sums[k][2] += w * sat
             sums[k][3] += w * v
     total = sum(weight)
-    if total < 0.5:                       # under ~2% of the cover is colour at all
+    if total < (0.5 if by_vividness else 8.0):    # hardly any of the cover is colour
         return []
     # each bin with its neighbours, so a hue on a bin edge isn't split in two
     smooth = [weight[(k - 1) % bins] * 0.5 + weight[k] + weight[(k + 1) % bins] * 0.5
