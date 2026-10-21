@@ -262,7 +262,8 @@ class RingTests(unittest.TestCase):
         QApplication.instance() or QApplication([])
         img = QImage(32, 32, QImage.Format_RGB32)
         img.fill(QColor("#808080"))
-        self.assertIsNone(self.ring.cover_colors(img))  # grey: use the theme
+        # grey: white light (2026-10-21; it used to fall back to the theme)
+        self.assertEqual(self.ring.cover_colors(img), ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0)))
         for y in range(16):
             for x in range(32):
                 img.setPixelColor(x, y, QColor("#ff2266"))

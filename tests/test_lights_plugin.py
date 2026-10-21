@@ -411,9 +411,11 @@ class ColourChoiceTests(unittest.TestCase):
         a, _b = cover_colors(self.cover("#1f2433"))     # near-black navy, too dark for the vivid pass
         self.assertGreater(a[2], a[0])                  # blue, not nothing
 
-    def test_black_and_white_has_no_colour(self):
+    def test_black_and_white_is_white_light(self):
         from tide.plugin_api import cover_colors
-        self.assertIsNone(cover_colors(self.cover("#777777", "#ffffff", 50)))
+        a, b = cover_colors(self.cover("#777777", "#ffffff", 50))
+        self.assertEqual((a, b), ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0)))
+        self.assertEqual(show_mod.led_color(a), (1.0, 1.0, 1.0))
 
     def test_blends_through_colour_not_grey(self):
         mid = show_mod.gradient(3, ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)), 1.0, 0.25)[0]

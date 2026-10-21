@@ -69,6 +69,10 @@ def accent(color: tuple[float, float, float]) -> str:
     to read as a colour, dark enough that white text on it (selections,
     the default button) stays readable at 3:1 or better."""
     h, s, v = colorsys.rgb_to_hsv(*color)
+    if s < 0.08:
+        # a black-and-white cover: a white accent. plasma softens it for
+        # selections and puts black text on it, so it stays readable
+        return "#f0f0f0"
     s = max(s, 0.55)
     v = min(max(v, 0.5), 0.92)
     rgb = colorsys.hsv_to_rgb(h, s, v)
