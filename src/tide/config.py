@@ -21,7 +21,12 @@ def _xdg(env: str, default: str) -> Path:
     return Path(os.environ.get(env) or Path.home() / default)
 
 
-CONFIG_DIR: Path = _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME
+# TIDE_CONFIG_DIR moves tide's own config folder and nothing else (a dev
+# build on a copy of your config). Moving XDG_CONFIG_HOME instead hides
+# every browser's profile from the cookie import too.
+CONFIG_DIR: Path = (Path(os.environ["TIDE_CONFIG_DIR"]).expanduser()
+                    if os.environ.get("TIDE_CONFIG_DIR")
+                    else _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME)
 CACHE_DIR: Path = _xdg("XDG_CACHE_HOME", ".cache") / APP_NAME
 DATA_DIR: Path = _xdg("XDG_DATA_HOME", ".local/share") / APP_NAME
 
