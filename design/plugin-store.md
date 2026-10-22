@@ -1,9 +1,9 @@
 # plugin store
 
-> **status: phases a, b and c built (2026-10-21). b and c are on branch
-> `claude/plugin-store-ca174f`, not committed.** written 2026-10-21 against
-> local main (`730ecd3`). builds on design/plugins.md (the host, the ctx,
-> phase 3). phase d's first part (discord out, listenbrainz dropped) is built; the rest waits for your ok.
+> **status: phases a to d built (2026-10-22), committed on branch
+> `claude/plugin-store-ca174f`, not pushed.** 3.0 waits on publishing the
+> new plugins and the release. written 2026-10-21 against local main
+> (`730ecd3`). builds on design/plugins.md (the host, the ctx, phase 3).
 
 the goal: a fresh tide has no plugins. you open the store, look at a
 plugin's previews, click install, and it's running. click uninstall and
@@ -450,12 +450,35 @@ plasma's tools), plus `program:<name>`, `process:<name>` and
   updates). it doesn't share the store's daily fetch yet: it's still one
   check at launch.
 
-**phase d, the rest** (needs your ok before each leaves core): spotify,
-subsonic, the small sources, local files (with the onboarding row), precise
-lyric timing, voice (into steamvr), more visualizer tiles, instrumental
-finder, powertools. each needs its hook first (see the table above).
+**phase d, the rest: built 2026-10-22** (committed on the branch, not pushed)
+
+| plugin | hook it needed | upgrade |
+|---|---|---|
+| extra sources (soundcloud, bandcamp, mixcloud) | `ctx.sources.register` | installed if any of the three was on |
+| local files, now with covers | `ctx.sources.register`, `plugin_api.store_art` | installed if local was on with a folder, or was the active source |
+| more visualizer tiles | `ctx.ui.add_visualizer_tile`, `tide.plugin_vis` | installed if a slot you could see showed one |
+| precise lyric timing | `ctx.lyrics.add_aligner` | installed if `lyrics_precise` was on; tide 2's model is moved, not fetched again |
+| tide powertools | `ctx.ui.add_settings_button` | installed if you'd made a theme, swapped a glyph or rebound a key |
+| instrumental finder | `ctx.ui.add_lyrics_toggle`, `ctx.music.search_all` / `play_at` | none: no setting says you used it |
+
+- a fresh tide plays youtube music and nothing else. onboarding's source
+  cards queue the plugin a pick needs.
+- a slot showing a store tile whose plugin is off keeps the pick and says
+  where the tile comes from; a song from a source that's a plugin now says
+  which plugin plays it, and a restored session waits for that source.
+- **still in core, on purpose:** spotify and subsonic (on hold: spotify's
+  playback is broken upstream, no subsonic server to test with), and voice
+  (`speech_whisper`, `ctx.speech`): steamvr 0.3.0 is published and calls it,
+  so it moves into steamvr's zip with steamvr's next release.
+
+**to ship 3.0 (your side)**
+- publish the seven new plugins (`tools/publish.py --all`), then pick a
+  plugin of the week. until they're in the live index, the upgrade
+  installs just wait.
+- push the store branch, the changelog and readme for 3.0, the AUR bump.
 
 **small things noticed while building**
-- `tide --no-plugins` still lets the store install and start a plugin.
-- a plugin of yours with the same slug as a store one overrides it, so
-  installing the store one does nothing visible. the page could say so.
+- fixed: `tide --no-plugins` starts nothing that run, installs included,
+  and the store page says so.
+- fixed: a plugin of yours with a store plugin's slug says it's the one in
+  use, on its page.
