@@ -178,6 +178,23 @@ def _dim(label: QLabel) -> QLabel:
     return label
 
 
+# buttons plugins add to the dialog (ctx.ui.add_settings_button), each
+# {"section", "label", "tooltip", "fn"}: tide powertools' editors live in
+# "power tools" and "shortcuts". fn(dialog) runs a turn after the click.
+PLUGIN_BUTTONS: list[dict] = []
+
+
+def add_plugin_button(section: str, label: str, fn, tooltip: str = "") -> dict:
+    entry = {"section": section, "label": label, "tooltip": tooltip, "fn": fn}
+    PLUGIN_BUTTONS.append(entry)
+    return entry
+
+
+def remove_plugin_button(entry: dict) -> None:
+    if entry in PLUGIN_BUTTONS:
+        PLUGIN_BUTTONS.remove(entry)
+
+
 def _plugins_moved() -> QLabel:
     label = QLabel("plugins live in the store now: the plugins button in the rail, "
                    "above settings. their settings are on each plugin's page.")
@@ -649,54 +666,66 @@ class SettingsDialog(QDialog):
         return []
 
     def _power_tool_chrome(self) -> list:
-        """Power-tool launchers + the shortcuts section. Every open is
-        DEFERRED out of the click emission: the theme editor via our
-        own singleShot; open_strip_builder / open_glyph_editor /
-        open_keymap_editor defer internally, so wiring those straight
-        to clicked is sanctioned."""
+        """Power-tool launchers + the shortcuts section: the strip builder,
+        and whatever plugins add (tide powertools: the theme, glyph and
+        keymap editors). Every open is DEFERRED out of the click emission:
+        plugin buttons through _run_plugin_button's singleShot,
+        open_strip_builder internally."""
         tools_heading = Heading("power tools", 34)
         tools_blurb = _dim(QLabel(
             "the deep-cut editors. everything they change is previewable, "
             "revertable and saved per-field — no config files, ever."
         ))
-        self.theme_editor_btn = QPushButton("theme editor  →")
-        self.theme_editor_btn.setToolTip(
-            "edit the active theme's colors, typography and radius live; "
-            "save the result as your own theme")
-        self.theme_editor_btn.clicked.connect(self._on_open_theme_editor)
         self.strip_builder_btn = QPushButton("strip builder  →")
         self.strip_builder_btn.setToolTip(
             "build your player bar: pick a variant per slot with a live "
             "miniature preview")
         self.strip_builder_btn.clicked.connect(self._on_open_strip_builder)
-        self.glyphs_btn = QPushButton("glyph editor  →")
-        self.glyphs_btn.setToolTip(
-            "swap any transport glyph (▶ ▮▮ ♥ …) for 1-3 characters of "
-            "your own — per personality")
-        self.glyphs_btn.clicked.connect(self._on_open_glyphs)
+        self.plugin_buttons: dict[str, QPushButton] = {}
         tools_row = QHBoxLayout()
         tools_row.setSpacing(8)
-        tools_row.addWidget(self.theme_editor_btn)
         tools_row.addWidget(self.strip_builder_btn)
-        tools_row.addWidget(self.glyphs_btn)
+        for btn in self._plugin_buttons("power tools"):
+            tools_row.addWidget(btn)
         tools_row.addStretch(1)
         tools_col = QVBoxLayout()
         tools_col.setSpacing(6)
         tools_col.addWidget(tools_blurb)
         tools_col.addLayout(tools_row)
+        if not any(e["section"] == "power tools" for e in PLUGIN_BUTTONS):
+            tools_col.addWidget(_dim(QLabel(
+                "the theme, glyph and keymap editors come with the tide "
+                "powertools plugin, in the store.")))
 
         shortcuts_heading = Heading("shortcuts", 34)
         shortcuts_blurb = _dim(QLabel(
             "every keyboard shortcut is rebindable. the keymap is global "
             "— muscle memory doesn't flip with the personality."
         ))
-        self.keymap_btn = QPushButton("keymap editor  →")
-        self.keymap_btn.clicked.connect(self._on_open_keymap)
         sc_col = QVBoxLayout()
         sc_col.setSpacing(6)
         sc_col.addWidget(shortcuts_blurb)
-        sc_col.addWidget(self.keymap_btn, alignment=Qt.AlignLeft)
+        for btn in self._plugin_buttons("shortcuts"):
+            sc_col.addWidget(btn, alignment=Qt.AlignLeft)
         return [tools_heading, tools_col, shortcuts_heading, sc_col]
+
+    def _plugin_buttons(self, section: str) -> list[QPushButton]:
+        out = []
+        for entry in PLUGIN_BUTTONS:
+            if entry["section"] != section:
+                continue
+            btn = QPushButton(f"{entry['label']}  →")
+            if entry["tooltip"]:
+                btn.setToolTip(entry["tooltip"])
+            # deferred past the click emission ([[feedback-pyside-modal]])
+            btn.clicked.connect(lambda _c=False, e=entry: self._run_plugin_button(e))
+            self.plugin_buttons[entry["label"]] = btn
+            out.append(btn)
+        return out
+
+    def _run_plugin_button(self, entry: dict) -> None:
+        self._tool_sound("modal_open")
+        QTimer.singleShot(0, lambda: entry["fn"](self))
 
     # ---------- personality (v2.0 phase 4 — the settings re-pick route) ----
 
@@ -1271,19 +1300,6 @@ class SettingsDialog(QDialog):
 
     # ---------- power tools ----------
 
-    def _on_open_theme_editor(self) -> None:
-        # Deferred past the click emission ([[feedback-pyside-modal]]).
-        self._tool_sound("modal_open")
-        QTimer.singleShot(0, self._do_open_theme_editor)
-
-    def _do_open_theme_editor(self) -> None:
-        from .theme_editor import ThemeEditorDialog
-        dlg = ThemeEditorDialog(parent=self)
-        dlg.theme_saved.connect(self._on_theme_saved)
-        dlg.exec()
-        dlg.deleteLater()
-        self._tool_sound("modal_close")
-
     def _refit_for_scale(self, _theme) -> None:
         scale.fit_dialog(self, 680, 720, min_width=620, grow_only=True)
 
@@ -1370,19 +1386,6 @@ class SettingsDialog(QDialog):
             dict(self._pending_strip_overrides or {}))
         if effective is not None:
             parent.apply_layout(effective)
-
-    def _on_open_glyphs(self) -> None:
-        """open_glyph_editor defers internally. Parented to this dialog,
-        so its refresh_glyphs walk reaches the MainWindow behind it."""
-        self._tool_sound("modal_open")
-        from .glyph_editor import open_glyph_editor
-        open_glyph_editor(self._settings, self)
-
-    def _on_open_keymap(self) -> None:
-        """open_keymap_editor defers internally."""
-        self._tool_sound("modal_open")
-        from .keymap_editor import open_keymap_editor
-        open_keymap_editor(self, self._settings)
 
     # ---------- result ----------
 

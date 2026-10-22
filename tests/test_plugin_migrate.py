@@ -130,6 +130,10 @@ visualizer_tile_4 = "halo"
         self.settings.write_text("lyrics_precise = true\n")
         self.assertEqual(self.collect(), ["lyric-timing"])
 
+    def test_powertools_when_you_made_something(self):
+        self.settings.write_text("[keymap]\nplay_pause = \"Ctrl+P\"\n")
+        self.assertEqual(self.collect(), ["powertools"])
+
     def test_toasts(self):
         self.assertEqual(plugin_migrate.toast_for("discord", True, "discord presence"),
                          "discord presence is a plugin now. we installed it for you.")

@@ -273,15 +273,5 @@ class DialogScaleTest(unittest.TestCase):
         QTest.qWait(10)
         self.assertEqual((dlg.width(), dlg.height()), (1200, 1000))
 
-    def test_other_dialogs_take_the_scale_at_construction(self) -> None:
-        from tide.ui.keymap_editor import KeymapEditor
-        from tide.settings import Settings
-        scale.set_factor(scale.Scale.HUGE)
-        for cls, kwargs in ((KeymapEditor, {"current_settings": Settings()}),):
-            try:
-                dlg = cls(**kwargs)
-            except TypeError:
-                dlg = cls(Settings())
-            self.addCleanup(dlg.deleteLater)
-            self.assertEqual(dlg.minimumWidth(), scale.px(560), cls.__name__)
-            self.assertEqual(dlg.width(), scale.px(600), cls.__name__)
+    # (the keymap editor's scale check moved to tide-plugins with tide
+    # powertools, tests/test_keymap_editor.py)

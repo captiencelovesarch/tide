@@ -40,6 +40,17 @@ def _on_with(flag: str, value: str) -> Callable[[dict], bool]:
     return lambda raw: raw.get(flag) is True and bool(str(raw.get(value, "") or "").strip())
 
 
+def _customised(raw: dict) -> bool:
+    """you made something with the editors: a glyph swap, a rebound key, or
+    a theme of your own in ~/.config/tide/themes."""
+    if raw.get("glyph_overrides") or raw.get("keymap"):
+        return True
+    try:
+        return any(p.is_dir() for p in config.USER_THEMES_DIR.iterdir())
+    except OSError:
+        return False
+
+
 _SLOTS_SHOWN = {"single": 1, "split": 2, "stack": 2, "trio": 3, "quad": 4}
 
 
@@ -82,6 +93,7 @@ MOVED: tuple[Moved, ...] = (
         "discord_hide_local": "hide_local",
     }),
     Moved("extra-sources", "extra sources", _source_on("soundcloud", "bandcamp", "mixcloud"), {}),
+    Moved("powertools", "tide powertools", _customised, {}),
     Moved("lyric-timing", "precise lyric timing", lambda raw: raw.get("lyrics_precise") is True, {}),
     Moved("vis-tiles", "more visualizer tiles",
           _tile_shown("river", "spectrogram", "halo", "tapper"), {

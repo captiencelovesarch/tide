@@ -374,29 +374,35 @@ class _DialogCase(unittest.TestCase):
 
 
 class DialogToolWiringTests(_DialogCase):
-    def test_the_four_launchers_exist(self) -> None:
+    def test_the_strip_builder_and_a_pointer_to_the_rest(self) -> None:
+        # the theme, glyph and keymap editors are tide powertools (a store
+        # plugin) since 3.0; without it the section says where they went
+        from PySide6.QtWidgets import QLabel
         dlg = self._dialog()
-        for attr in ("theme_editor_btn", "strip_builder_btn", "glyphs_btn",
-                     "keymap_btn"):
-            self.assertTrue(hasattr(dlg, attr), attr)
+        self.assertTrue(hasattr(dlg, "strip_builder_btn"))
+        self.assertEqual(dlg.plugin_buttons, {})
+        texts = [w.text() for w in dlg.findChildren(QLabel)]
+        self.assertTrue(any("tide powertools plugin" in t for t in texts))
+
+    def test_plugin_buttons_land_in_their_section_and_open_deferred(self) -> None:
+        from tide.ui import settings as settings_ui
+        opened = []
+        a = settings_ui.add_plugin_button("power tools", "a tool", opened.append)
+        b = settings_ui.add_plugin_button("shortcuts", "keys", opened.append)
+        self.addCleanup(settings_ui.remove_plugin_button, a)
+        self.addCleanup(settings_ui.remove_plugin_button, b)
+        dlg = self._dialog()
+        self.assertEqual(set(dlg.plugin_buttons), {"a tool", "keys"})
+        dlg.plugin_buttons["a tool"].click()
+        self.assertEqual(opened, [], "opened inside the click emission")
+        QTest.qWait(30)
+        self.assertEqual(opened, [dlg])
 
     def test_parentless_blurbs_fall_back_to_the_defaults(self) -> None:
         dlg = self._dialog()
         self.assertIn("ctrl+8", dlg.fx_blurb.text())
         self.assertIn("ctrl+m", dlg.mini_blurb.text())
         self.assertIn("ctrl+shift+r", dlg.session_blurb.text())
-
-    def test_theme_editor_open_is_deferred(self) -> None:
-        # rule 3: the editor opens on the NEXT event-loop turn, never
-        # inside the click emission
-        dlg = self._dialog()
-        with mock.patch.object(dlg, "_do_open_theme_editor") as spy:
-            dlg.theme_editor_btn.click()
-            self.assertEqual(spy.call_count, 0,
-                             "theme editor opened synchronously inside "
-                             "the click emission")
-            QTest.qWait(30)
-            self.assertEqual(spy.call_count, 1)
 
     def test_strip_builder_button_uses_the_deferring_opener(self) -> None:
         from tide.ui import strip_builder as sb_module
@@ -410,20 +416,6 @@ class DialogToolWiringTests(_DialogCase):
             overrides={"progress": "dotted"},
             on_chosen=dlg._on_strip_overrides,
         )
-
-    def test_glyphs_button_uses_the_deferring_opener(self) -> None:
-        from tide.ui import glyph_editor as ge_module
-        dlg = self._dialog()
-        with mock.patch.object(ge_module, "open_glyph_editor") as spy:
-            dlg.glyphs_btn.click()
-        spy.assert_called_once_with(dlg._settings, dlg)
-
-    def test_keymap_button_uses_the_deferring_opener(self) -> None:
-        from tide.ui import keymap_editor as ke_module
-        dlg = self._dialog()
-        with mock.patch.object(ke_module, "open_keymap_editor") as spy:
-            dlg.keymap_btn.click()
-        spy.assert_called_once_with(dlg, dlg._settings)
 
     def test_theme_saved_selects_the_slug_and_stages_the_pick(self) -> None:
         # after [save as my theme] the editor has already applied the

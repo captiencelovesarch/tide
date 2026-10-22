@@ -1084,6 +1084,18 @@ class _Ui:
         ctx.adopt(action)
         return _TrayAction(action)
 
+    def add_settings_button(self, section: str, label: str, fn: Callable,
+                            tooltip: str = "") -> None:
+        """a button in the settings dialog's ``section`` ("power tools",
+        "shortcuts"). ``fn(dialog)`` runs a turn after the click, with the
+        settings dialog to parent a window of your own to. it goes when the
+        plugin stops (an open dialog keeps its button until it closes)."""
+        from .ui import settings as settings_ui
+        ctx = self._ctx
+        entry = settings_ui.add_plugin_button(section, label,
+                                              lambda dialog: ctx._call(fn, dialog), tooltip)
+        ctx.on_stop(lambda: settings_ui.remove_plugin_button(entry))
+
     def add_visualizer_tile(self, kind: str, label: str, factory: Callable,
                             knobs: tuple[str, ...] = ()) -> None:
         """a tile each visualizer slot can show. ``factory(engine)`` builds
