@@ -728,6 +728,28 @@ class _Music:
                 else bool(radio))
         host.call_window("_play_now", track.ref, seed)
 
+    def search_all(self, query: str, limit: int = 10) -> list[tuple[str, TrackInfo]]:
+        """songs for ``query`` from every source that's switched on, as
+        (source name, track). blocking: call it inside ctx.jobs.run. a
+        source that fails is left out."""
+        from .sources import registry
+        out = []
+        for src in registry().enabled_sources():
+            try:
+                for t in src.search_songs(query, limit) or []:
+                    info = track_info(t)
+                    if info is not None and info.id:
+                        out.append((getattr(src, "name", "") or src.slug, info))
+            except Exception:  # noqa: BLE001 - one source down isn't a failed search
+                continue
+        return out
+
+    def play_at(self, track: TrackInfo, seconds: float) -> None:
+        """play ``track`` and jump to ``seconds`` as soon as it's playing
+        (a swap that feels like the same song carrying on)."""
+        if track is not None and track.ref is not None:
+            self._ctx._host.call_window("_play_track_then_seek", track.ref, float(seconds))
+
     def radio(self, track: TrackInfo) -> None:
         """start a radio from ``track``: it plays now, songs like it follow."""
         if track is not None and track.ref is not None:
@@ -1083,6 +1105,18 @@ class _Ui:
             ctx.on_stop(lambda: tray.remove_plugin_action(action))
         ctx.adopt(action)
         return _TrayAction(action)
+
+    def add_lyrics_toggle(self, label: str, fn: Callable):
+        """a checkable [label] in the lyrics view's row of toggles (karaoke,
+        sweep...). ``fn(on, track)`` runs on a click with the song the view
+        shows. returns a handle: ``set_checked(on)``, ``set_status(text)``
+        (one line under the toggles). it goes when the plugin stops."""
+        from .ui import lyrics as lyrics_ui
+        ctx = self._ctx
+        entry = lyrics_ui.LyricsToggle(label, lambda on, track: ctx._call(fn, on, track))
+        lyrics_ui.add_toggle(entry)
+        ctx.on_stop(lambda: lyrics_ui.remove_toggle(entry))
+        return entry
 
     def add_settings_button(self, section: str, label: str, fn: Callable,
                             tooltip: str = "") -> None:

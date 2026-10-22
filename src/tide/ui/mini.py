@@ -857,8 +857,8 @@ class MiniPlayer(QWidget):
             # The mini is ~300px wide: undo most of the size step so the
             # default lands where the mini's lyrics always were.
             panel = LyricsView(self._window.api, font_scale=_LYRICS_FONT_SCALE)
-            for chrome in (panel.heading, panel.karaoke_check, panel.mute_btn,
-                           panel.swap_status):
+            for chrome in (panel.heading, panel.karaoke_check, panel.plugin_row,
+                           panel.plugin_status):
                 chrome.hide()
             panel.setFixedHeight(0)
             self._content_col.addWidget(panel)

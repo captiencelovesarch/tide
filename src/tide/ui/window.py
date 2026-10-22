@@ -347,29 +347,6 @@ class _DislikeWorker(QObject):
             self.failed.emit(self.video_id, str(exc))
 
 
-class _InstrumentalSearchWorker(QObject):
-    """Off-main-thread instrumental hunter for the karaoke mute toggle.
-
-    The search method is a synchronous loop over enabled sources; running
-    it on the GUI thread would freeze the UI for the round-trips. Same
-    QThread + worker lifetime pattern as the other workers in this file.
-    """
-    done = Signal(object, object)        # vocal_track, InstrumentalMatch|None
-    failed = Signal(object, str)         # vocal_track, msg
-
-    def __init__(self, vocal_track: api.Track) -> None:
-        super().__init__()
-        self.vocal_track = vocal_track
-
-    def run(self) -> None:
-        try:
-            from .. import instrumental as _inst
-            match = _inst.find_instrumental(self.vocal_track)
-            self.done.emit(self.vocal_track, match)
-        except Exception as exc:
-            self.failed.emit(self.vocal_track, str(exc))
-
-
 # ---------- keyboard shortcut actions ----------
 
 
@@ -890,23 +867,11 @@ class MainWindow(QMainWindow):
         lyric_timing.service().set_settings_provider(lambda: self._settings)
         lyric_timing.service().set_stream_provider(self._stream_ref_for)
         self.lyrics_view = LyricsView(self.api)
-        # "mute lyrics" instrumental-swap. The view emits when the user
-        # toggles the button; MainWindow owns the player + source
-        # registry so the actual hunt + swap lands here.
-        self.lyrics_view.toggle_instrumental_requested.connect(
-            self._on_instrumental_swap_requested
-        )
         self.lyrics_view.list_sweep_toggled.connect(self._on_lyrics_list_sweep)
-        # Swap state — remembers what to switch back to + the position
-        # at the moment of swap so toggling off resumes mid-song.
-        self._instrumental_swap_thread: QThread | None = None
-        self._instrumental_swap_worker: QObject | None = None
-        self._instrumental_vocal_track = None
-        self._instrumental_swap_position: float = 0.0
-        self._instrumental_active: bool = False
-        # Used by the karaoke "mute lyrics" swap + by any future feature
-        # that needs to load a track and snap to a non-zero start point
-        # on first PLAYING (e.g. session-restore mid-track).
+        # Used by ctx.music.play_at (the instrumental finder's swap) + by
+        # any future feature that needs to load a track and snap to a
+        # non-zero start point on first PLAYING (e.g. session-restore
+        # mid-track).
         self._pending_seek: float = 0.0
 
         # v1.5 library tabs route album/artist cards to the shared pages.
@@ -2367,23 +2332,6 @@ class MainWindow(QMainWindow):
         # playing for the 1–3s the resolve worker takes, which feels broken
         # on a manual skip.
         self.player.stop()
-        # If a karaoke swap is active and the user picked an unrelated
-        # track (not the swap target, not the cached vocal), clear the
-        # swap state so the mute-lyrics button doesn't get stuck on a
-        # song it's not swapped from. _swapping_now guards the play
-        # calls coming FROM the swap orchestration itself.
-        if (self._instrumental_active
-                and self._instrumental_vocal_track is not None
-                and not getattr(self, "_swapping_now", False)):
-            vocal_id = self._instrumental_vocal_track.video_id
-            if track.video_id != vocal_id:
-                self._instrumental_active = False
-                self._instrumental_vocal_track = None
-                try:
-                    self.lyrics_view.mute_btn.setChecked(False)
-                    self.lyrics_view.swap_status.setText("")
-                except Exception:
-                    pass
         self._current = track
         self.now_label.setTrackAnimated(track.artists, track.title, track.album)
         self.now_label.setSource(_SOURCE_NAMES.get(track.source, track.source))
@@ -3051,116 +2999,12 @@ class MainWindow(QMainWindow):
         # random queue slot mid-song" case the tick-based logic misses.
         self._arm_neighborhood_prefetch()
 
-    # ---------- instrumental swap ("mute lyrics") ----------
-
-    def _on_instrumental_swap_requested(self, vocal_track, want_instrumental: bool) -> None:
-        """Driven by the Lyrics view's [mute lyrics] toggle. When
-        switching ON, we kick a background instrumental hunt; on
-        success the player swaps stream + restores position. When
-        switching OFF, we restore the previously-cached vocal track."""
-        if want_instrumental:
-            if vocal_track is None:
-                self.lyrics_view.mute_btn.setChecked(False)
-                return
-            # Remember where to come back to.
-            self._instrumental_vocal_track = vocal_track
-            try:
-                self._instrumental_swap_position = float(self.player.position if hasattr(self.player, "position") else 0.0)
-            except Exception:
-                self._instrumental_swap_position = 0.0
-            self._spawn_instrumental_search(vocal_track)
-            return
-        # Toggling OFF — switch back to the vocal version we cached
-        # when the swap was triggered.
-        if not self._instrumental_active or self._instrumental_vocal_track is None:
-            self.lyrics_view.swap_status.setText("")
-            return
-        vocal = self._instrumental_vocal_track
-        # Capture current position so the swap-back lands where the
-        # user was singing (instead of restarting the vocal track).
-        try:
-            current_pos = float(self.player.position if hasattr(self.player, "position") else 0.0)
-        except Exception:
-            current_pos = self._instrumental_swap_position
-        self._instrumental_active = False
-        self._instrumental_vocal_track = None
-        self.lyrics_view.swap_status.setText("")
-        self._instrumental_swap_position = current_pos
-        # Reuse the standard play path; once it loads, _seek_after_load
-        # snaps to the saved position.
-        self._play_track_then_seek(vocal, current_pos)
-
-    def _spawn_instrumental_search(self, vocal_track) -> None:
-        # Cancel any in-flight hunt.
-        old = self._instrumental_swap_thread
-        if old is not None:
-            try:
-                old.quit()
-            except Exception:
-                pass
-        thread = QThread()
-        worker = _InstrumentalSearchWorker(vocal_track)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.done.connect(self._on_instrumental_found)
-        worker.failed.connect(self._on_instrumental_failed)
-        worker.done.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
-        self._instrumental_swap_thread = thread
-        self._instrumental_swap_worker = worker
-        qthreads.retain(thread, worker)
-        thread.start()
-
-    def _on_instrumental_found(self, vocal_track, match) -> None:
-        # Sanity check — did the user toggle off / change tracks while
-        # the search was running?
-        if (vocal_track is None
-                or self._current is None
-                or vocal_track.video_id != self._current.video_id
-                or not self.lyrics_view.mute_btn.isChecked()):
-            return
-        if match is None:
-            self.lyrics_view.mute_btn.setChecked(False)
-            self.lyrics_view.swap_status.setText(theming.styled_case(
-                "no instrumental version found across enabled sources"
-            ))
-            self._instrumental_vocal_track = None
-            return
-        self._instrumental_active = True
-        self.lyrics_view.swap_status.setText(theming.styled_case(
-            f"playing instrumental · source: {match.source_name}"
-        ))
-        # Swap. The instrumental's track carries its own source slug, so
-        # the existing playback router picks the right backend without
-        # any special-casing here.
-        self._play_track_then_seek(match.track, self._instrumental_swap_position)
-
-    def _on_instrumental_failed(self, vocal_track, msg: str) -> None:
-        if vocal_track is None or self._current is None:
-            return
-        if vocal_track.video_id != self._current.video_id:
-            return
-        self.lyrics_view.mute_btn.setChecked(False)
-        self.lyrics_view.swap_status.setText(theming.styled_case(
-            f"instrumental search failed: {msg}"
-        ))
-        self._instrumental_vocal_track = None
-
     def _play_track_then_seek(self, track, seek_secs: float) -> None:
         """Play ``track`` and snap to ``seek_secs`` the moment the
-        stream is live. Used by the karaoke swap so the swap-in / swap-
-        out feel like a crossfade-in-place rather than a track restart.
-        """
+        stream is live (ctx.music.play_at: the instrumental finder's swap
+        feels like a crossfade-in-place rather than a track restart)."""
         self._pending_seek = max(0.0, float(seek_secs or 0.0))
-        # Tell _play_track this is a swap dispatch, not a user pick,
-        # so it doesn't clear the karaoke swap state during the
-        # transition.
-        self._swapping_now = True
-        try:
-            self._play_track(track)
-        finally:
-            self._swapping_now = False
+        self._play_track(track)
         # The seek itself fires in _on_state_changed when state goes to
         # PLAYING — see _maybe_apply_pending_seek.
 

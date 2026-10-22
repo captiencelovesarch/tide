@@ -133,7 +133,7 @@ class ViewTest(unittest.TestCase):
         # mini / fullscreen / visualizer tile hide the tab chrome by name
         view = self.lyrics.LyricsView(SimpleNamespace())
         self.addCleanup(view.deleteLater)
-        for chrome in (view.heading, view.karaoke_check, view.mute_btn, view.swap_status):
+        for chrome in (view.heading, view.karaoke_check, view.plugin_row, view.plugin_status):
             chrome.hide()
         view.show()
         _app.processEvents()

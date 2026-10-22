@@ -438,6 +438,30 @@ class CtxTests(Base):
         if reg.get(before_active) is not None:
             reg.set_active(before_active)
 
+    def test_a_lyrics_toggle_comes_and_goes(self):
+        from tide.sources.base import NullSource
+        from tide.ui.lyrics import LyricsView
+        import shiboken6
+        self.write("mine")
+        h = self.host()
+        h.set_enabled("mine", True)
+        got = []
+        handle = h.record("mine").ctx.ui.add_lyrics_toggle("a toggle", lambda on, t: got.append((on, t.title)))
+        view = LyricsView(NullSource())
+        self.addCleanup(lambda: shiboken6.isValid(view) and shiboken6.delete(view))
+        with __import__("unittest.mock").mock.patch.object(view, "_on_done", lambda *a: None), \
+                __import__("unittest.mock").mock.patch("tide.ui.lyrics.QThread.start", lambda self: None):
+            view.show_for(Track("v1", "a song", "artist"))
+        btns = [b for _e, b in view._plugin_btns]
+        self.assertEqual([b.text().strip("[]").lower() for b in btns], ["a toggle"])
+        self.assertTrue(btns[0].isEnabled())
+        btns[0].click()
+        self.assertEqual(got, [(True, "a song")])
+        handle.set_status("busy")
+        self.assertEqual(view.plugin_status.text().lower(), "busy")
+        h.set_enabled("mine", False)
+        self.assertEqual(view._plugin_btns, [])
+
     def test_track_links(self):
         info = plugin_api.track_info(Track(
             "abc", "t", "a", extras={"artists": [{"name": "a", "id": "UC1"}],

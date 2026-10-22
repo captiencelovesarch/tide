@@ -136,8 +136,8 @@ class FullscreenToggleTest(unittest.TestCase):
         self.assertEqual(fs._pane, "lyrics", "lyrics pane defaults open")
         self.assertTrue(panel.isVisibleTo(fs))
         self.assertFalse(fs.queue_view.isVisibleTo(fs))
-        for chrome in (panel.heading, panel.karaoke_check, panel.mute_btn,
-                       panel.swap_status):
+        for chrome in (panel.heading, panel.karaoke_check, panel.plugin_row,
+                       panel.plugin_status):
             self.assertFalse(chrome.isVisibleTo(panel))
 
     def test_pane_tabs_swap_and_persist(self) -> None:

@@ -204,7 +204,7 @@ class LyricsTile(TileMixin, QWidget):
         if api is not None:
             from .lyrics import LyricsView
             self.view = LyricsView(api, font_scale=1.15)
-            for chrome in ("heading", "karaoke_check", "mute_btn", "swap_status"):
+            for chrome in ("heading", "karaoke_check", "plugin_row", "plugin_status"):
                 w = getattr(self.view, chrome, None)
                 if w is not None:
                     w.hide()

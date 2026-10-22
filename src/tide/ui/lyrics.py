@@ -186,6 +186,45 @@ def type_pt(role: str, font_scale: float = 1.0) -> int:
     return max(1, round(_body_pt() * SIZES[_size][idx] * font_scale))
 
 
+# Toggles plugins put in the lyrics view (ctx.ui.add_lyrics_toggle; the
+# instrumental finder's [mute lyrics]). One shared status line under them.
+class LyricsToggle:
+    """one plugin toggle, shown in every LyricsView that shows its chrome.
+    ``fn(on, track)`` runs on a click with the view's current song."""
+
+    def __init__(self, label: str, fn) -> None:
+        self.label, self.fn = label, fn
+        self.checked = False
+        self.status = ""
+
+    def set_checked(self, on: bool) -> None:
+        self.checked = bool(on)
+        toggles_signal.changed.emit()
+
+    def set_status(self, text: str) -> None:
+        self.status = str(text or "")
+        toggles_signal.changed.emit()
+
+
+class _Toggles(QObject):
+    changed = Signal()
+
+
+PLUGIN_TOGGLES: list[LyricsToggle] = []
+toggles_signal = _Toggles()
+
+
+def add_toggle(entry: LyricsToggle) -> None:
+    PLUGIN_TOGGLES.append(entry)
+    toggles_signal.changed.emit()
+
+
+def remove_toggle(entry: LyricsToggle) -> None:
+    if entry in PLUGIN_TOGGLES:
+        PLUGIN_TOGGLES.remove(entry)
+        toggles_signal.changed.emit()
+
+
 class _LyricsWorker(QObject):
     done = Signal(str, object)        # video_id, LyricsResult | None
     failed = Signal(str, str)
@@ -331,12 +370,6 @@ class _KaraokeWidget(QWidget):
 
 
 class LyricsView(QWidget):
-    # Emitted whenever the user toggles the [mute lyrics] button. The
-    # owning MainWindow searches for an instrumental version of the
-    # given track and drives the swap. `want_instrumental` is True when
-    # the button is now checked (swap to instrumental); False when the
-    # user toggled it off (swap back to vocal).
-    toggle_instrumental_requested = Signal(object, bool)   # track, want_instrumental
     # The tab's [sweep words] checkbox: MainWindow persists it as
     # Settings.lyrics_list_sweep and applies it (set_list_sweep).
     list_sweep_toggled = Signal(bool)
@@ -382,9 +415,9 @@ class LyricsView(QWidget):
         # Heading embeds the remote track title (see show_for); plain-text it.
         self.heading.setTextFormat(Qt.PlainText)
 
-        # Toggles bar — karaoke mode + (v1.2.1 second-half) mute-lyrics
-        # instrumental-swap button. Lives in this view per the spec, NOT
-        # on the main playback control bar.
+        # Toggles bar — karaoke mode, the sweep, then whatever plugins add
+        # (the instrumental finder's [mute lyrics]). Lives in this view per
+        # the spec, NOT on the main playback control bar.
         self.karaoke_check = QCheckBox(theming.styled_case("karaoke mode"))
         self.karaoke_check.toggled.connect(self._on_karaoke_toggled)
         # Word-by-word sweep in the live list (karaoke always sweeps).
@@ -396,23 +429,24 @@ class LyricsView(QWidget):
         self.sweep_check.setToolTip(theming.styled_case(
             "light the line being sung word by word. off lights the whole line."))
         self.sweep_check.toggled.connect(self.list_sweep_toggled.emit)
-        # "mute lyrics" — swap to instrumental version of current track.
-        # Stays disabled until a track is loaded and the instrumental
-        # search infrastructure (P3.5) is wired in.
-        self.mute_btn = QPushButton(theming.styled_case("[mute lyrics]"))
-        self.mute_btn.setCheckable(True)
-        self.mute_btn.setEnabled(False)
-        self.mute_btn.clicked.connect(self._on_mute_lyrics_clicked)
-        self.swap_status = QLabel("")
-        self.swap_status.setProperty("class", "dim")
-        self.swap_status.setWordWrap(True)
+        # plugins' toggles (rebuilt as plugins come and go) and their status
+        self.plugin_row = QWidget()
+        self._plugin_layout = QHBoxLayout(self.plugin_row)
+        self._plugin_layout.setContentsMargins(0, 0, 0, 0)
+        self._plugin_layout.setSpacing(12)
+        self._plugin_btns: list[tuple[LyricsToggle, QPushButton]] = []
+        self.plugin_status = QLabel("")
+        self.plugin_status.setProperty("class", "dim")
+        self.plugin_status.setWordWrap(True)
+        self.plugin_status.setTextFormat(Qt.PlainText)
+        toggles_signal.changed.connect(self._sync_plugin_toggles)
 
         toggles_row = QHBoxLayout()
         toggles_row.setContentsMargins(0, 0, 0, 0)
         toggles_row.setSpacing(12)
         toggles_row.addWidget(self.karaoke_check)
         toggles_row.addWidget(self.sweep_check)
-        toggles_row.addWidget(self.mute_btn)
+        toggles_row.addWidget(self.plugin_row)
         toggles_row.addStretch(1)
 
         # Container we swap between the plain QLabel and the timed line list.
@@ -458,9 +492,44 @@ class LyricsView(QWidget):
         layout.setSpacing(_scale.px(8))
         layout.addWidget(self.heading)
         layout.addLayout(toggles_row)
-        layout.addWidget(self.swap_status)
+        layout.addWidget(self.plugin_status)
         layout.addWidget(self._scroll, stretch=1)
+        self._sync_plugin_toggles()
         self.refresh_type()
+
+    def _sync_plugin_toggles(self) -> None:
+        """match the plugin row to PLUGIN_TOGGLES: buttons, checks, status."""
+        try:
+            have = [e for e, _b in self._plugin_btns]
+        except RuntimeError:
+            return              # the view is going
+        if have != PLUGIN_TOGGLES:
+            for _e, btn in self._plugin_btns:
+                self._plugin_layout.removeWidget(btn)
+                btn.deleteLater()
+            self._plugin_btns = []
+            for entry in PLUGIN_TOGGLES:
+                btn = QPushButton(theming.styled_case(f"[{entry.label}]"))
+                btn.setCheckable(True)
+                btn.clicked.connect(lambda on, e=entry: self._on_plugin_toggle(e, on))
+                self._plugin_layout.addWidget(btn)
+                self._plugin_btns.append((entry, btn))
+        for entry, btn in self._plugin_btns:
+            btn.blockSignals(True)
+            btn.setChecked(entry.checked)
+            btn.blockSignals(False)
+            btn.setEnabled(self._current_track is not None if hasattr(self, "_current_track")
+                           else False)
+        self.plugin_status.setText(theming.styled_case(
+            next((e.status for e in PLUGIN_TOGGLES if e.status), "")))
+
+    def _on_plugin_toggle(self, entry: LyricsToggle, on: bool) -> None:
+        entry.checked = bool(on)
+        from ..plugin_api import track_info
+        try:
+            entry.fn(bool(on), track_info(self._current_track))
+        finally:
+            toggles_signal.changed.emit()
 
     # ---------- public ----------
 
@@ -473,7 +542,7 @@ class LyricsView(QWidget):
             self.heading.set_label("lyrics")
             self._show_plain("── no track ──")
             self._clear_timed()
-            self.mute_btn.setEnabled(False)
+            self._sync_plugin_toggles()
             return
         if self._current_video_id == track.video_id:
             return
@@ -484,10 +553,8 @@ class LyricsView(QWidget):
         self.heading.set_label(f"lyrics · {(track.title or '').lower()}")
         self._show_plain("── loading ──")
         self._clear_timed()
-        # Enable the swap toggle now that there's a real track. The
-        # button stays a no-op until the instrumental searcher wires
-        # in — clicking it surfaces a "not wired yet" status until then.
-        self.mute_btn.setEnabled(True)
+        # plugin toggles work once there's a song
+        self._sync_plugin_toggles()
 
         thread = QThread()
         worker = _LyricsWorker(self.api, track)
@@ -810,20 +877,6 @@ class LyricsView(QWidget):
             self._scroll.setWidget(self._karaoke_widget)
         else:
             self._scroll.setWidget(self._timed_host)
-
-    def _on_mute_lyrics_clicked(self) -> None:
-        # Surfaced by the lyrics view; the actual swap (search for an
-        # instrumental version, cross-fade, preserve position) is
-        # orchestrated by MainWindow because it needs the player +
-        # source registry. We just emit so MainWindow can drive it.
-        want_instrumental = self.mute_btn.isChecked()
-        if want_instrumental:
-            self.swap_status.setText(theming.styled_case(
-                "searching for instrumental version…"
-            ))
-        else:
-            self.swap_status.setText("")
-        self.toggle_instrumental_requested.emit(self._current_track, want_instrumental)
 
     # ---------- theme ----------
 
