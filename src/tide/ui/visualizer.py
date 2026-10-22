@@ -737,6 +737,9 @@ class VisualizerView(QWidget):
         self._ambient_provider = None
         self._fallback_settings = None
         self._audio_source_override: str | None = None
+        # a plugin's tile came or went: lay the grid out again
+        from . import vis_play
+        vis_play.registry_signal.changed.connect(self._on_tiles_changed)
 
         self.engine = VisEngine(self)
         self.engine.set_clock_provider(self._beat_clock)
@@ -842,6 +845,12 @@ class VisualizerView(QWidget):
                              [str(getattr(s, k, "spectrum")) for k in SLOT_KEYS])
         self._reconcile_watch()
 
+    def _on_tiles_changed(self) -> None:
+        try:
+            self.apply_settings(self._settings())
+        except RuntimeError:
+            pass        # the view is going
+
     def _set_setting(self, name: str, value) -> None:
         """the menus' write path: the live Settings, field-scoped save (a
         whole-object save would revert other savers), re-apply."""
@@ -883,14 +892,52 @@ class VisualizerView(QWidget):
             sub = menu.addMenu(theming.styled_case(label))
             self._radio(sub, desc.choices, getattr(s, key), key)
 
+    def _plugin_knob_menu(self, menu: QMenu, entry) -> None:
+        for key in entry.knobs:
+            try:
+                desc = entry.settings.desc(key)
+            except KeyError:
+                continue
+            if not isinstance(desc.choices, tuple):
+                continue
+            sub = menu.addMenu(theming.styled_case(desc.label))
+            group = QActionGroup(sub)
+            group.setExclusive(True)
+            for value, label in desc.choices:
+                a = QAction(theming.styled_case(str(label)), sub, checkable=True)
+                a.setChecked(value == entry.settings[key])
+                a.triggered.connect(lambda _=False, k=key, v=value: self._set_plugin_knob(entry, k, v))
+                group.addAction(a)
+                sub.addAction(a)
+
+    def _set_plugin_knob(self, entry, key: str, value) -> None:
+        entry.set_knob(key, value)
+        for tile in self._grid.tiles:
+            if tile.kind == entry.kind:
+                tile.settings_changed()
+        self.engine.wake()
+
     def _slot_menu(self, menu: QMenu, slot: int) -> None:
         """what slot ``slot`` shows, and that tile's knobs."""
-        from .vis_play import SLOT_KEYS, TILE_KINDS
+        from .vis_play import SLOT_KEYS, plugin_tile, tile_choices
         s = self._settings()
         key = SLOT_KEYS[slot]
         kmenu = menu.addMenu(theming.styled_case("show"))
-        self._radio(kmenu, TILE_KINDS, getattr(s, key), key)
+        self._radio(kmenu, tile_choices(), getattr(s, key), key)
         tile = self._grid.tiles[slot] if slot < len(self._grid.tiles) else None
+        entry = plugin_tile(tile.kind) if tile is not None else None
+        if entry is not None:
+            # a plugin's tile: its knobs are the plugin's settings, and it
+            # may bring actions of its own (the tapper's reset score)
+            if entry.knobs:
+                menu.addSeparator()
+                self._plugin_knob_menu(menu, entry)
+            extra = getattr(tile, "menu_actions", None)
+            for label, fn in (extra() if callable(extra) else ()):
+                a = QAction(theming.styled_case(label), menu)
+                a.triggered.connect(lambda _=False, f=fn: f())
+                menu.addAction(a)
+            return
         knobs = getattr(tile, "KNOBS", ())
         if tile is not None and tile.kind == "deck":
             knobs = ("visualizer_deck_span",)
@@ -901,10 +948,6 @@ class VisualizerView(QWidget):
         if knobs:
             menu.addSeparator()
             self._knob_menu(menu, knobs)
-        if tile is not None and tile.kind == "tapper":
-            a = QAction(theming.styled_case("reset score"), menu)
-            a.triggered.connect(tile.reset)
-            menu.addAction(a)
 
     def _build_style_menu(self) -> QMenu:
         from . import settings_schema

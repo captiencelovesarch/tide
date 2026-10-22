@@ -1055,6 +1055,27 @@ class _Ui:
         ctx.adopt(action)
         return _TrayAction(action)
 
+    def add_visualizer_tile(self, kind: str, label: str, factory: Callable,
+                            knobs: tuple[str, ...] = ()) -> None:
+        """a tile each visualizer slot can show. ``factory(engine)`` builds
+        one (subclass tide.plugin_vis.PlayTile); ``knobs`` are this plugin's
+        choice settings that the tile's menu offers. it goes when the
+        plugin stops; a slot showing it keeps the pick for next time."""
+        from .ui import vis_play
+        ctx = self._ctx
+        if not kind or kind in vis_play.KIND_LABELS:
+            raise ValueError(f"tide already has a tile called {kind!r}")
+        for key in knobs:
+            ctx.settings.desc(key)          # KeyError for an undeclared knob
+
+        def set_knob(key, value) -> None:
+            if ctx.alive and ctx.settings.set(key, value):
+                ctx._host.apply_settings(ctx.slug, {key})
+
+        vis_play.register_tile(vis_play.PluginTile(kind, label, factory, knobs,
+                                                   ctx.settings, set_knob))
+        ctx.on_stop(lambda: vis_play.unregister_tile(kind))
+
     def toast(self, text: str, action_label: str | None = None,
               on_action: Callable | None = None) -> None:
         win = self._h.window

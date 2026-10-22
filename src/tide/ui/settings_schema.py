@@ -152,8 +152,8 @@ def visualizer_layout_choices() -> tuple[tuple[str, str], ...]:
 
 
 def visualizer_tile_choices() -> tuple[tuple[str, str], ...]:
-    from .vis_play import TILE_KINDS
-    return TILE_KINDS
+    from .vis_play import tile_choices
+    return tile_choices()
 
 
 def visualizer_classic_choices() -> tuple[tuple[str, str], ...]:
@@ -680,57 +680,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices=((60, "60 fps"), (30, "30 fps (lighter)")),
         live="apply_visualizer_setting", advanced=True,
         tooltip='repaint rate while the visualizer is on screen. 60 drops to 30 by itself while frames are expensive (a huge window); either way it stops repainting when paused.',
-    ),
-    OptionDesc(
-        key="visualizer_river_view", label="river · shows", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("near", "the next 16 seconds"), ("far", "the next 48 seconds"), ("whole", "the whole song")),
-        live="apply_visualizer_setting",
-        tooltip="how much of the song's loudness the river shows around the playhead.",
-    ),
-    OptionDesc(
-        key="visualizer_spectrogram_history", label="spectrogram · history", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=((6, "6 seconds"), (12, "12 seconds"), (24, "24 seconds")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_spectrogram_contrast", label="spectrogram · contrast", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("soft", "soft"), ("normal", "normal"), ("punchy", "punchy")),
-        live="apply_visualizer_setting",
-        tooltip="punchy lifts quiet detail; soft keeps only what's loud.",
-    ),
-    OptionDesc(
-        key="visualizer_halo_spokes", label="halo · spokes", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=((48, "48"), (96, "96"), (144, "144")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_halo_punch", label="halo · cover on the kick", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("off", "still"), ("gentle", "gentle"), ("hard", "hard")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_tapper_target", label="tapper · tap on", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("beats", "every beat"), ("downbeats", "downbeats"), ("kicks", "kicks")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_tapper_window", label="tapper · timing window", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("tight", "tight"), ("normal", "normal"), ("loose", "loose")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_tapper_offset", label="tapper · your latency", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=((-60, "-60 ms"), (-30, "-30 ms"), (0, "0 ms"), (30, "+30 ms"), (60, "+60 ms")),
-        live="apply_visualizer_setting",
-        tooltip="if the tapper says you're always late (bluetooth, a slow screen), move this toward what it suggests.",
     ),
 
     # ---- playback · instant play ----

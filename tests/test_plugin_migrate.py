@@ -108,6 +108,24 @@ local = true
 ''')
         self.assertEqual(self.collect(), ["local-files"])
 
+    def test_a_tile_you_could_see(self):
+        self.settings.write_text('''
+visualizer_layout = "split"
+visualizer_tile_1 = "spectrum"
+visualizer_tile_2 = "tapper"
+visualizer_tapper_offset = 30
+''')
+        self.assertEqual(self.collect(), ["vis-tiles"])
+        self.assertEqual(self.plugin_settings("vis-tiles"), {"tapper_offset": 30})
+
+    def test_a_tile_off_screen_isnt_a_pick(self):
+        # tide 2.3's default fourth slot was the halo; a stack never shows it
+        self.settings.write_text('''
+visualizer_layout = "stack"
+visualizer_tile_4 = "halo"
+''')
+        self.assertEqual(self.collect(), [])
+
     def test_toasts(self):
         self.assertEqual(plugin_migrate.toast_for("discord", True, "discord presence"),
                          "discord presence is a plugin now. we installed it for you.")

@@ -40,6 +40,19 @@ def _on_with(flag: str, value: str) -> Callable[[dict], bool]:
     return lambda raw: raw.get(flag) is True and bool(str(raw.get(value, "") or "").strip())
 
 
+_SLOTS_SHOWN = {"single": 1, "split": 2, "stack": 2, "trio": 3, "quad": 4}
+
+
+def _tile_shown(*kinds: str) -> Callable[[dict], bool]:
+    """one of ``kinds`` in a visualizer slot the layout actually shows
+    (a quad's fourth tile is no pick when the layout is a stack)."""
+    def used(raw: dict) -> bool:
+        layout = raw.get("visualizer_layout", "stack")
+        shown = _SLOTS_SHOWN.get(layout if isinstance(layout, str) else "", 2)
+        return any(raw.get(f"visualizer_tile_{i}") in kinds for i in range(1, shown + 1))
+    return used
+
+
 def _source_on(*slugs: str, needs: str = "") -> Callable[[dict], bool]:
     """one of ``slugs`` switched on in the source panel and, with
     ``needs``, that setting filled in (or the source was the active one:
@@ -69,6 +82,17 @@ MOVED: tuple[Moved, ...] = (
         "discord_hide_local": "hide_local",
     }),
     Moved("extra-sources", "extra sources", _source_on("soundcloud", "bandcamp", "mixcloud"), {}),
+    Moved("vis-tiles", "more visualizer tiles",
+          _tile_shown("river", "spectrogram", "halo", "tapper"), {
+              "visualizer_river_view": "river_view",
+              "visualizer_spectrogram_history": "spectrogram_history",
+              "visualizer_spectrogram_contrast": "spectrogram_contrast",
+              "visualizer_halo_spokes": "halo_spokes",
+              "visualizer_halo_punch": "halo_punch",
+              "visualizer_tapper_target": "tapper_target",
+              "visualizer_tapper_window": "tapper_window",
+              "visualizer_tapper_offset": "tapper_offset",
+          }),
     Moved("local-files", "local files", _source_on("local", needs="local_music_dir"), {
         "local_music_dir": "folder",
         "local_auto_index": "watch",

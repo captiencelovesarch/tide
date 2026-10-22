@@ -56,12 +56,14 @@ class Settings:
     # ---- the visualizer tab (2.3 remaster, ui/vis_deck.py + vis_play.py) ----
     # Tile layout: "single" | "split" | "stack" | "trio" | "quad".
     visualizer_layout: str = "stack"
-    # What each slot shows (vis_play.TILE_KINDS), in layout order; slots
+    # What each slot shows (vis_play.tile_kinds(): a plugin's tile too), in
+    # layout order; slots
     # past the layout's count are kept for when it grows back.
     visualizer_tile_1: str = "spectrum"
     visualizer_tile_2: str = "deck"
     visualizer_tile_3: str = "lyrics"
-    visualizer_tile_4: str = "halo"
+    # (tide 2.3's default fourth tile was the halo, a store tile since 3.0)
+    visualizer_tile_4: str = "scope"
     # What a "classic renderer" tile draws: "theme" (the theme's own pick)
     # or one of the pre-2.3 renderer slugs.
     visualizer_classic: str = "theme"
@@ -82,15 +84,6 @@ class Settings:
     visualizer_fps: int = 60
     # Title · artist over the first spectrum / mirror / scope tile.
     visualizer_caption: bool = True
-    # Interactive tile knobs (vis_play.py).
-    visualizer_river_view: str = "near"         # "near" (16 s) | "far" (48 s) | "whole" song
-    visualizer_spectrogram_history: int = 12    # seconds shown: 6 | 12 | 24
-    visualizer_spectrogram_contrast: str = "normal"  # "soft" | "normal" | "punchy"
-    visualizer_halo_spokes: int = 96            # 48 | 96 | 144
-    visualizer_halo_punch: str = "gentle"       # cover kick: "off" | "gentle" | "hard"
-    visualizer_tapper_target: str = "beats"     # "beats" | "downbeats" | "kicks"
-    visualizer_tapper_window: str = "normal"    # "tight" | "normal" | "loose"
-    visualizer_tapper_offset: int = 0           # ms your taps are judged earlier by
     layout: str = "classic"
     layout_overrides: dict = field(default_factory=dict)
     adaptive_accent: bool = False
