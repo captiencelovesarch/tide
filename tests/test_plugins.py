@@ -462,6 +462,14 @@ class CtxTests(Base):
         h.set_enabled("mine", False)
         self.assertEqual(view._plugin_btns, [])
 
+    def test_no_plugins_run_starts_nothing(self):
+        self.write("mine")
+        h = self.host()
+        h.paused_run = True
+        self.assertFalse(h.set_enabled("mine", True))
+        self.assertEqual(h.record("mine").status, "off for this run (tide --no-plugins)")
+        self.assertEqual(self.events, [])
+
     def test_track_links(self):
         info = plugin_api.track_info(Track(
             "abc", "t", "a", extras={"artists": [{"name": "a", "id": "UC1"}],

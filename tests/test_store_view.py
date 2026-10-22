@@ -160,6 +160,17 @@ class ControllerTests(ViewBase):
         self.assertEqual(c.state("mine"), ("yours", "turn off"))
         self.assertEqual(self.events, [("start", "mine", "1.0.0", "hi")])
 
+    def test_your_copy_with_the_stores_slug_says_so(self):
+        import io
+        import zipfile
+        self.publish(self.plugin_zip())
+        with zipfile.ZipFile(io.BytesIO(self.plugin_zip())) as zf:
+            zf.extractall(self.user / "demo")
+        c = self.ctl()
+        self.fetched(c)
+        self.assertEqual(c.state("demo")[0], "yours")
+        self.assertIn("your own copy", c.status("demo"))
+
     def test_cant_install_says_why(self):
         self.publish(self.plugin_zip(), min_tide="99.0.0")
         c = self.ctl()

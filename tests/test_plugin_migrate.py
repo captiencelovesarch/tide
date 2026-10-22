@@ -134,6 +134,12 @@ visualizer_tile_4 = "halo"
         self.settings.write_text("[keymap]\nplay_pause = \"Ctrl+P\"\n")
         self.assertEqual(self.collect(), ["powertools"])
 
+    def test_what_a_song_from_a_moved_source_needs(self):
+        self.assertEqual(plugin_migrate.missing_source_line("local"),
+                         "that song needs the local files plugin. it's in the store")
+        self.assertEqual(plugin_migrate.missing_source_line("napster"),
+                         "nothing here plays napster songs")
+
     def test_toasts(self):
         self.assertEqual(plugin_migrate.toast_for("discord", True, "discord presence"),
                          "discord presence is a plugin now. we installed it for you.")

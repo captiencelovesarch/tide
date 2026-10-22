@@ -847,6 +847,7 @@ def run(argv: list[str] | None = None) -> int:
     plugins.notice.connect(lambda text: show_toast(window.toast_host(), text))
     plugins.install_hooks()
     window._plugins = plugins
+    plugins.paused_run = bool(args.no_plugins)
     if not args.no_plugins:
         plugins.start_enabled()
     window.attach_store(plugins)

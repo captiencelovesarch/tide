@@ -1406,6 +1406,9 @@ class PluginHost(QObject):
         self._logged: set[str] = set()
         self._too_many.connect(self._switch_off_for_errors)
         self._vendor_paths: dict[str, str] = {}
+        # tide --no-plugins: nothing starts this run, not even a fresh
+        # install (it starts next launch)
+        self.paused_run = False
         found = discover(roots)
         self.broken = found.broken
         self._records: dict[str, PluginRecord] = {}
@@ -1714,6 +1717,10 @@ class PluginHost(QObject):
 
     def _start(self, rec: PluginRecord) -> bool:
         m = rec.manifest
+        if self.paused_run:
+            rec.status = "off for this run (tide --no-plugins)"
+            self.changed.emit(m.slug)
+            return False
         why = rec.blocked()
         if why:
             rec.status = why

@@ -300,6 +300,10 @@ class StoreController(QObject):
         rec = self.host.record(slug)
         if rec is None:
             return ""
+        if rec.manifest.origin == "yours" and self.entry(slug) is not None:
+            # a folder of yours with the store's slug wins over the store's
+            return (f"your own copy in {rec.manifest.path} is the one tide uses; "
+                    "remove it to get the store's")
         if rec.running:
             return rec.detail or "on"
         return rec.blocked() or (rec.status if rec.status != "on" else "off")
@@ -952,6 +956,9 @@ class _GridPage(QWidget):
             self.line.setText(f"{ctl.offline}. your plugins still work.")
         else:
             self.line.setText("")
+        if getattr(ctl.host, "paused_run", False):
+            self.line.setText("plugins are off for this run (tide --no-plugins). "
+                              "what you install starts next launch.")
         self.line.setVisible(bool(self.line.text()))
         pick = ctl.featured()
         show_pick = pick is not None and self.filter == "all" and not self.search.text().strip()

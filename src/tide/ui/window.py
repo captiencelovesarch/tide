@@ -179,7 +179,8 @@ class _ResolveWorker(QObject):
         try:
             source = source_registry().get(self.track.source or "ytmusic")
             if source is None:
-                raise RuntimeError(f"no source registered for {self.track.source!r}")
+                from .. import plugin_migrate
+                raise RuntimeError(plugin_migrate.missing_source_line(self.track.source or ""))
             ref = source.resolve_stream(self.track)
             self.resolved.emit(self.video_id, ref)
         except Exception as exc:
@@ -5442,41 +5443,70 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"restored session · paused at {_mmss(snapshot.position_seconds)}")
             self._fetch_art(current)
 
+            # A song from a plugin's source (soundcloud, local files) can't
+            # resolve yet: plugins start after the window. Wait for the
+            # source to show up, then load it; if it never does, say why.
+            if source_registry().get(current.source or "ytmusic") is None:
+                self._restore_when_source_arrives(snapshot)
+                return
             # Resolve + load, then seek + pause. Failures fall back to "just loaded".
-            thread = QThread()
-            worker = _ResolveWorker(current)
-            worker.moveToThread(thread)
-            saved_pos = snapshot.position_seconds
-
-            def _on_resolved(video_id: str, ref: object) -> None:
-                if not self._current or self._current.video_id != video_id:
-                    return
-                if isinstance(ref, StreamRef):
-                    self.player.load_ref(ref)
-                else:
-                    self.player.load_url(str(ref))
-                self._refresh_speed_support()
-                self.player.pause()
-                if saved_pos > 1.0:
-                    QTimer.singleShot(300, lambda: self.player.seek(saved_pos))
-                self.play_btn.setEnabled(True)
-                self._refresh_nav_buttons()
-
-            def _on_failed(_vid: str, msg: str) -> None:
-                self.statusBar().showMessage(f"couldn't restore stream: {msg}")
-
-            thread.started.connect(worker.run)
-            worker.resolved.connect(_on_resolved)
-            worker.failed.connect(_on_failed)
-            worker.resolved.connect(thread.quit)
-            worker.failed.connect(thread.quit)
-            thread.finished.connect(thread.deleteLater)
-            self._resolve_thread = thread
-            self._resolve_worker = worker
-            qthreads.retain(thread, worker)
-            thread.start()
+            self._load_restored(snapshot)
         finally:
             self._restoring_session = False
+
+    def _restore_when_source_arrives(self, snapshot) -> None:
+        reg = source_registry()
+        slug = self._current.source if self._current is not None else ""
+
+        def arrived() -> None:
+            if reg.get(slug) is None:
+                return
+            try:
+                reg.listing_changed.disconnect(arrived)
+            except (RuntimeError, TypeError):
+                pass
+            # still the song you left on, not one you picked since
+            if self._current is not None and self._current.source == slug \
+                    and self.player.state != PlayState.PLAYING:
+                self._load_restored(snapshot)
+
+        reg.listing_changed.connect(arrived)
+        from .. import plugin_migrate
+        self.statusBar().showMessage(plugin_migrate.missing_source_line(slug or ""))
+
+    def _load_restored(self, snapshot) -> None:
+        current = self._current
+        thread = QThread()
+        worker = _ResolveWorker(current)
+        worker.moveToThread(thread)
+        saved_pos = snapshot.position_seconds
+
+        def _on_resolved(video_id: str, ref: object) -> None:
+            if not self._current or self._current.video_id != video_id:
+                return
+            if isinstance(ref, StreamRef):
+                self.player.load_ref(ref)
+            else:
+                self.player.load_url(str(ref))
+            self._refresh_speed_support()
+            self.player.pause()
+            if saved_pos > 1.0:
+                QTimer.singleShot(300, lambda: self.player.seek(saved_pos))
+            self.play_btn.setEnabled(True)
+            self._refresh_nav_buttons()
+            self.statusBar().showMessage(f"restored session · paused at {_mmss(saved_pos)}")
+
+        thread.started.connect(worker.run)
+        worker.resolved.connect(_on_resolved)
+        worker.failed.connect(lambda _v, msg: self.statusBar().showMessage(
+            f"couldn't restore stream: {msg}"))
+        worker.resolved.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        self._resolve_thread = thread
+        self._resolve_worker = worker
+        qthreads.retain(thread, worker)
+        thread.start()
 
     # ---------- lifecycle ----------
 

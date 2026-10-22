@@ -221,6 +221,15 @@ def finished(slug: str, pending_file: Path | None = None) -> None:
         _write_pending(pending_file, p)
 
 
+def missing_source_line(source: str) -> str:
+    """what to say when a song's source isn't here: which plugin plays it."""
+    plugin = SOURCE_PLUGINS.get(source)
+    m = _BY_SLUG.get(plugin or "")
+    if m is None:
+        return f"nothing here plays {source} songs"
+    return f"that song needs the {m.name} plugin. it's in the store"
+
+
 def toast_for(slug: str, moved: bool, name: str) -> str:
     if moved and slug in _BY_SLUG:
         return f"{_BY_SLUG[slug].name} is a plugin now. we installed it for you."
