@@ -33,6 +33,8 @@ from typing import Iterable
 
 from yt_dlp.cookies import extract_cookies_from_browser
 
+from . import config
+
 
 class ImportError_(RuntimeError):
     pass
@@ -382,3 +384,192 @@ def import_cookies(profile: BrowserProfile) -> ImportResult:
             "again, or sign in with firefox and import from there."
         )
     raise ImportError_(f"couldn't read cookies from {profile.label}: {last_error}")
+
+
+# ---------- sign-in window ----------
+#
+# On Windows the cookie files are a dead end: Chrome, Edge and Opera hold
+# them locked while they run (often in the background with no window), and
+# Chrome encrypts them so only Chrome itself can read them. So tide opens
+# the user's own browser on a fresh profile of its own, with the DevTools
+# port on, and lets them sign in there like anywhere else. The browser
+# hands over its cookies already decrypted through DevTools, and the
+# window closes itself once YouTube Music is signed in.
+
+SIGNIN_URL = "https://music.youtube.com/"
+SIGNIN_DIR = config.DATA_DIR / "signin-browser"
+
+
+@dataclass(frozen=True)
+class SignInBrowser:
+    label: str
+    exe: Path
+
+
+def _app_path(exe_name: str) -> list[Path]:
+    """What Windows itself has registered for ``exe_name`` (App Paths)."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    out = []
+    key = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}"
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                out.append(Path(winreg.QueryValue(k, None).strip('"')))
+        except OSError:
+            pass
+    return out
+
+
+def signin_browsers() -> list[SignInBrowser]:
+    """Browsers that can host the sign-in window, best first. Edge comes
+    with every Windows install, so there's nearly always one."""
+    if sys.platform != "win32":
+        return []
+    env = os.environ
+    roots = [env.get(v) for v in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")]
+    roots = [Path(r) for r in roots if r]
+    known = (
+        ("microsoft edge", "msedge.exe", "Microsoft/Edge/Application"),
+        ("google chrome", "chrome.exe", "Google/Chrome/Application"),
+        ("brave", "brave.exe", "BraveSoftware/Brave-Browser/Application"),
+    )
+    out = []
+    for label, exe_name, rel in known:
+        for path in _app_path(exe_name) + [r / rel / exe_name for r in roots]:
+            if path.is_file():
+                out.append(SignInBrowser(label, path))
+                break
+    return out
+
+
+def _ws_call(port: int, path: str, method: str) -> dict:
+    """One DevTools command over a bare-bones websocket, enough for a
+    local, unencrypted, single request and reply."""
+    import base64
+    import json
+    import socket
+    import struct
+
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((
+            f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ).encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("devtools closed the connection")
+            buf += chunk
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise ConnectionError("devtools refused the connection")
+
+        payload = json.dumps({"id": 1, "method": method}).encode()
+        mask = os.urandom(4)
+        n = len(payload)
+        if n < 126:
+            header = struct.pack("!BB", 0x81, 0x80 | n)
+        elif n < 65536:
+            header = struct.pack("!BBH", 0x81, 0x80 | 126, n)
+        else:
+            header = struct.pack("!BBQ", 0x81, 0x80 | 127, n)
+        sock.sendall(header + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+        def take(count: int) -> bytes:
+            nonlocal buf
+            while len(buf) < count:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise ConnectionError("devtools closed the connection")
+                buf += chunk
+            out, buf = buf[:count], buf[count:]
+            return out
+
+        message = b""
+        while True:
+            b1, b2 = take(2)
+            length = b2 & 0x7F
+            if length == 126:
+                (length,) = struct.unpack("!H", take(2))
+            elif length == 127:
+                (length,) = struct.unpack("!Q", take(8))
+            data = take(length)
+            opcode = b1 & 0x0F
+            if opcode == 8:
+                raise ConnectionError("devtools closed the connection")
+            if opcode in (0, 1):
+                message += data
+                if b1 & 0x80:
+                    reply = json.loads(message)
+                    if reply.get("id") == 1:
+                        return reply
+                    message = b""
+    finally:
+        sock.close()
+
+
+class _DevtoolsCookie:
+    def __init__(self, raw: dict) -> None:
+        self.name = raw.get("name", "")
+        self.value = raw.get("value", "")
+        self.domain = raw.get("domain", "")
+        expires = raw.get("expires") or 0
+        # DevTools: unix seconds, -1 for a session cookie
+        self.expires = expires if expires > 0 else None
+
+
+def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
+                        timeout_s: float = 900) -> ImportResult:
+    """Open ``browser`` on tide's own profile at YouTube Music and wait for
+    the user to sign in there. Blocking; call it off the GUI thread.
+    Raises ImportError_ if the window is closed first or it times out."""
+    import subprocess
+    import time
+
+    SIGNIN_DIR.mkdir(parents=True, exist_ok=True)
+    port_file = SIGNIN_DIR / "DevToolsActivePort"
+    port_file.unlink(missing_ok=True)
+    proc = subprocess.Popen([
+        str(browser.exe),
+        f"--user-data-dir={SIGNIN_DIR}",
+        "--remote-debugging-port=0",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--new-window",
+        SIGNIN_URL,
+    ])
+    profile = BrowserProfile(slug="window", label=browser.label,
+                             cookies_path=SIGNIN_DIR, family="window")
+    deadline = time.monotonic() + timeout_s
+    port, path = 0, ""
+    while time.monotonic() < deadline and not should_stop():
+        time.sleep(1.5)
+        if not port:
+            try:
+                lines = port_file.read_text().split()
+                port, path = int(lines[0]), lines[1]
+            except (OSError, ValueError, IndexError):
+                if proc.poll() is not None and not port_file.exists():
+                    raise ImportError_(f"{browser.label} closed before you signed in.")
+                continue
+        try:
+            reply = _ws_call(port, path, "Storage.getCookies")
+        except OSError:
+            # the browser is gone: the user closed the window
+            raise ImportError_(f"the {browser.label} window closed before you signed in.")
+        jar = [_DevtoolsCookie(c) for c in reply.get("result", {}).get("cookies", [])]
+        result = _result_from_jar(profile, jar)
+        if result.looks_signed_in:
+            try:
+                _ws_call(port, path, "Browser.close")
+            except OSError:
+                pass
+            return result
+    raise ImportError_("stopped waiting for the sign-in.")

@@ -53,6 +53,23 @@ class _ImportWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class _WindowWorker(QObject):
+    """Opens the sign-in window and waits for the user to sign in there."""
+    done = Signal(object)   # ImportResult
+    failed = Signal(str)
+
+    def __init__(self, browser: bi.SignInBrowser) -> None:
+        super().__init__()
+        self.browser = browser
+        self.stop = False
+
+    def run(self) -> None:
+        try:
+            self.done.emit(bi.sign_in_with_window(self.browser, lambda: self.stop))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class _RefreshWorker(QObject):
     """Silent re-import: no dialog, no browser round-trip, no user steps."""
     done = Signal(str)      # profile label, or "" when no live session found
@@ -140,6 +157,8 @@ class SignInDialog(QDialog):
         self._import_worker: _ImportWorker | None = None
 
         self._profiles = bi.available_profiles()
+        self._window_browsers = bi.signin_browsers()
+        self._window_worker: _WindowWorker | None = None
 
         self._headline = QLabel(
             "sign in to youtube music in your browser, then come back and click import."
@@ -184,6 +203,12 @@ class SignInDialog(QDialog):
         self._cancel = QPushButton("cancel")
         self._cancel.clicked.connect(self.reject)
 
+        # Windows: the browsers there won't share their cookie files, so the
+        # easy way is a sign-in window tide opens itself (see browser_import).
+        self._window_btn = QPushButton("sign in")
+        self._window_btn.setDefault(True)
+        self._window_btn.clicked.connect(self._on_window)
+
         row1 = QHBoxLayout()
         row1.addWidget(self._step1, stretch=1)
         row1.addWidget(self._open_btn)
@@ -204,8 +229,26 @@ class SignInDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 22, 22, 16)
         layout.setSpacing(14)
-        layout.addWidget(self._headline)
-        layout.addSpacing(4)
+        if self._window_browsers:
+            browser = self._window_browsers[0].label
+            self._headline.setText(
+                f"click sign in. a {browser} window opens on youtube music. "
+                "sign in there and tide takes it from there; the window closes "
+                "by itself."
+            )
+            row0 = QHBoxLayout()
+            row0.addStretch(1)
+            row0.addWidget(self._window_btn)
+            layout.addWidget(self._headline)
+            layout.addLayout(row0)
+            other = QLabel("or import from a browser you're already signed in to:")
+            other.setStyleSheet("color: palette(mid);")
+            layout.addSpacing(8)
+            layout.addWidget(other)
+        else:
+            self._window_btn.hide()
+            layout.addWidget(self._headline)
+            layout.addSpacing(4)
         layout.addLayout(row1)
         layout.addLayout(row2)
         layout.addLayout(row3)
@@ -214,7 +257,7 @@ class SignInDialog(QDialog):
         layout.addStretch(1)
         layout.addLayout(bottom)
 
-        if not self._profiles:
+        if not self._profiles and not self._window_browsers:
             self._status.setText(
                 "no supported browser profile found. sign in to music.youtube.com "
                 "in chromium, chrome, brave, vivaldi, edge, opera or firefox, "
@@ -247,6 +290,38 @@ class SignInDialog(QDialog):
         self._import_thread = thread
         self._import_worker = worker
         thread.start()
+
+    def _on_window(self) -> None:
+        browser = self._window_browsers[0]
+        self._window_btn.setEnabled(False)
+        self._import_btn.setEnabled(False)
+        self._status.setText(
+            f"opening {browser.label}… sign in to youtube music there. "
+            "tide notices by itself."
+        )
+        thread = QThread()   # unparented: must be able to outlive the dialog
+        worker = _WindowWorker(browser)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_done)
+        worker.failed.connect(self._on_window_failed)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        qthreads.retain(thread, worker)
+        self._window_worker = worker
+        thread.start()
+
+    def _on_window_failed(self, msg: str) -> None:
+        self._status.setText(f"{msg} click sign in to try again.")
+        self._window_btn.setEnabled(True)
+        self._import_btn.setEnabled(bool(self._profiles))
+
+    def done(self, code: int) -> None:
+        # cancel (or any close) stops the wait; the window is the user's to close
+        if self._window_worker is not None:
+            self._window_worker.stop = True
+        super().done(code)
 
     def _on_done(self, result: bi.ImportResult) -> None:
         if not result.looks_signed_in:
