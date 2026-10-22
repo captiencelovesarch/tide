@@ -21,7 +21,7 @@ from PySide6.QtCore import QByteArray, QObject, QRectF, QSize, Qt, QThread, QTim
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QMovie, QPainter, QPainterPath, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
+    QBoxLayout, QCheckBox, QComboBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar,
     QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -612,6 +612,34 @@ class Banner(QWidget):
 # the button every plugin has
 # ---------------------------------------------------------------------------
 
+class InstalledMark(QWidget):
+    """a drawn check and "installed": the ✓ character isn't in every
+    font, and a fallback glyph read as a square root sign."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        from . import icon_sets
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.icon = QLabel()
+        svg = icon_sets.svg_for("check")
+        ink = _ink("accent", "#d4b95e")
+        if svg:
+            renderer = QSvgRenderer(QByteArray(svg.replace("currentColor", ink.name()).encode()))
+            pix = QPixmap(16, 16)
+            pix.fill(Qt.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.Antialiasing)
+            renderer.render(p)
+            p.end()
+            self.icon.setPixmap(pix)
+        self.text = _dim(theming.styled_case("installed"))
+        row.addWidget(self.icon)
+        row.addWidget(self.text)
+        row.addStretch(1)
+
+
 class PluginButton(QWidget):
     """install / installing (a bar) / ✓ installed / uninstall / update /
     the reason it can't. ``compact`` is the card's: an installed plugin
@@ -628,7 +656,7 @@ class PluginButton(QWidget):
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(6)
         self.bar.hide()
-        self.mark = _dim("✓ installed")
+        self.mark = InstalledMark()
         self.mark.hide()
         self.why = _dim()
         self.why.hide()
@@ -701,7 +729,10 @@ class StoreCard(QFrame):
         if note:
             self.author.setText(self.author.text() + f" · {note}")
         self.blurb = _dim(blurb)
-        self.blurb.setMaximumHeight(self.blurb.fontMetrics().lineSpacing() * 2 + 2)
+        # always three lines tall (a mono font needs the third), so the
+        # buttons in a row line up
+        self.blurb.setFixedHeight(self.blurb.fontMetrics().lineSpacing() * 3 + 2)
+        self.blurb.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.button = PluginButton(ctl, slug, compact=True)
         col = QVBoxLayout(self)
         col.setContentsMargins(0, 0, 0, 6)
@@ -740,23 +771,43 @@ class FeaturedTile(QFrame):
         self.slug = ""
         self.setCursor(Qt.PointingHandCursor)
         self.banner = Banner(ctl, autoplay=True)
-        self.label = _dim()
+        # "plugin of the week" / "new", as a small accent tag
+        self.label = QLabel()
+        self.label.setObjectName("storeFeaturedTag")
+        self.label.setTextFormat(Qt.PlainText)
+        self.label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.name = Heading("", 40)
-        self.note = _dim()
+        self.author = _dim()
+        self.note = QLabel()
+        self.note.setWordWrap(True)
+        self.note.setTextFormat(Qt.PlainText)
         self.button_slot = QHBoxLayout()
         self.button: PluginButton | None = None
         text = QVBoxLayout()
-        text.setSpacing(6)
+        text.setSpacing(8)
+        text.addStretch(1)
         text.addWidget(self.label)
         text.addWidget(self.name)
+        text.addWidget(self.author)
         text.addWidget(self.note)
+        text.addSpacing(4)
         text.addLayout(self.button_slot)
         text.addStretch(1)
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(16)
-        row.addWidget(self.banner, 3)
-        row.addLayout(text, 2)
+        row.setSpacing(24)
+        row.addWidget(self.banner, 0, Qt.AlignVCenter)
+        row.addLayout(text, 1)
+        theming.manager().theme_changed.connect(self._style_tag)
+        self._style_tag()
+
+    def _style_tag(self, *_args) -> None:
+        accent = _ink("accent", "#d4b95e").name()
+        modern = getattr(theming.manager().current_effective(), "aesthetic", "") == "modern"
+        radius = 9 if modern else 0
+        self.label.setStyleSheet(
+            f"#storeFeaturedTag {{ color: {accent}; border: 1px solid {accent}; "
+            f"border-radius: {radius}px; padding: 1px 8px; }}")
 
     def show_pick(self, pick) -> None:
         if pick is None:
@@ -764,8 +815,10 @@ class FeaturedTile(QFrame):
             return
         entry, label, note = pick
         self.slug = entry.slug
-        self.label.setText(label)
+        self.label.setText(theming.styled_case(label))
         self.name.set_label(entry.name)
+        who = entry.author or "someone"
+        self.author.setText(f"{who} · official" if entry.official else who)
         self.note.setText(note)
         self.banner.set_art(entry.name, entry.banner_full or entry.banner, entry.banner_motion,
                             entry.icon)
@@ -778,7 +831,9 @@ class FeaturedTile(QFrame):
         self.show()
 
     def resizeEvent(self, ev) -> None:  # noqa: N802
-        self.banner.set_width(max(160, int(self.width() * 0.6)))
+        # half the row, and never taller than 360 px of a wide window
+        w = max(160, int(self.width() * 0.55))
+        self.banner.set_width(min(w, 640))
         super().resizeEvent(ev)
 
     def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
@@ -818,7 +873,8 @@ class _GridPage(QWidget):
         self.line = _dim()
         self.featured = FeaturedTile(ctl)
         self.featured.opened.connect(self.opened)
-        self.grid = ResponsiveGrid(min_tile=220, max_tile=340, gap=16, row_gap=22)
+        # cards grow to fill a row (ten plugins fill rows of four at 1700 px)
+        self.grid = ResponsiveGrid(min_tile=240, max_tile=460, gap=16, row_gap=22)
         self.empty = _dim()
         self.broken_head = Heading("couldn't read", 34)
         self.broken = _dim()
@@ -1142,6 +1198,9 @@ class Previews(QWidget):
 class PluginPage(QWidget):
     back = Signal()
 
+    INFO_MAX = 620          # a readable line, however wide the window
+    SIDE_BY_SIDE = 1150     # from this width, pictures left and facts right
+
     def __init__(self, ctl: StoreController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._ctl = ctl
@@ -1185,20 +1244,37 @@ class PluginPage(QWidget):
         top.addStretch(1)
         top.addWidget(self.repo_btn)
         col.addLayout(top)
-        col.addWidget(self.banner)
-        col.addWidget(self.previews)
-        col.addWidget(self.name)
-        col.addWidget(self.author)
-        col.addWidget(self.blurb)
-        col.addWidget(self.about)
-        col.addWidget(self.needs_head)
-        col.addLayout(self.needs)
-        col.addWidget(self.can)
-        col.addWidget(self.facts)
-        col.addLayout(self.button_row)
-        col.addWidget(self.status)
-        col.addWidget(self.settings_head)
-        col.addLayout(self.settings_slot)
+        # pictures and the facts side by side on a wide window, stacked on
+        # a narrow one (resizeEvent flips it)
+        self._split = QBoxLayout(QBoxLayout.TopToBottom)
+        self._split.setSpacing(24)
+        pics = QVBoxLayout()
+        pics.setSpacing(10)
+        pics.addWidget(self.banner, 0, Qt.AlignLeft)
+        pics.addWidget(self.previews, 0, Qt.AlignLeft)
+        pics.addStretch(1)
+        self.info = QWidget()
+        self.info.setMaximumWidth(self.INFO_MAX)
+        info = QVBoxLayout(self.info)
+        info.setContentsMargins(0, 0, 0, 0)
+        info.setSpacing(10)
+        info.addWidget(self.name)
+        info.addWidget(self.author)
+        info.addWidget(self.blurb)
+        info.addWidget(self.about)
+        info.addWidget(self.needs_head)
+        info.addLayout(self.needs)
+        info.addWidget(self.can)
+        info.addWidget(self.facts)
+        info.addLayout(self.button_row)
+        info.addWidget(self.status)
+        info.addWidget(self.settings_head)
+        info.addLayout(self.settings_slot)
+        info.addStretch(1)
+        self._split.addLayout(pics)
+        self._split.addWidget(self.info, 1)
+        self._split.addStretch(0)
+        col.addLayout(self._split)
         col.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1325,7 +1401,11 @@ class PluginPage(QWidget):
             self.form.sync()
 
     def resizeEvent(self, ev) -> None:  # noqa: N802
-        self.banner.set_width(min(max(200, self.width() - 48), Previews.MAX_W))
+        wide = self.width() >= self.SIDE_BY_SIDE
+        self._split.setDirection(QBoxLayout.LeftToRight if wide else QBoxLayout.TopToBottom)
+        room = self.width() - 48 - (self.INFO_MAX + 24 if wide else 0)
+        self.banner.set_width(min(max(200, room), Previews.MAX_W))
+        self.previews.setFixedWidth(min(max(200, room), Previews.MAX_W))
         super().resizeEvent(ev)
 
 
