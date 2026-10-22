@@ -84,6 +84,10 @@ from .sources.base import (  # noqa: E402 - the source plugin surface
 )
 
 
+# ---- for plugins that time lyrics (ctx.lyrics.add_aligner) ----
+from .lyric_words import Word, WordLine, shift as shift_line, split_words  # noqa: E402
+
+
 def store_art(key: str, data: bytes) -> str:
     """a cover read from a file on this computer, kept in tide's art cache.
     returns the url to put in Track.thumbnail. ``key`` names it (the same

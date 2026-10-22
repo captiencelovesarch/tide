@@ -170,44 +170,5 @@ class ViewTest(unittest.TestCase):
         self.assertEqual(self.lyrics.timing_of(line + aligned), "aligned")
 
 
-class PreciseEditorTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.made: list = []
-
-    def tearDown(self) -> None:
-        for w in self.made:
-            w.deleteLater()
-        _app.processEvents()
-
-    def test_contract_and_states(self) -> None:
-        from unittest import mock
-        from tide.ui.lyric_timing_editor import PACKAGE, PreciseTimingEditor
-        with mock.patch("tide.lyric_align.runtime_available", return_value=False), \
-                mock.patch("tide.lyric_align.model_installed", return_value=False):
-            ed = PreciseTimingEditor()
-            self.made.append(ed)
-            self.assertFalse(ed.check.isEnabled())
-            self.assertIn(PACKAGE, ed.status.text())
-        with mock.patch("tide.lyric_align.runtime_available", return_value=True), \
-                mock.patch("tide.lyric_align.model_installed", return_value=False):
-            ed = PreciseTimingEditor()
-            self.made.append(ed)
-            self.assertFalse(ed.check.isEnabled())
-            self.assertFalse(ed.get_btn.isHidden())
-        with mock.patch("tide.lyric_align.runtime_available", return_value=True), \
-                mock.patch("tide.lyric_align.model_installed", return_value=True):
-            ed = PreciseTimingEditor()
-            self.made.append(ed)
-            fired = []
-            ed.changed.connect(lambda: fired.append(1))
-            ed.set_value(True)
-            self.assertTrue(ed.value())
-            self.assertEqual(fired, [])            # loading isn't an edit
-            ed.check.setChecked(False)
-            self.assertEqual(fired, [1])
-            self.assertIs(ed.normalize(1), True)
-            self.assertTrue(ed.get_btn.isHidden())
-
-
 if __name__ == "__main__":
     unittest.main()

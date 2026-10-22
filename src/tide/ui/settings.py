@@ -78,7 +78,6 @@ _WIDGET_ATTRS: dict[str, str] = {
     "lyrics_list_sweep": "lyrics_list_sweep_toggle",
     "lyrics_word_timing": "lyrics_word_timing_picker",
     "lyrics_netease": "lyrics_netease_toggle",
-    "lyrics_precise": "lyrics_precise_editor",
     "lyrics_offset_ms": "lyrics_offset_spin",
     "ui_sounds_enabled": "ui_sounds_toggle",
     "audio_device": "audio_device_picker",
@@ -166,13 +165,7 @@ def _icon_sets(dialog):
     return build_icon_set_picker(dialog)
 
 
-def _precise_timing(dialog):
-    from .lyric_timing_editor import PreciseTimingEditor
-    return PreciseTimingEditor(dialog)
-
-
 CUSTOM_BUILDERS: dict[str, object] = {
-    "lyrics_precise": _precise_timing,
     "bar_layout": _bar_editor,
     "font_roles": _type_roles,
     "icon_set": _icon_sets,

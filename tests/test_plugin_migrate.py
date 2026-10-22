@@ -126,6 +126,10 @@ visualizer_tile_4 = "halo"
 ''')
         self.assertEqual(self.collect(), [])
 
+    def test_precise_timing(self):
+        self.settings.write_text("lyrics_precise = true\n")
+        self.assertEqual(self.collect(), ["lyric-timing"])
+
     def test_toasts(self):
         self.assertEqual(plugin_migrate.toast_for("discord", True, "discord presence"),
                          "discord presence is a plugin now. we installed it for you.")

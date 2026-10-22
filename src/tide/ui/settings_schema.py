@@ -393,14 +393,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "(china-hosted).",
     ),
     OptionDesc(
-        key="lyrics_precise", label="precise timing", kind="custom",
-        tab="playback", section="lyrics",
-        live="apply_lyrics_timing_setting",
-        tooltip="listens to the song itself to place words and pull lyrics "
-                "that run early or late onto the singing. once per song, "
-                "in the background. clear vocals work best.",
-    ),
-    OptionDesc(
         key="lyrics_offset_ms", label="lyrics offset", kind="int",
         tab="playback", section="lyrics",
         live="apply_lyrics_timing_setting",

@@ -146,9 +146,8 @@ class Settings:
     lyrics_word_timing: str = "sources"
     # Ask NetEase Cloud Music for word-synced lyrics (sends title + artist).
     lyrics_netease: bool = True
-    # Time words against the track's own audio (lyric_align; needs
-    # python-onnxruntime-cpu + a 95 MB model the dialog downloads).
-    lyrics_precise: bool = False
+    # (precise timing, against the track's own audio, is the lyric timing
+    # store plugin since 3.0: installed = on)
     # Lyrics vs the playhead, ms; positive shows them later.
     lyrics_offset_ms: int = 0
     # Window + tray icon: "theme" draws it in the active theme's colours

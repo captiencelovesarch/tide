@@ -82,6 +82,7 @@ MOVED: tuple[Moved, ...] = (
         "discord_hide_local": "hide_local",
     }),
     Moved("extra-sources", "extra sources", _source_on("soundcloud", "bandcamp", "mixcloud"), {}),
+    Moved("lyric-timing", "precise lyric timing", lambda raw: raw.get("lyrics_precise") is True, {}),
     Moved("vis-tiles", "more visualizer tiles",
           _tile_shown("river", "spectrogram", "halo", "tapper"), {
               "visualizer_river_view": "river_view",

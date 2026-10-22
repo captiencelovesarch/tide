@@ -26,7 +26,7 @@ optdepends=(
   'kwallet: KDE wallet backend for cookie import'
   'python-watchdog: live re-indexing for the local files plugin'
   'librespot: Spotify Premium playback via the librespot backend'
-  'python-onnxruntime-cpu: precise lyric word timing (local alignment)'
+  'python-onnxruntime-cpu: the precise lyric timing plugin, and voice in vr'
   'python-yaml: word-synced lyrics from LRClib'
 )
 makedepends=(

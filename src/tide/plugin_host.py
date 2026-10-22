@@ -555,6 +555,35 @@ class _Lyrics:
             self._on = False
             self._ctx._host._lyrics_unsubscribe(self._ctx.slug)
 
+    def add_aligner(self, fn: Callable) -> None:
+        """precise word timing: ``fn(sheet, stream, should_stop, say)`` gets
+        the word sheet tide has (list[WordLine], tide.plugin_api), the
+        StreamRef playing (``payload`` is what mpv plays, ``headers`` its
+        http headers) and returns a better sheet, or None to keep it.
+        it runs off the gui thread; ``should_stop()`` turns true when the
+        song changed, ``say(text)`` shows a status line under the lyrics.
+        one aligner at a time; it goes when the plugin stops."""
+        from . import lyric_timing
+        svc = lyric_timing.service()
+        ctx = self._ctx
+
+        def run(sheet, ref, should_stop, say):
+            if not ctx.alive:
+                return None
+            return fn(sheet, ref, lambda: should_stop() or not ctx.alive, say)
+        svc.set_aligner(run)
+        self._aligner = run
+        ctx.on_stop(self.remove_aligner)
+
+    def remove_aligner(self) -> None:
+        """take this plugin's aligner away (its model is gone, say)."""
+        from . import lyric_timing
+        svc = lyric_timing.service()
+        run = getattr(self, "_aligner", None)
+        if run is not None and svc._aligner is run:
+            svc.set_aligner(None)
+        self._aligner = None
+
     def sheet(self):
         return self._ctx._host._lyric_sheet
 
