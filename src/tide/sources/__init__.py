@@ -34,6 +34,9 @@ class SourceRegistry(QObject):
     # from the worker thread that hit the failure — receivers living in the
     # GUI thread get a queued delivery, so it's safe to raise UI from a slot.
     auth_expired = Signal(str)              # slug
+    # a plugin added or took away a source (ctx.sources); the source panel
+    # rebuilds its rows
+    listing_changed = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -47,6 +50,21 @@ class SourceRegistry(QObject):
             raise ValueError("MusicSource must have a slug")
         self._sources[slug] = source
         self._enabled.setdefault(slug, enabled)
+        self.listing_changed.emit()
+
+    def unregister(self, slug: str) -> None:
+        """take ``slug`` away (its plugin stopped). if it was the active
+        source, the first enabled one left takes over, ytmusic first."""
+        if self._sources.pop(slug, None) is None:
+            return
+        self._enabled.pop(slug, None)
+        if slug == self._active:
+            order = ["ytmusic"] + [s for s in self._sources if s != "ytmusic"]
+            nxt = next((s for s in order if self._enabled.get(s)), None) \
+                or next(iter(self._sources), "ytmusic")
+            self._active = nxt
+            self.active_changed.emit(nxt)
+        self.listing_changed.emit()
 
     def all(self) -> list[MusicSource]:
         return list(self._sources.values())

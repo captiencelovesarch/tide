@@ -771,15 +771,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "sped-with-pitch one.",
     ),
 
-    # ---- sources · local files ----
-    OptionDesc(
-        key="local_auto_index", label="re-index music folder at launch",
-        kind="bool", tab="sources", section="local files",
-        advanced=True,
-        tooltip="walks the local music folder in the background at "
-                "startup. the folder itself is picked in the source "
-                "panel's local gear.",
-    ),
     # ---- sources · spotify ----
     OptionDesc(
         key="spotify_bitrate", label="bitrate", kind="choice",
@@ -934,7 +925,6 @@ INTERNAL_FIELDS: frozenset[str] = frozenset({
     "sources_enabled",          # per-source on/off lives on the source page
     "active_source",            # picked by using the source page
     "federated_search",         # the source page's federate checkbox
-    "local_music_dir",          # local gear's folder picker (needs a file dialog)
     "subsonic_url",             # subsonic gear / onboarding sign-in form
     "subsonic_user",            # ”
     "subsonic_pass",            # ”

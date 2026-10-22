@@ -42,10 +42,7 @@ from .playback import MpvBackend, PlaybackRouter
 from .playback.librespot_backend import LibrespotBackend
 from .player import Player
 from .sources import registry as source_registry
-from .sources.bandcamp import BandcampSource
-from .sources.local import LocalSource
-from .sources.mixcloud import MixcloudSource
-from .sources.soundcloud import SoundCloudSource
+from .sources.base import NullSource
 from .sources.spotify import HAVE_SPOTIPY, SpotifySource
 from .sources.subsonic import SubsonicConfig, SubsonicSource
 from .sources.ytmusic import YTMusicSource
@@ -104,10 +101,18 @@ def run_onboarding_if_needed(user_settings):
     user_settings.adaptive_pulse = bool(r.adaptive_background)
     user_settings.motion = r.motion
     user_settings.ui_scale = r.ui_scale
-    user_settings.sources_enabled = dict(r.sources_enabled)
+    from . import plugin_migrate
+    picked = dict(r.sources_enabled)
+    # sources that come from store plugins since 3.0: a pick queues its
+    # plugin (installed once the store answers); one left unpicked keeps no
+    # switch, so installing the plugin later starts it on
+    for slug, plugin in plugin_migrate.SOURCE_PLUGINS.items():
+        if picked.pop(slug, False):
+            picked[slug] = True
+            seed = {"folder": r.local_dir} if slug == "local" and r.local_dir else None
+            plugin_migrate.queue_install(plugin, seed)
+    user_settings.sources_enabled = picked
     user_settings.active_source = r.active_source
-    if r.local_dir:
-        user_settings.local_music_dir = r.local_dir
     if getattr(r, "subsonic_authed", False) and r.subsonic_url:
         user_settings.subsonic_url = r.subsonic_url
         user_settings.subsonic_user = r.subsonic_user
@@ -116,7 +121,6 @@ def run_onboarding_if_needed(user_settings):
     # Optional integrations step. Discord presence is a store plugin since
     # 3.0: a pick here queues the install (it runs once the store answers)
     # with the app id already in its settings.
-    from . import plugin_migrate
     if r.discord_enabled and r.discord_app_id:
         plugin_migrate.queue_install("discord", {"app_id": r.discord_app_id})
     # Play reporting: only persisted when the step was actually answered —
@@ -480,8 +484,8 @@ def run(argv: list[str] | None = None) -> int:
     _reassert_cli_theme(args.theme)
 
     # YT Music auth — only attempt if the source is enabled. tide can
-    # launch with zero YT auth as long as SoundCloud / Bandcamp / Mixcloud
-    # / Local are enabled. Failure here doesn't abort startup; it just
+    # launch with zero YT auth (another source, or a plugin's, can carry
+    # it). Failure here doesn't abort startup; it just
     # leaves YT registered-but-disabled and surfaces a toast.
     yt = None
     if user_settings.sources_enabled.get("ytmusic", False):
@@ -507,16 +511,6 @@ def run(argv: list[str] | None = None) -> int:
     yt_source = YTMusicSource(yt)
     reg.register(yt_source, enabled=(yt is not None
                                      and user_settings.sources_enabled.get("ytmusic", False)))
-    reg.register(SoundCloudSource(),
-                 enabled=user_settings.sources_enabled.get("soundcloud", True))
-    reg.register(BandcampSource(),
-                 enabled=user_settings.sources_enabled.get("bandcamp", True))
-    reg.register(MixcloudSource(),
-                 enabled=user_settings.sources_enabled.get("mixcloud", False))
-    local_dir = user_settings.local_music_dir or None
-    local_source = LocalSource(music_dir=local_dir)
-    reg.register(local_source,
-                 enabled=user_settings.sources_enabled.get("local", True))
     # v1.2.1 — Spotify. Registers only if (a) spotipy is installed, and
     # (b) the user has completed sign-in. The sources panel surfaces a
     # [connect] button otherwise. saved_tokens() reads the stored grant
@@ -565,25 +559,14 @@ def run(argv: list[str] | None = None) -> int:
                 break
     reg.set_active(target_active)
 
-    if user_settings.local_auto_index and reg.is_enabled("local"):
-        # Index the music dir in the background so the UI stays responsive.
-        from PySide6.QtCore import QThreadPool, QRunnable
-        class _IndexJob(QRunnable):
-            def run(self_inner):
-                try:
-                    local_source.rescan()
-                    local_source.start_watcher()
-                except Exception:
-                    pass
-        QThreadPool.globalInstance().start(_IndexJob())
-
     # The active source is what the rest of the UI binds to as "self.api".
     # In the no-source-enabled corner case (user dismissed every source in
-    # the wizard), fall back to local_source so the UI has SOMETHING to
-    # bind to and the views don't crash on first paint.
+    # the wizard), fall back to NullSource so the UI has SOMETHING to bind
+    # to and the views don't crash on first paint. A plugin's source takes
+    # over through the registry once its plugin starts.
     # yt_source is registered even when signed out, so it only counts as a
     # fallback when it actually has a client behind it.
-    api_obj = reg.active or (yt_source if yt is not None else None) or local_source
+    api_obj = reg.active or (yt_source if yt is not None else None) or NullSource()
 
     # ---------- playback router ----------
     router = PlaybackRouter()

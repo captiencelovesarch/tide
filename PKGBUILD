@@ -21,7 +21,7 @@ depends=(
 optdepends=(
   'python-secretstorage: GNOME/libsecret backend for cookie import'
   'kwallet: KDE wallet backend for cookie import'
-  'python-watchdog: live re-indexing of the local files source'
+  'python-watchdog: live re-indexing for the local files plugin'
   'librespot: Spotify Premium playback via the librespot backend'
   'python-onnxruntime-cpu: precise lyric word timing (local alignment)'
   'python-yaml: word-synced lyrics from LRClib'

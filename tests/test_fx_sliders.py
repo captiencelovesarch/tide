@@ -601,9 +601,9 @@ class WindowDebounceTests(unittest.TestCase):
         scale.set_factor("normal")
         motion.set_intensity(motion.Intensity.OFF)
         from tide.playback import PlaybackRouter
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.ui.window import MainWindow
-        self.w = MainWindow(LocalSource(), PlaybackRouter())
+        self.w = MainWindow(NullSource(), PlaybackRouter())
         s = Settings()
         s.preset = ""
         self.w._settings = s

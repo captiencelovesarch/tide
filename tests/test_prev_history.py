@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.queue import Queue
 from tide.sources.base import Track
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui.window import MainWindow
 
 
@@ -48,7 +48,7 @@ class PrevHistoryTest(unittest.TestCase):
         _app()
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.played: list[str] = []
         real = self.w._play_track
         def spy(tr, *a, **k):

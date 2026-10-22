@@ -199,7 +199,7 @@ class ArtSlotSwapTest(_MotionCase):
     def test_swapping_the_art_style_keeps_the_cover(self) -> None:
         from tide import settings as settings_module
         from tide.playback import MpvBackend, PlaybackRouter
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.ui.variants import CircleAlbumArt
         from tide.ui.window import MainWindow
         real_save = settings_module.save
@@ -207,7 +207,7 @@ class ArtSlotSwapTest(_MotionCase):
         try:
             router = PlaybackRouter()
             router.register(MpvBackend())
-            w = MainWindow(LocalSource(), router)
+            w = MainWindow(NullSource(), router)
             w.art.setImage(_image("#993322"))
             w._swap_album_art("circle")
             self.assertIsInstance(w.art, CircleAlbumArt)

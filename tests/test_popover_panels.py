@@ -130,12 +130,12 @@ class RailFoldAnimationTest(unittest.TestCase):
         self._intensity = motion.intensity()
         self._profile = motion.bound_profile()
         from tide.playback import MpvBackend, PlaybackRouter
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.settings import Settings
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         s = Settings()
         s.nav_icon_set = "svg"
         self.w._settings = s

@@ -26,7 +26,7 @@ from tide import layout as layout_module
 from tide import settings as settings_module
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui import chooser as chooser_module
 from tide.ui import motion as motion_module
 from tide.ui import scale as scale_module
@@ -197,7 +197,7 @@ class _Phase4Case(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        w = MainWindow(LocalSource(), router)
+        w = MainWindow(NullSource(), router)
         self._windows.append(w)
         w._settings = settings
         w.apply_preset_visuals()

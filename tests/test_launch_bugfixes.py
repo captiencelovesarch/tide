@@ -17,7 +17,7 @@ from tide import theming
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
 from tide.sources import registry as source_registry
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 
 
 def _app() -> QApplication:
@@ -79,7 +79,7 @@ class CsdKeepsWindowVisibleTest(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        w = MainWindow(LocalSource(), router)
+        w = MainWindow(NullSource(), router)
         try:
             w.show()
             QTest.qWait(30)
@@ -173,7 +173,7 @@ class DisabledSpotifyStaysQuietTest(_RegistrySandbox):
         source_registry().register(fake, enabled=False)
         router = PlaybackRouter()
         router.register(MpvBackend())
-        w = MainWindow(LocalSource(), router)
+        w = MainWindow(NullSource(), router)
         toasts = []
         real = toast_module.show_toast
         toast_module.show_toast = lambda *a, **k: toasts.append(a)

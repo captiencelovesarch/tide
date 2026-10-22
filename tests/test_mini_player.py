@@ -20,7 +20,7 @@ from tide.playback import MpvBackend, PlaybackRouter
 from tide.queue import Queue
 from tide.settings import Settings
 from tide.sources.base import Track
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui.window import MainWindow
 
 
@@ -31,7 +31,7 @@ def _app() -> QApplication:
 def _window() -> MainWindow:
     router = PlaybackRouter()
     router.register(MpvBackend())
-    return MainWindow(LocalSource(), router)
+    return MainWindow(NullSource(), router)
 
 
 class MiniToggleTest(unittest.TestCase):

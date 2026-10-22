@@ -999,10 +999,11 @@ class MainWindow(QMainWindow):
         initial_settings = getattr(self, "_settings", None) or _Settings()
         self.source_view = SourcePanel(initial_settings)
         self.source_view.active_changed.connect(self._on_active_source_changed)
+        # and when the registry moves it itself (a source plugin stopped)
+        source_registry().active_changed.connect(self._on_active_source_changed)
         self.source_view.enabled_changed.connect(self._on_source_enabled_changed)
         self.source_view.settings_changed.connect(self._persist_settings)
         self.source_view.settings_changed.connect(self._refresh_search_placeholder)
-        self.source_view.local_dir_changed.connect(self._on_local_dir_changed)
         # Session-death notifications (e.g. imported YT Music cookies started
         # 401ing). Sources report from worker threads; AutoConnection queues
         # delivery onto this (GUI) thread, so the slot may build widgets.
@@ -1778,29 +1779,6 @@ class MainWindow(QMainWindow):
             if local is not None:
                 self._rescan_local_in_background(local)
 
-    def _on_local_dir_changed(self, new_dir: str) -> None:
-        reg = source_registry()
-        local = reg.get("local")
-        if local is None:
-            return
-        self._rescan_local_in_background(local)
-
-    def _rescan_local_in_background(self, local) -> None:
-        from PySide6.QtCore import QRunnable, QThreadPool
-        panel = self.source_view
-
-        class _Job(QRunnable):
-            def run(self_inner):
-                try:
-                    local.rescan()
-                    local.start_watcher()
-                except Exception:
-                    pass
-
-        QThreadPool.globalInstance().start(_Job())
-        QTimer.singleShot(800, panel.refresh_statuses)
-        QTimer.singleShot(3000, panel.refresh_statuses)
-
     def _persist_settings(self) -> None:
         """Persist hook for the source panel's settings_changed signal —
         field-scoped to exactly what the panel can change, so it can't
@@ -1812,7 +1790,7 @@ class MainWindow(QMainWindow):
             _settings_module.save_fields(
                 self._settings,
                 "sources_enabled", "active_source", "federated_search",
-                "local_music_dir", "subsonic_url", "subsonic_user",
+                "subsonic_url", "subsonic_user",
                 "subsonic_pass", "subsonic_auth_style",
             )
         except Exception:

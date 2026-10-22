@@ -22,7 +22,7 @@ from tide.playback import MpvBackend, PlaybackRouter
 from tide.queue import Queue
 from tide.settings import Settings
 from tide.sources.base import Track
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui import motion as motion_module
 from tide.ui.window import MainWindow
 
@@ -34,7 +34,7 @@ def _app() -> QApplication:
 def _window() -> MainWindow:
     router = PlaybackRouter()
     router.register(MpvBackend())
-    return MainWindow(LocalSource(), router)
+    return MainWindow(NullSource(), router)
 
 
 def _track(video_id: str = "v1", title: str = "some song",
@@ -633,7 +633,7 @@ class LyricsMotionTest(unittest.TestCase):
     def test_motion_off_snaps(self) -> None:
         from tide.ui.lyrics import LyricsView
         motion_module.set_intensity(motion_module.Intensity.OFF)
-        view = LyricsView(LocalSource())
+        view = LyricsView(NullSource())
         view._show_timed([(0.0, "one"), (5.0, "two"), (10.0, "three")])
         view.update_position(6.0)
         self.assertIsNone(view._scroll_anim)
@@ -646,7 +646,7 @@ class LyricsMotionTest(unittest.TestCase):
         from tide.ui.lyrics import LyricsView
         app = _app()
         motion_module.set_intensity(motion_module.Intensity.LITE)
-        view = LyricsView(LocalSource())
+        view = LyricsView(NullSource())
         view.setFixedSize(240, 120)
         view.show()
         app.processEvents()
@@ -685,7 +685,7 @@ class LyricsFontScaleTest(unittest.TestCase):
     def test_small_is_the_classic_panel(self) -> None:
         from tide.ui.lyrics import LyricsView, _KaraokeWidget
         self._lyrics.set_size("small")
-        view = LyricsView(LocalSource())
+        view = LyricsView(NullSource())
         view._show_timed([(0.0, "one"), (5.0, "two")])
         self.assertIn("10pt", view._line_widgets[0].styleSheet())
         view.update_position(1.0)
@@ -698,7 +698,7 @@ class LyricsFontScaleTest(unittest.TestCase):
         from tide.ui.lyrics import LyricsView
         self.assertEqual(self._lyrics.DEFAULT_SIZE, "large")
         self._lyrics.set_size("large")
-        view = LyricsView(LocalSource())
+        view = LyricsView(NullSource())
         view._show_timed([(0.0, "one"), (5.0, "two")])
         self.assertIn("16pt", view._line_widgets[0].styleSheet())
         view.update_position(1.0)
@@ -707,7 +707,7 @@ class LyricsFontScaleTest(unittest.TestCase):
     def test_timed_lines_scale(self) -> None:
         from tide.ui.lyrics import LyricsView
         self._lyrics.set_size("small")
-        view = LyricsView(LocalSource(), font_scale=2.0)
+        view = LyricsView(NullSource(), font_scale=2.0)
         view._show_timed([(0.0, "one"), (5.0, "two")])
         self.assertIn("20pt", view._line_widgets[0].styleSheet())
         view.update_position(1.0)
@@ -720,14 +720,14 @@ class LyricsFontScaleTest(unittest.TestCase):
         from tide.ui.lyrics import LyricsView
         self._lyrics.set_size("small")
         self._scale.set_factor("huge")
-        view = LyricsView(LocalSource())
+        view = LyricsView(NullSource())
         view._show_timed([(0.0, "one"), (5.0, "two")])
         self.assertIn("13pt", view._line_widgets[0].styleSheet())
 
     def test_size_change_restyles_open_views(self) -> None:
         from tide.ui.lyrics import LyricsView
         self._lyrics.set_size("small")
-        view = LyricsView(LocalSource())
+        view = LyricsView(NullSource())
         view._show_timed([(0.0, "one"), (5.0, "two")])
         self._lyrics.set_size("huge")
         self.assertIn("21pt", view._line_widgets[0].styleSheet())

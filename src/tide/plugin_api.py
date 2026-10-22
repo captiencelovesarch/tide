@@ -74,6 +74,37 @@ class Plugin(Protocol):
     def start(self, ctx) -> None: ...
 
 
+# ---- for plugins that add a music source (ctx.sources.register) ----
+# a source subclasses MusicSource and hands out Track records; tide's
+# player, queue, search and library take it from there. the stream cache
+# keeps resolved urls across launches, per source.
+from .sources.base import (  # noqa: E402 - the source plugin surface
+    AlbumDetail, AlbumEntry, ArtistDetail, ArtistEntry, MusicSource, NotSupportedError,
+    PlaylistDetail, PlaylistEntry, Shelf, ShelfItem, StreamRef, Track, safe_int,
+)
+
+
+def store_art(key: str, data: bytes) -> str:
+    """a cover read from a file on this computer, kept in tide's art cache.
+    returns the url to put in Track.thumbnail. ``key`` names it (the same
+    key keeps the first image stored). any thread."""
+    from .ui import art_cache
+    return art_cache.store_local(key, data)
+
+
+def stream_cache_get(source: str, key: str) -> str | None:
+    from . import cache
+    return cache.get_stream_url(source, key)
+
+
+def stream_cache_put(source: str, key: str, url: str, ttl_seconds: float) -> None:
+    from . import cache
+    cache.put_stream_url(source, key, url, ttl_seconds=ttl_seconds)
+
+
+STREAM_NEVER_EXPIRES = float("inf")
+
+
 def track_link(video_id: str, source: str) -> str:
     """The public page for a track, or "" (local files have none)."""
     return links_for(video_id, source)[0]

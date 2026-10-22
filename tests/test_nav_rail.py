@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from tide import theming
 from tide.playback import MpvBackend, PlaybackRouter
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui import scale
 
 
@@ -33,7 +33,7 @@ class _RailCase(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
 
     def tearDown(self) -> None:
         self.w.close()

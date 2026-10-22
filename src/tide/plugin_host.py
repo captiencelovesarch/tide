@@ -1065,6 +1065,60 @@ class _Ui:
         show_toast(win.toast_host(), text, action_label=action_label, on_action=on_action)
 
 
+class _Sources:
+    """music sources a plugin adds (soundcloud, local files...). they sit
+    in the source panel like tide's own, with the same on switch, and go
+    when the plugin stops."""
+
+    def __init__(self, ctx: "PluginContext") -> None:
+        self._ctx = ctx
+        self._mine: list[str] = []
+        ctx.on_stop(self._unregister_all)
+
+    def _settings(self):
+        return getattr(self._ctx._host.window, "_settings", None)
+
+    def register(self, source, on: bool = True) -> None:
+        """add ``source`` to tide. ``on``: whether it starts switched on when
+        tide has never had a switch for it; one from before (tide 2's own
+        soundcloud, or the source panel since) is kept."""
+        from .sources import registry
+        slug = getattr(source, "slug", "")
+        if not slug:
+            raise ValueError("a source needs a slug")
+        reg = registry()
+        if reg.get(slug) is not None and slug not in self._mine:
+            raise ValueError(f"tide already has a source called {slug}")
+        s = self._settings()
+        enabled_map = dict(getattr(s, "sources_enabled", {}) or {})
+        if slug not in enabled_map:
+            enabled_map[slug] = bool(on)
+            if s is not None:
+                s.sources_enabled = enabled_map
+                try:
+                    from . import settings as settings_module
+                    settings_module.save_fields(s, "sources_enabled")
+                except Exception:  # noqa: BLE001 - tests run without a file
+                    pass
+        reg.register(source, enabled=bool(enabled_map.get(slug, True)))
+        self._mine.append(slug)
+        # the user's active source comes back when its plugin does
+        if s is not None and getattr(s, "active_source", "") == slug and reg.is_enabled(slug):
+            reg.set_active(slug)
+
+    def is_on(self, slug: str) -> bool:
+        """is that source switched on in the source panel?"""
+        from .sources import registry
+        return registry().is_enabled(slug)
+
+    def _unregister_all(self) -> None:
+        from .sources import registry
+        reg = registry()
+        for slug in reversed(self._mine):
+            reg.unregister(slug)
+        self._mine.clear()
+
+
 class _Paths:
     def __init__(self, slug: str) -> None:
         self._slug = slug
@@ -1112,6 +1166,7 @@ class PluginContext:
         self.ui = _Ui(host, self)
         self.paths = _Paths(manifest.slug)
         self._on_stop: list[Callable] = []
+        self.sources = _Sources(self)
         self._adopted: list = []
         self.speech = _Speech(self)
 

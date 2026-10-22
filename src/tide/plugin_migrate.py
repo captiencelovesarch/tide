@@ -40,6 +40,20 @@ def _on_with(flag: str, value: str) -> Callable[[dict], bool]:
     return lambda raw: raw.get(flag) is True and bool(str(raw.get(value, "") or "").strip())
 
 
+def _source_on(*slugs: str, needs: str = "") -> Callable[[dict], bool]:
+    """one of ``slugs`` switched on in the source panel and, with
+    ``needs``, that setting filled in (or the source was the active one:
+    local files on the default ~/Music had no folder saved)."""
+    def used(raw: dict) -> bool:
+        on = raw.get("sources_enabled")
+        if not isinstance(on, dict) or not any(on.get(s) is True for s in slugs):
+            return False
+        if not needs or raw.get("active_source") in slugs:
+            return True
+        return bool(str(raw.get(needs, "") or "").strip())
+    return used
+
+
 MOVED: tuple[Moved, ...] = (
     Moved("discord", "discord presence", _on_with("discord_enabled", "discord_app_id"), {
         "discord_app_id": "app_id",
@@ -54,8 +68,21 @@ MOVED: tuple[Moved, ...] = (
         "discord_hidden": "hidden",
         "discord_hide_local": "hide_local",
     }),
+    Moved("extra-sources", "extra sources", _source_on("soundcloud", "bandcamp", "mixcloud"), {}),
+    Moved("local-files", "local files", _source_on("local", needs="local_music_dir"), {
+        "local_music_dir": "folder",
+        "local_auto_index": "watch",
+    }),
 )
 _BY_SLUG = {m.slug: m for m in MOVED}
+
+# sources that left core, and the plugin that brings each back
+SOURCE_PLUGINS: dict[str, str] = {
+    "soundcloud": "extra-sources",
+    "bandcamp": "extra-sources",
+    "mixcloud": "extra-sources",
+    "local": "local-files",
+}
 
 
 @dataclass

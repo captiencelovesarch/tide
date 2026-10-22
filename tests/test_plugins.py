@@ -397,6 +397,47 @@ class CtxTests(Base):
         h.set_enabled("mine", False)
         self.assertEqual(tray.actions, [])
 
+    def test_sources_come_and_go_with_the_plugin(self):
+        from types import SimpleNamespace
+        from tide.sources import registry
+        from tide.sources.base import NullSource
+        from tide.settings import Settings
+
+        class Fake(NullSource):
+            def __init__(self, slug):
+                self.slug = slug
+
+        reg = registry()
+        before_active = reg.active_slug
+        self.addCleanup(lambda: (reg.unregister("fake-a"), reg.unregister("fake-b")))
+        s = Settings()
+        s.sources_enabled = {"fake-b": False}          # a switch from before
+        s.active_source = "fake-a"
+        self.write("mine")
+        with __import__("unittest.mock").mock.patch("tide.settings.save_fields"):
+            h = PluginHost(SimpleNamespace(_settings=s), self.player, self.queue,
+                           roots=[(self.user, "yours")], state_file=self.tmp / "plugins.toml",
+                           settings_dir=self.tmp / "plugin-settings",
+                           stamp=self.tmp / "plugin-starting", data_dir=self.tmp / "data")
+            self.addCleanup(h.shutdown)
+            h.set_enabled("mine", True)
+            ctx = h.record("mine").ctx
+            listed = []
+            reg.listing_changed.connect(lambda: listed.append(1))
+            ctx.sources.register(Fake("fake-a"))
+            ctx.sources.register(Fake("fake-b"))
+        self.assertTrue(reg.is_enabled("fake-a"), "new: on")
+        self.assertFalse(reg.is_enabled("fake-b"), "the old switch is kept")
+        self.assertEqual(reg.active_slug, "fake-a", "your active source comes back")
+        self.assertTrue(ctx.sources.is_on("fake-a"))
+        h.set_enabled("mine", False)
+        self.assertIsNone(reg.get("fake-a"))
+        self.assertIsNone(reg.get("fake-b"))
+        self.assertNotEqual(reg.active_slug, "fake-a")
+        self.assertGreaterEqual(len(listed), 4)
+        if reg.get(before_active) is not None:
+            reg.set_active(before_active)
+
     def test_track_links(self):
         info = plugin_api.track_info(Track(
             "abc", "t", "a", extras={"artists": [{"name": "a", "id": "UC1"}],

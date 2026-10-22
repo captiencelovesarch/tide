@@ -694,4 +694,10 @@ def check_need(need: Need) -> bool | None:
         return _process_running(arg)
     if kind == "desktop":
         return arg.lower() in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    if kind == "module":
+        import importlib.util
+        try:
+            return importlib.util.find_spec(arg) is not None
+        except (ImportError, ValueError):
+            return False
     return None

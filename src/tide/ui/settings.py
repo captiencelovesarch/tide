@@ -108,7 +108,6 @@ _WIDGET_ATTRS: dict[str, str] = {
     "prefetch_warm_results": "prefetch_warm_picker",
     "radio_mix": "radio_mix_picker",
     "preserve_pitch": "preserve_pitch_toggle",
-    "local_auto_index": "local_index_toggle",
     "spotify_bitrate": "spotify_bitrate_picker",
     "spotify_audio_device": "spotify_sink_edit",
     "spotify_connect_enabled": "spotify_connect_toggle",

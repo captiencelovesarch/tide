@@ -202,17 +202,13 @@ class Settings:
     active_source: str = "ytmusic"
     federated_search: bool = False
     # Per-source on/off. Keys are source slugs; values are bools.
+    # Sources from plugins (soundcloud, local files...) keep their switch
+    # here too, under their own slug, once their plugin has added them.
     sources_enabled: dict = field(default_factory=lambda: {
         "ytmusic": True,
-        "soundcloud": True,
-        "bandcamp": True,
-        "mixcloud": False,
-        "local": True,
         "subsonic": False,
         "spotify": False,
     })
-    local_music_dir: str = ""
-    local_auto_index: bool = True
     # v1.2.1 — Spotify (Librespot backend)
     # (spotify_client_id lived here through v1.x, unread; deleted in 2.0
     # — load()'s unknown-key filter drops the stale key from old files)

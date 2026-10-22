@@ -75,6 +75,39 @@ class MigrateTests(unittest.TestCase):
         self.assertEqual((p.install, p.moved), (["discord"], []))
         self.assertEqual(self.plugin_settings("discord"), {"app_id": "123"})
 
+    def test_sources_that_moved(self):
+        self.settings.write_text('''
+local_music_dir = "/home/me/Music"
+local_auto_index = false
+
+[sources_enabled]
+ytmusic = true
+soundcloud = true
+local = true
+''')
+        self.assertEqual(self.collect(), ["extra-sources", "local-files"])
+        self.assertEqual(self.plugin_settings("local-files"),
+                         {"folder": "/home/me/Music", "watch": False})
+
+    def test_sources_left_off_queue_nothing(self):
+        self.settings.write_text('''
+[sources_enabled]
+ytmusic = true
+soundcloud = false
+local = true
+''')
+        # local was on but had no folder and wasn't the one you used
+        self.assertEqual(self.collect(), [])
+
+    def test_local_on_the_default_folder_counts_when_active(self):
+        self.settings.write_text('''
+active_source = "local"
+
+[sources_enabled]
+local = true
+''')
+        self.assertEqual(self.collect(), ["local-files"])
+
     def test_toasts(self):
         self.assertEqual(plugin_migrate.toast_for("discord", True, "discord presence"),
                          "discord presence is a plugin now. we installed it for you.")
