@@ -13,7 +13,9 @@ nothing; open_strip_builder defers construction out of the calling turn
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_strip_builder.py
 """
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from PySide6.QtTest import QTest
@@ -37,6 +39,12 @@ class _BuilderCase(unittest.TestCase):
     def setUp(self) -> None:
         self.app = _app()
         self.saved: list = []
+        # a settings file of its own, so "nothing was written" can't be
+        # fooled by whatever an earlier test left in the shared sandbox
+        self._tmp = tempfile.TemporaryDirectory(prefix="tide-strip-")
+        self.addCleanup(self._tmp.cleanup)
+        mock.patch.object(config, "SETTINGS_FILE",
+                          Path(self._tmp.name) / "settings.toml").start()
         mock.patch.object(
             settings_module, "save",
             lambda s: self.saved.append("save")).start()
