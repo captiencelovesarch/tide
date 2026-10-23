@@ -35,6 +35,10 @@ class ViewTest(unittest.TestCase):
         from tide.ui import lyrics
         self.lyrics = lyrics
         self.addCleanup(lyrics.set_offset_ms, 0)
+        # karaoke and the sweep come with precise lyric timing: on, like
+        # with the plugin installed (test_without_word_view: the plain case)
+        lyrics.set_word_view(True)
+        self.addCleanup(lyrics.set_word_view, False)
         self.view = lyrics.LyricsView(SimpleNamespace())
         self.addCleanup(_app.processEvents)
         self.addCleanup(self.view.deleteLater)
@@ -45,6 +49,16 @@ class ViewTest(unittest.TestCase):
         self.view._current_track = self.track
         self.view._current_key = lyric_timing.track_key(self.track)
         self.view._on_done("v1", LyricsResult(timed_lines=list(LINES)))
+
+    def test_without_word_view_its_plain_synced_lines(self) -> None:
+        self.view.karaoke_check.setChecked(True)
+        self.lyrics.set_word_view(False)     # the plugin goes
+        try:
+            self.assertTrue(self.view.word_toggles.isHidden())
+            self.assertFalse(self.view.karaoke_check.isChecked(), "karaoke left on")
+            self.assertEqual(self.view._sweep_at, -1, "the list still sweeps")
+        finally:
+            self.lyrics.set_word_view(True)
 
     def test_line_mode_first(self) -> None:
         self.assertIn("estimated words", self.view.karaoke_check.text())

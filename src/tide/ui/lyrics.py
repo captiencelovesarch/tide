@@ -132,6 +132,26 @@ def list_sweep() -> bool:
     return _list_sweep_on
 
 
+# Karaoke mode and the word sweep show only while a plugin offers word
+# view (precise lyric timing does, ctx.lyrics.enable_word_view). Without
+# it the lyrics are plain synced lines: no toggles, no karaoke, no sweep.
+_word_view = 0
+
+
+def word_view() -> bool:
+    return _word_view > 0
+
+
+def set_word_view(on: bool) -> None:
+    global _word_view
+    _word_view = max(0, _word_view + (1 if on else -1))
+    for view in list(_views):
+        try:
+            view._sync_word_view()
+        except RuntimeError:
+            pass
+
+
 def offset_ms() -> int:
     return int(round(-_offset_s * 1000))
 
@@ -444,8 +464,15 @@ class LyricsView(QWidget):
         toggles_row = QHBoxLayout()
         toggles_row.setContentsMargins(0, 0, 0, 0)
         toggles_row.setSpacing(12)
-        toggles_row.addWidget(self.karaoke_check)
-        toggles_row.addWidget(self.sweep_check)
+        # the word toggles, as one row a plugin shows (set_word_view)
+        self.word_toggles = QWidget()
+        word_row = QHBoxLayout(self.word_toggles)
+        word_row.setContentsMargins(0, 0, 0, 0)
+        word_row.setSpacing(12)
+        word_row.addWidget(self.karaoke_check)
+        word_row.addWidget(self.sweep_check)
+        self.word_toggles.setVisible(word_view())
+        toggles_row.addWidget(self.word_toggles)
         toggles_row.addWidget(self.plugin_row)
         toggles_row.addStretch(1)
 
@@ -721,7 +748,8 @@ class LyricsView(QWidget):
         back where the sweep was)."""
         idx = self._active_line_index
         line = self._sheet[idx] if 0 <= idx < len(self._sheet) else None
-        ok = (_list_sweep_on and line is not None and bool(line.words) and idx < len(self._line_widgets)
+        ok = (_list_sweep_on and word_view() and line is not None and bool(line.words)
+              and idx < len(self._line_widgets)
               and line.text == self._timed_lines[idx][1] and bool(line.text.strip()))
         if self._sweep_at == idx and ok:
             self._list_sweep.set_line(line)
@@ -861,6 +889,16 @@ class LyricsView(QWidget):
                 )
 
     # ---------- karaoke + swap ----------
+
+    def _sync_word_view(self) -> None:
+        on = word_view()
+        self.word_toggles.setVisible(on)
+        if not on and self.karaoke_check.isChecked():
+            self.karaoke_check.setChecked(False)      # back to the list
+        self._unplace_sweep()
+        self._restyle_lines()
+        self._place_sweep()
+        self._list_sweep.report_position(self._last_position)
 
     def _on_karaoke_toggled(self, on: bool) -> None:
         self._karaoke_mode = bool(on)

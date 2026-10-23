@@ -555,6 +555,21 @@ class _Lyrics:
             self._on = False
             self._ctx._host._lyrics_unsubscribe(self._ctx.slug)
 
+    def enable_word_view(self) -> None:
+        """show karaoke mode and the word sweep in the lyrics views. without
+        a plugin that does, lyrics are plain synced lines. undone when the
+        plugin stops."""
+        if getattr(self, "_word_view", False):
+            return
+        from .ui import lyrics as lyrics_ui
+        self._word_view = True
+        lyrics_ui.set_word_view(True)
+
+        def off() -> None:
+            self._word_view = False
+            lyrics_ui.set_word_view(False)
+        self._ctx.on_stop(off)
+
     def add_aligner(self, fn: Callable) -> None:
         """precise word timing: ``fn(sheet, stream, should_stop, say)`` gets
         the word sheet tide has (list[WordLine], tide.plugin_api), the
