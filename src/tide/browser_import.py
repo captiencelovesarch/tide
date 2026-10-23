@@ -51,6 +51,7 @@ class _Candidate:
     family: str                  # "chromium" or "firefox"
     config: tuple[str, ...]      # roots under $XDG_CONFIG_HOME
     home: tuple[str, ...] = ()   # roots under $HOME (flatpak, snap, legacy)
+    reader: str = ""             # yt-dlp's name for it, when slug isn't one
 
 
 # Order matters: first match is the picker's default suggestion. Native and
@@ -59,6 +60,10 @@ class _Candidate:
 _CANDIDATES: tuple[_Candidate, ...] = (
     _Candidate("chromium", "chromium", "chromium", ("chromium",),
                (".var/app/org.chromium.Chromium/config/chromium",)),
+    # helium (imput) is chromium underneath, down to the "Chromium Safe
+    # Storage" keyring entry, so yt-dlp's chromium reader opens it
+    _Candidate("helium", "helium", "chromium", ("net.imput.helium",),
+               (".var/app/net.imput.helium/config/net.imput.helium",), reader="chromium"),
     _Candidate("chrome", "google chrome", "chromium", ("google-chrome",),
                (".var/app/com.google.Chrome/config/google-chrome",)),
     _Candidate("brave", "brave", "chromium", ("BraveSoftware/Brave-Browser",),
@@ -115,6 +120,11 @@ class BrowserProfile:
     cookies_path: Path                   # newest cookie db for this browser
     family: str = "chromium"
     candidates: tuple[Path, ...] = ()    # every cookie db found, newest first
+    reader: str = ""                     # yt-dlp's name, when slug isn't one
+
+    @property
+    def ytdlp_name(self) -> str:
+        return self.reader or self.slug
 
 
 def available_profiles() -> list[BrowserProfile]:
@@ -124,7 +134,7 @@ def available_profiles() -> list[BrowserProfile]:
         if dbs:
             out.append(BrowserProfile(
                 slug=cand.slug, label=cand.label, cookies_path=dbs[0],
-                family=cand.family, candidates=tuple(dbs),
+                family=cand.family, candidates=tuple(dbs), reader=cand.reader,
             ))
     return out
 
@@ -296,7 +306,7 @@ def _read_jar(slug: str, profile_dir: Path, keyring: str | None) -> tuple[Iterab
 
 
 def _import_one(profile: BrowserProfile, db: Path) -> ImportResult:
-    jar, log = _read_jar(profile.slug, db.parent, None)
+    jar, log = _read_jar(profile.ytdlp_name, db.parent, None)
     result = _result_from_jar(profile, jar)
     if result.looks_signed_in or profile.family != "chromium" or not log.key_trouble():
         return result
@@ -312,7 +322,7 @@ def _import_one(profile: BrowserProfile, db: Path) -> ImportResult:
             continue
         tried.add(keyring)
         try:
-            jar, _ = _read_jar(profile.slug, db.parent, keyring)
+            jar, _ = _read_jar(profile.ytdlp_name, db.parent, keyring)
         except Exception:
             continue
         retry = _result_from_jar(profile, jar)

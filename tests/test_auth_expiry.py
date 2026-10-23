@@ -3,6 +3,7 @@
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
 import json
+import os
 import time
 import unittest
 from pathlib import Path
@@ -142,6 +143,18 @@ class RefreshFromBrowserTest(unittest.TestCase):
         with mock.patch.object(bi, "available_profiles", return_value=[stray, real]), \
              mock.patch.object(bi, "import_cookies", side_effect=lambda p: results[p]):
             self.assertEqual(auth.refresh_from_browser(), "google chrome")
+
+    def test_the_browser_you_used_last_goes_first(self) -> None:
+        old = mock.Mock(label="google chrome", cookies_path=self.dir / "old")
+        new = mock.Mock(label="helium", cookies_path=self.dir / "new")
+        (self.dir / "old").write_text("")
+        (self.dir / "new").write_text("")
+        os.utime(self.dir / "old", (1, 1))
+        live = {"__Secure-3PAPISID": "v", "SAPISID": "v"}
+        with mock.patch.object(bi, "available_profiles", return_value=[old, new]), \
+             mock.patch.object(bi, "import_cookies",
+                               side_effect=lambda p: bi.ImportResult(profile=p, cookies=live)):
+            self.assertEqual(auth.refresh_from_browser(), "helium")
 
     def test_returns_none_when_no_browser_has_a_session(self) -> None:
         dead = mock.Mock(label="chromium")

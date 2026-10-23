@@ -127,6 +127,12 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(profiles[1].cookies_path, ff)
         self.assertEqual(profiles[1].family, "firefox")
 
+    def test_helium_reads_as_chromium(self) -> None:
+        db = self._touch(".config/net.imput.helium/Default/Cookies")
+        (helium,) = bi.available_profiles()
+        self.assertEqual((helium.slug, helium.label, helium.ytdlp_name), ("helium", "helium", "chromium"))
+        self.assertEqual(helium.cookies_path, db)
+
     def test_every_profile_is_a_candidate_newest_first(self) -> None:
         old = self._touch(".config/chromium/Default/Cookies", age=3600)
         new = self._touch(".config/chromium/Profile 1/Network/Cookies", age=60)
