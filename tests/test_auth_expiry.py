@@ -119,7 +119,7 @@ class RefreshFromBrowserTest(unittest.TestCase):
             dead: bi.ImportResult(profile=dead, cookies={}),
             live: bi.ImportResult(
                 profile=live,
-                cookies={"__Secure-3PAPISID": "v"},
+                cookies={"__Secure-3PAPISID": "v", "SAPISID": "v"},
                 expires_at=time.time() + 600,
             ),
         }
@@ -127,6 +127,21 @@ class RefreshFromBrowserTest(unittest.TestCase):
              mock.patch.object(bi, "import_cookies", side_effect=lambda p: results[p]):
             self.assertEqual(auth.refresh_from_browser(), "brave")
         self.assertIsNotNone(auth.session_expires_at())
+
+    def test_cross_site_leftovers_lose_to_the_real_session(self) -> None:
+        # 2026-10-22: chromium (first in the list) kept only the cross-site
+        # pair and won, so the refresh imported a signed-out jar
+        stray = mock.Mock(label="chromium")
+        real = mock.Mock(label="google chrome")
+        results = {
+            stray: bi.ImportResult(profile=stray, cookies={
+                "__Secure-3PAPISID": "x", "__Secure-3PSID": "x"}),
+            real: bi.ImportResult(profile=real, cookies={
+                "__Secure-3PAPISID": "v", "__Secure-3PSID": "v", "SAPISID": "v", "SID": "v"}),
+        }
+        with mock.patch.object(bi, "available_profiles", return_value=[stray, real]), \
+             mock.patch.object(bi, "import_cookies", side_effect=lambda p: results[p]):
+            self.assertEqual(auth.refresh_from_browser(), "google chrome")
 
     def test_returns_none_when_no_browser_has_a_session(self) -> None:
         dead = mock.Mock(label="chromium")
@@ -143,7 +158,7 @@ class RefreshFromBrowserTest(unittest.TestCase):
         def _import(p):
             if p is broken:
                 raise RuntimeError("locked cookie db")
-            return bi.ImportResult(profile=p, cookies={"__Secure-3PAPISID": "v"})
+            return bi.ImportResult(profile=p, cookies={"__Secure-3PAPISID": "v", "SAPISID": "v"})
 
         with mock.patch.object(bi, "available_profiles", return_value=[broken, live]), \
              mock.patch.object(bi, "import_cookies", side_effect=_import):

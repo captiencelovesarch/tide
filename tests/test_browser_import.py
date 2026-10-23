@@ -37,13 +37,14 @@ class JarScopingTest(unittest.TestCase):
     def test_only_what_a_browser_sends_music_youtube_com(self) -> None:
         jar = [
             _cookie("__Secure-3PAPISID", "yt", ".youtube.com"),
+            _cookie("SAPISID", "yt", ".youtube.com"),
             _cookie("host_only", "m", "music.youtube.com"),
             _cookie("SID", "google-value", ".google.com"),
             _cookie("www_only", "w", "www.youtube.com"),
             _cookie("lookalike", "x", ".notyoutube.com"),
         ]
         result = bi._result_from_jar(_profile(), jar)
-        self.assertEqual(set(result.cookies), {"__Secure-3PAPISID", "host_only"})
+        self.assertEqual(set(result.cookies), {"__Secure-3PAPISID", "SAPISID", "host_only"})
         self.assertTrue(result.looks_signed_in)
 
     def test_duplicate_names_keep_the_one_that_expires_last(self) -> None:
@@ -56,6 +57,12 @@ class JarScopingTest(unittest.TestCase):
         result = bi._result_from_jar(_profile(), jar)
         self.assertEqual(result.cookies["SID"], "new")
         self.assertEqual(result.cookies["YSC"], "dated")
+
+    def test_cross_site_leftovers_alone_are_not_a_session(self) -> None:
+        # a chromium that was never signed in kept __Secure-3PSID /
+        # __Secure-3PAPISID; importing it signed tide out (2026-10-22)
+        jar = [_cookie("__Secure-3PAPISID", "a"), _cookie("__Secure-3PSID", "b")]
+        self.assertFalse(bi._result_from_jar(_profile(), jar).looks_signed_in)
 
     def test_empty_values_are_dropped(self) -> None:
         result = bi._result_from_jar(_profile(), [_cookie("__Secure-3PAPISID", "")])
@@ -83,7 +90,8 @@ class ExpiryTest(unittest.TestCase):
         self.assertAlmostEqual(result.expires_at, UNIX_2026, places=3)
 
     def test_all_session_scoped_auth_cookies_means_unknown(self) -> None:
-        result = bi._result_from_jar(_profile(), [_cookie("__Secure-3PAPISID", "a")])
+        result = bi._result_from_jar(_profile(), [_cookie("__Secure-3PAPISID", "a"),
+                                                  _cookie("SAPISID", "b")])
         self.assertTrue(result.looks_signed_in)
         self.assertIsNone(result.expires_at)
 
@@ -136,7 +144,8 @@ class ImportTest(unittest.TestCase):
     drives it and reads its answers."""
 
     def _signed_in(self):
-        return [_cookie("__Secure-3PAPISID", "v", expires=CHROME_2026)]
+        return [_cookie("__Secure-3PAPISID", "v", expires=CHROME_2026),
+                _cookie("SAPISID", "v", expires=CHROME_2026)]
 
     def test_hands_ytdlp_the_profile_dir_and_scopes_the_jar(self) -> None:
         with mock.patch.object(bi, "extract_cookies_from_browser",
@@ -195,7 +204,7 @@ class KeyringRetryTest(unittest.TestCase):
                 logger.info("Extracted 3 cookies from chromium (40 could not be decrypted)")
                 return [_cookie("PREF", "x")]
             if keyring == unlock_with:
-                return [_cookie("__Secure-3PAPISID", "v")]
+                return [_cookie("__Secure-3PAPISID", "v"), _cookie("SAPISID", "v")]
             return []
         return _extract, calls
 
@@ -244,7 +253,7 @@ class KeyringRetryTest(unittest.TestCase):
             if keyring == "KWALLET6":
                 raise RuntimeError("kwallet-query exploded")
             if keyring == "KWALLET5":
-                return [_cookie("__Secure-3PAPISID", "v")]
+                return [_cookie("__Secure-3PAPISID", "v"), _cookie("SAPISID", "v")]
             return []
         with mock.patch.object(bi, "extract_cookies_from_browser", side_effect=_extract):
             result = bi.import_cookies(_profile())

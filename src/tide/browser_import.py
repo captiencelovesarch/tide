@@ -135,6 +135,10 @@ def available_profiles() -> list[BrowserProfile]:
 # Cookies whose lifetime actually gates an authenticated session. If any one
 # of these lapses, ytmusicapi starts 401ing, so the session's effective
 # expiry is the EARLIEST of them, not the latest.
+# one of these besides __Secure-3PAPISID: the session itself, not just
+# cross-site leftovers (see ImportResult.looks_signed_in)
+_FIRST_PARTY = ("SAPISID", "SID", "__Secure-1PSID")
+
 AUTH_COOKIES = (
     "__Secure-3PAPISID",
     "__Secure-3PSID",
@@ -188,7 +192,12 @@ class ImportResult:
 
     @property
     def looks_signed_in(self) -> bool:
-        return "__Secure-3PAPISID" in self.cookies
+        # the cross-site pair alone isn't a session: a browser that was
+        # never signed in to youtube (or signed out) can keep a stray
+        # __Secure-3PAPISID, and importing that made youtube answer as
+        # signed out. a real session has a first-party one too.
+        return ("__Secure-3PAPISID" in self.cookies
+                and any(k in self.cookies for k in _FIRST_PARTY))
 
 
 def _sent_to_music(domain: str) -> bool:
