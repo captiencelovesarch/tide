@@ -2,7 +2,7 @@
 pkgname=tide
 pkgver=2.3.0
 pkgrel=1
-pkgdesc="A multi-source music player with two personalities"
+pkgdesc="A YouTube Music client for Linux"
 arch=('any')
 url="https://github.com/captiencelovesarch/tide"
 license=('GPL-3.0-or-later')

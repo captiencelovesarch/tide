@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tide"
 version = "3.0.0"
-description = "a multi-source music player with two personalities"
+description = "a youtube music client for linux"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "GPL-3.0-or-later" }

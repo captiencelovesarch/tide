@@ -5,7 +5,7 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>tide</name>
-  <summary>one queue for every music source</summary>
+  <summary>a youtube music client</summary>
   <developer id="io.github.captiencelovesarch">
     <name>captience</name>
   </developer>
@@ -73,6 +73,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="3.0.0" date="2026-10-22">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v3.0.0</url>
+      <description>
+        <p>tide 3 ships with less. get the rest from the plugin store: discord presence, extra sources, local files, more visualizer tiles, precise lyric timing, the theme and keymap editors, the instrumental finder, steamvr, lights and kde desktop, each a click to install and a click to remove. if you used any of them, tide installs it for you on the first start. also the halo backdrop, covers for local files, and helium as a browser to sign in from.</p>
+      </description>
+    </release>
     <release version="2.3.0" date="2026-10-16">
       <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v2.3.0</url>
       <description>
