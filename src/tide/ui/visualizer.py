@@ -919,11 +919,12 @@ class VisualizerView(QWidget):
 
     def _slot_menu(self, menu: QMenu, slot: int) -> None:
         """what slot ``slot`` shows, and that tile's knobs."""
-        from .vis_play import SLOT_KEYS, plugin_tile, tile_choices
+        from .vis_play import SLOT_KEYS, plugin_tile, tile_kinds
         s = self._settings()
         key = SLOT_KEYS[slot]
         kmenu = menu.addMenu(theming.styled_case("show"))
-        self._radio(kmenu, tile_choices(), getattr(s, key), key)
+        # only what tide can show now: a store tile needs its plugin
+        self._radio(kmenu, tile_kinds(), getattr(s, key), key)
         tile = self._grid.tiles[slot] if slot < len(self._grid.tiles) else None
         entry = plugin_tile(tile.kind) if tile is not None else None
         if entry is not None:

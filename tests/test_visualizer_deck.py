@@ -500,12 +500,24 @@ def test_bare_view_still_works():
 def test_choice_providers_cover_every_tile_layout_and_classic():
     from tide.ui import settings_schema
     kinds = [k for k, _l in settings_schema.visualizer_tile_choices()]
-    # core's tiles, plus the store's with no plugin on (a saved pick of one
-    # has to survive the settings dialog)
-    assert set(kinds) == set(vis_play.KIND_LABELS) | set(vis_play.MOVED_TILES)
+    # core's tiles only: the store's need their plugin (none is on here)
+    assert set(kinds) == set(vis_play.KIND_LABELS)
+    # but a slot's saved pick of one stays choosable, so saving keeps it
+    kept = [k for k, _l in vis_play.tile_choices(keep=("halo",))]
+    assert "halo" in kept and "river" not in kept
     assert [k for k, _l in settings_schema.visualizer_layout_choices()] == list(LAYOUTS)
     classic = [k for k, _l in settings_schema.visualizer_classic_choices()]
     assert classic[0] == "theme" and set(renderer_slugs()) <= set(classic)
+
+def test_the_menu_offers_only_what_tide_has():
+    from PySide6.QtGui import QAction
+    v, s, _amb = _view()
+    menu = v._build_tile_menu(0)
+    texts = {a.text() for a in menu.findChildren(QAction)}
+    assert "spectrum" in texts and "loudness river" not in texts
+    menu.deleteLater()
+    v.teardown()
+
 
 def test_a_store_tile_without_its_plugin_is_a_placeholder():
     v, s, _amb = _view(tiles=("spectrum", "halo", "lyrics", "river"))

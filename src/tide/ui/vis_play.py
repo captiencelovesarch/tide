@@ -90,12 +90,13 @@ def tile_kinds() -> tuple[tuple[str, str], ...]:
     return TILE_KINDS + extra
 
 
-def tile_choices() -> tuple[tuple[str, str], ...]:
-    """tile_kinds plus the moved tiles whose plugin isn't on, so a saved
-    pick of one survives the settings dialog."""
+def tile_choices(keep=()) -> tuple[tuple[str, str], ...]:
+    """tile_kinds, plus any store tile in ``keep`` (the slots' saved picks)
+    whose plugin isn't on, so the settings dialog doesn't reset that pick.
+    store tiles nobody picked aren't offered without their plugin."""
     have = dict(tile_kinds())
     rest = tuple((k, f"{label} ({plugin})") for k, (label, plugin) in MOVED_TILES.items()
-                 if k not in have)
+                 if k not in have and k in keep)
     return tuple(have.items()) + rest
 
 

@@ -152,8 +152,14 @@ def visualizer_layout_choices() -> tuple[tuple[str, str], ...]:
 
 
 def visualizer_tile_choices() -> tuple[tuple[str, str], ...]:
-    from .vis_play import tile_choices
-    return tile_choices()
+    """what a slot can show, plus a store tile a slot already shows while
+    its plugin is off (so saving the dialog keeps the pick)."""
+    from .vis_play import SLOT_KEYS, tile_choices
+    from .. import plugin_host
+    host = plugin_host.host()
+    s = getattr(getattr(host, "window", None), "_settings", None) if host is not None else None
+    picks = tuple(str(getattr(s, k, "")) for k in SLOT_KEYS) if s is not None else ()
+    return tile_choices(keep=picks)
 
 
 def visualizer_classic_choices() -> tuple[tuple[str, str], ...]:
