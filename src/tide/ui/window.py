@@ -1905,6 +1905,7 @@ class MainWindow(QMainWindow):
         elif name == "audio_fx":
             self._set_stack_index(10)
         elif name == "plugins":
+            self._ensure_store_view()
             self._set_stack_index(12)
             shown = getattr(self.store_view, "shown", None)
             if callable(shown):
@@ -5329,19 +5330,26 @@ class MainWindow(QMainWindow):
     # ---------- settings dialog ----------
 
     def attach_store(self, host) -> None:
-        """the plugin store page, once the plugin host exists."""
-        from .store_view import StoreController, StoreView, UpdateDot
+        """the plugin store, once the plugin host exists. the page itself is
+        built the first time you open it (ten banners decoded at launch
+        made tide lag); the daily check and the update dot start now."""
+        from .store_view import StoreController, UpdateDot
         self._store = StoreController(host, parent=self)
+        self._store_dot = UpdateDot(self.nav_plugins_btn)
+        self._store.updates_changed.connect(self._store_dot.set_count)
+        self._store_dot.set_count(self._store.update_count())
+        self._store.start_daily()
+
+    def _ensure_store_view(self) -> None:
+        if self._store is None or hasattr(self.store_view, "shown"):
+            return
+        from .store_view import StoreView
         view = StoreView(self._store)
         old = self.store_view
         self.stack.insertWidget(12, view)
         self.stack.removeWidget(old)
         old.deleteLater()
         self.store_view = view
-        self._store_dot = UpdateDot(self.nav_plugins_btn)
-        self._store.updates_changed.connect(self._store_dot.set_count)
-        self._store_dot.set_count(self._store.update_count())
-        self._store.start_daily()
 
     def open_settings(self) -> None:
         # Defer the modal past the click handler — a QDialog opened

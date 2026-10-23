@@ -7,6 +7,7 @@ No full-window renders.
 import os
 import time
 import unittest
+from unittest import mock
 from datetime import date, timedelta
 
 import shiboken6
@@ -41,6 +42,10 @@ class ViewBase(StoreBase):
                             settings_dir=self.settings_dir, data_dir=self.data,
                             toast=lambda text, label, fn: self.toasts.append((text, label, fn)))
         self.addCleanup(lambda: shiboken6.isValid(c) and shiboken6.delete(c))
+        # banner and preview fetches still running when a test ends would
+        # outlive it (qt aborts on a QThread destroyed while running)
+        from tide import qthreads
+        self.addCleanup(qthreads.join, store_view.GROUP, 3000)
         return c
 
     def fetched(self, c: StoreController) -> None:
@@ -318,10 +323,56 @@ class WidgetTests(ViewBase):
         self.assertFalse(page.reload_btn.isHidden())
         self.assertEqual(page.author.text(), "not from the store")
 
+    def test_the_page_ends_with_more_plugins(self):
+        self.publish(self.plugin_zip(), category="visuals")
+        self.publish(self.plugin_zip("near"), slug="near", category="visuals")
+        self.publish(self.plugin_zip("far"), slug="far", category="tools")
+        c = self.ctl()
+        self.fetched(c)
+        page = self.widget(PluginPage(c))
+        opened = []
+        page.opened.connect(opened.append)
+        page.show_plugin("demo")
+        cards = [t.slug for t in page.more.tiles()]
+        self.assertEqual(cards, ["near", "far"])      # same kind first, not itself
+        page.more.tiles()[0].opened.emit("near")
+        self.assertEqual(opened, ["near"])
+
+    def test_the_weeks_banner_only_moves_on_screen(self):
+        from tide.ui.store_view import Banner
+        b = self.widget(Banner(self.ctl(), autoplay=True))
+        b._motion = store.Asset("file:///nope.webp", "0" * 64)
+        b._sync_movie()
+        self.assertIsNone(b._movie, "a hidden banner played its clip")
+
     def test_can_line_is_plain(self):
         self.assertEqual(store_view.can_line([]),
                          "it runs as you, with your permissions, like any plugin.")
         self.assertEqual(store_view.size_text(1843200), "1.8 mb")
+
+
+class LazyPageTests(ViewBase):
+    def test_the_window_builds_the_store_page_when_you_open_it(self):
+        from tide.playback import MpvBackend, PlaybackRouter
+        from tide.sources.base import NullSource
+        from tide.ui.window import MainWindow
+        self.publish(self.plugin_zip())
+        router = PlaybackRouter()
+        router.register(MpvBackend())
+        w = MainWindow(NullSource(), router)
+
+        def gone():
+            from PySide6.QtTest import QTest
+            w.close()
+            w.deleteLater()
+            QTest.qWait(30)
+        self.addCleanup(gone)
+        with mock.patch("tide.ui.store_view.StoreController.start_daily"):
+            w.attach_store(self.host())
+        self.assertFalse(hasattr(w.store_view, "shown"), "built at launch")
+        w._switch_view("plugins")
+        self.assertTrue(hasattr(w.store_view, "shown"))
+        self.assertIs(w.stack.widget(12), w.store_view)
 
 
 class DialogTests(unittest.TestCase):

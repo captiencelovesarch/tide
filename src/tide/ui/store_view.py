@@ -540,8 +540,10 @@ class Banner(QWidget):
                 return
 
     def _sync_movie(self) -> None:
+        # only while it's on screen: a hidden store page used to decode the
+        # week's moving banner from launch on, and tide lagged
         want = (self._motion is not None and _thumbnails() and _motion_ok()
-                and (self._autoplay or self._hover))
+                and (self._autoplay or self._hover) and self.isVisible())
         path = self._ctl.asset(self._motion) if want else None
         if path is None:
             if self._movie is not None:
@@ -559,6 +561,14 @@ class Banner(QWidget):
         self._hover = True
         self._sync_movie()
         super().enterEvent(ev)
+
+    def showEvent(self, ev) -> None:  # noqa: N802
+        super().showEvent(ev)
+        self._sync_movie()
+
+    def hideEvent(self, ev) -> None:  # noqa: N802
+        super().hideEvent(ev)
+        self._sync_movie()
 
     def leaveEvent(self, ev) -> None:  # noqa: N802
         self._hover = False
@@ -581,7 +591,17 @@ class Banner(QWidget):
             frame = frame if not frame.isNull() else None
         pix = frame or self._pix
         if pix is not None:
-            scaled = pix.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            if frame is None:
+                # the still: scaled once per size, not on every paint
+                key = (pix.cacheKey(), self.width(), self.height())
+                if getattr(self, "_scaled_key", None) != key:
+                    self._scaled_key = key
+                    self._scaled = pix.scaled(self.size(), Qt.KeepAspectRatioByExpanding,
+                                              Qt.SmoothTransformation)
+                scaled = self._scaled
+            else:
+                scaled = pix.scaled(self.size(), Qt.KeepAspectRatioByExpanding,
+                                    Qt.FastTransformation)
             x = (scaled.width() - self.width()) // 2
             y = (scaled.height() - self.height()) // 2
             p.drawPixmap(0, 0, scaled, x, y, self.width(), self.height())
@@ -1204,6 +1224,7 @@ class Previews(QWidget):
 
 class PluginPage(QWidget):
     back = Signal()
+    opened = Signal(str)        # another plugin, from "more plugins"
 
     INFO_MAX = 620          # a readable line, however wide the window
     SIDE_BY_SIDE = 1150     # from this width, pictures left and facts right
@@ -1282,6 +1303,13 @@ class PluginPage(QWidget):
         self._split.addWidget(self.info, 1)
         self._split.addStretch(0)
         col.addLayout(self._split)
+        # under it: a row of other plugins, same kind first, so the page
+        # doesn't end in a screen of nothing
+        col.addSpacing(18)
+        self.more_head = Heading("more plugins", 34)
+        self.more = ResponsiveGrid(min_tile=240, max_tile=460, gap=16, row_gap=22, max_rows=1)
+        col.addWidget(self.more_head)
+        col.addWidget(self.more)
         col.addStretch(1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1359,8 +1387,26 @@ class PluginPage(QWidget):
         self.button_row.addWidget(self.reload_btn)
         self.forget.setChecked(False)
         self._build_form()
+        self._fill_more(entry)
         self._on_state(slug)
         self._scroll.verticalScrollBar().setValue(0)
+
+    MORE = 4
+
+    def _fill_more(self, entry) -> None:
+        self.more.clear()
+        others = [e for e in self._ctl.entries() if e.slug != self.slug]
+        if entry is not None:
+            # same category first, then the rest, newest first within each
+            others.sort(key=lambda e: (e.category != entry.category, e.added == "", e.name))
+        picks = others[:self.MORE]
+        for e in picks:
+            card = StoreCard(self._ctl, e.slug, e.name, e.author, e.official, e.blurb,
+                             banner=e.banner, motion=e.banner_motion, icon=e.icon)
+            card.opened.connect(self.opened)
+            self.more.add(card)
+        self.more_head.setVisible(bool(picks))
+        self.more.setVisible(bool(picks))
 
     def _fill_needs(self, needs) -> None:
         while self.needs.count():
@@ -1431,6 +1477,7 @@ class StoreView(QWidget):
         self.stack.addWidget(self.page)
         self.grid.opened.connect(self.open_plugin)
         self.page.back.connect(lambda: self.stack.setCurrentIndex(0))
+        self.page.opened.connect(self.open_plugin)
         col = QVBoxLayout(self)
         col.setContentsMargins(0, 0, 0, 0)
         col.addWidget(self.stack)
