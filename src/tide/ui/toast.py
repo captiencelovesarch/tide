@@ -159,6 +159,15 @@ class Toast(QFrame):
             return QPoint(0, 0)
         pw = parent.width() if isinstance(parent, QWidget) else 800
         ph = parent.height() if isinstance(parent, QWidget) else 600
+        # the halo backdrop puts a see-through margin round the app whose
+        # clicks fall through to the desktop: a toast there had its ✕ out
+        # of reach (it minimized tide). keep it inside the app's rect.
+        halo = getattr(parent, "_halo", None)
+        try:
+            inset = int(halo.margin()) if halo is not None else 0
+        except Exception:  # noqa: BLE001 - an old window without margin()
+            inset = 0
+        pw, ph = pw - inset, ph - inset
         margin = 18
         # Stack with any siblings above us.
         offset = 0
@@ -168,7 +177,7 @@ class Toast(QFrame):
             offset += sibling.height() + 8
         x = pw - self.width() - margin
         y = ph - self.height() - margin - offset
-        return QPoint(max(margin, x), max(margin, y))
+        return QPoint(max(margin + inset, x), max(margin + inset, y))
 
     def eventFilter(self, obj, event) -> bool:
         if event.type() == QEvent.Resize:

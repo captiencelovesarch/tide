@@ -70,6 +70,18 @@ class ToastLayoutTest(unittest.TestCase):
         self.assertLessEqual(target.x() + t.width(), self.host.width())
         self.assertLessEqual(target.y() + t.height(), self.host.height())
 
+    def test_stays_out_of_the_halos_see_through_margin(self) -> None:
+        # the halo backdrop's margin passes clicks through to the desktop:
+        # a toast there had its ✕ out of reach
+        class Halo:
+            def margin(self):
+                return 52
+        self.host._halo = Halo()
+        t = self._toast("uninstalled extra sources", "undo")
+        target = t._target_position()
+        self.assertLessEqual(target.x() + t.width(), self.host.width() - 52)
+        self.assertLessEqual(target.y() + t.height(), self.host.height() - 52)
+
     def test_action_toast_does_not_auto_dismiss(self) -> None:
         t = self._toast("token expired", "refresh token")
         self.assertEqual(t._lifetime_ms, 0)
