@@ -53,11 +53,11 @@ _INTERVAL_RE = re.compile(r'\["identity\.hfcr",\s*(\d+)\]')
 
 
 def jar_file() -> Path:
-    return config.CONFIG_DIR / "yt_cookies.txt"
+    return config.signin_dir() / "yt_cookies.txt"
 
 
 def _meta_file() -> Path:
-    return config.CONFIG_DIR / "yt_session.json"
+    return config.signin_dir() / "yt_session.json"
 
 
 class _Jar(YoutubeDLCookieJar):

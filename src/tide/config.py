@@ -21,18 +21,28 @@ def _xdg(env: str, default: str) -> Path:
     return Path(os.environ.get(env) or Path.home() / default)
 
 
-# TIDE_CONFIG_DIR moves tide's own config folder and nothing else (a dev
-# build on a copy of your config). Moving XDG_CONFIG_HOME instead hides
-# every browser's profile from the cookie import too.
+# TIDE_CONFIG_DIR moves tide's own config folder (a dev build on a copy of
+# your config). Moving XDG_CONFIG_HOME instead hides every browser's
+# profile from the cookie import too. Sign-ins stay in the real folder:
+# youtube music rotates its cookies, so a copy of them goes stale the
+# moment the other tide rotates, and the copy showed "token expired".
+_SIGNIN_DIR: Path | None = (_xdg("XDG_CONFIG_HOME", ".config") / APP_NAME
+                            if os.environ.get("TIDE_CONFIG_DIR") else None)
 CONFIG_DIR: Path = (Path(os.environ["TIDE_CONFIG_DIR"]).expanduser()
                     if os.environ.get("TIDE_CONFIG_DIR")
                     else _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME)
 CACHE_DIR: Path = _xdg("XDG_CACHE_HOME", ".cache") / APP_NAME
 DATA_DIR: Path = _xdg("XDG_DATA_HOME", ".local/share") / APP_NAME
 
-OAUTH_FILE: Path = CONFIG_DIR / "oauth.json"
-BROWSER_AUTH_FILE: Path = CONFIG_DIR / "browser.json"
-SPOTIFY_AUTH_FILE: Path = CONFIG_DIR / "spotify.json"
+
+def signin_dir() -> Path:
+    """where sign-ins live: CONFIG_DIR, unless TIDE_CONFIG_DIR moved it."""
+    return _SIGNIN_DIR if _SIGNIN_DIR is not None else CONFIG_DIR
+
+
+OAUTH_FILE: Path = signin_dir() / "oauth.json"
+BROWSER_AUTH_FILE: Path = signin_dir() / "browser.json"
+SPOTIFY_AUTH_FILE: Path = signin_dir() / "spotify.json"
 WEBVIEW_PROFILE_DIR: Path = DATA_DIR / "webview"
 SETTINGS_FILE: Path = CONFIG_DIR / "settings.toml"
 STREAM_CACHE_FILE: Path = CACHE_DIR / "streams.json"

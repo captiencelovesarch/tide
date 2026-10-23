@@ -99,7 +99,7 @@ def save_browser_auth(
 
 
 def _meta_file() -> Path:
-    return config.CONFIG_DIR / "browser_meta.json"
+    return config.signin_dir() / "browser_meta.json"
 
 
 def session_expires_at() -> float | None:
@@ -298,5 +298,5 @@ def clear_saved_auth() -> None:
     config.OAUTH_FILE.unlink(missing_ok=True)
     # Drop the live jar so a signed-out user resolves streams anonymously
     # again (and a re-sign-in seeds it fresh), with its rotation record.
-    (config.CONFIG_DIR / "yt_cookies.txt").unlink(missing_ok=True)
-    (config.CONFIG_DIR / "yt_session.json").unlink(missing_ok=True)
+    (config.signin_dir() / "yt_cookies.txt").unlink(missing_ok=True)
+    (config.signin_dir() / "yt_session.json").unlink(missing_ok=True)
