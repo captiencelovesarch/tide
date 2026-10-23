@@ -656,6 +656,17 @@ class PersonalityPane(QWidget):
         self.stop_animation()
         super().hideEvent(ev)
 
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        # Wrapped trait lines claim their full height at this width, and
+        # a box layout short of that squeezes every row, the fixed-size
+        # art included, so the meter drew over the art. Ask for the room.
+        lay = self.layout()
+        if lay is not None and lay.hasHeightForWidth():
+            need = max(scale.px(280), lay.totalHeightForWidth(self.width()))
+            if need != self.minimumHeight():
+                self.setMinimumHeight(need)
+
     def closeEvent(self, ev) -> None:
         self.stop_animation()
         super().closeEvent(ev)
@@ -845,7 +856,7 @@ class ChooserDialog(QDialog):
         # Cap the block and centre it. Uncapped, 1440p turns the panes
         # into slivers; a fixed cap leaves an island in a black screen —
         # so the cap scales (~72%), floored so small screens stay uncapped.
-        geo = _available_geometry()
+        geo = _available_geometry(self)
         cap_w = int(geo.width() * 0.72) if geo is not None else 0
         cap_h = int(geo.height() * 0.75) if geo is not None else 0
         content.setMaximumWidth(max(scale.px(1500), cap_w))
@@ -875,7 +886,7 @@ class ChooserDialog(QDialog):
         outer.addStretch(1)
 
     def _size_to_screen(self) -> None:
-        geo = _available_geometry()
+        geo = _available_geometry(self)
         if geo is not None:
             self.setGeometry(geo)
         else:
@@ -971,10 +982,21 @@ class ChooserDialog(QDialog):
         p.fillRect(self.rect(), bg)
 
 
-def _available_geometry():
-    """The primary screen's usable rect, or ``None`` with no screen."""
+def _available_geometry(widget: QWidget | None = None):
+    """The usable rect of the screen ``widget``'s window is on (the
+    primary screen without one), or ``None`` with no screen. On Wayland
+    ``primaryScreen()`` can be any monitor, so a dialog sized from it
+    came up at a side screen's size and squeezed the panes."""
+    screen = None
     try:
-        screen = QGuiApplication.primaryScreen()
+        if widget is not None:
+            host = widget.window()
+            if host is not None and host is not widget:
+                screen = host.screen()
+            elif widget.parentWidget() is not None:
+                screen = widget.parentWidget().window().screen()
+        if screen is None:
+            screen = QGuiApplication.primaryScreen()
     except Exception:
         return None
     if screen is None:

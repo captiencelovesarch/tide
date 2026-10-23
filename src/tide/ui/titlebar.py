@@ -14,7 +14,9 @@ widget takes the decoration's place via `QMainWindow.setMenuWidget`:
   and tiling keep working), double-click maximizes;
 - edge resize via a hit test on the window's QWindow → startSystemResize
   (frameless windows lose the compositor's resize borders; KDE's
-  Meta+drag continues to work as the native fallback).
+  Meta+drag continues to work as the native fallback). The grab band is
+  as wide as a native border's, wider still at the corners, and the
+  cursor turns into the resize arrow over it so you can see you're on it.
 
 Dialogs and the settings window keep their native decorations — they're
 transient, and the wins here are for the window you live in.
@@ -22,7 +24,7 @@ transient, and the wins here are for the window you live in.
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRectF, Qt
-from PySide6.QtGui import QMouseEvent, QPainter, QPen, QWindow
+from PySide6.QtGui import QCursor, QMouseEvent, QPainter, QPen, QWindow
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -32,23 +34,53 @@ from PySide6.QtWidgets import (
 )
 
 from .. import theming
+from . import scale
 
-_RESIZE_MARGIN_PX = 6
+# 6px used to need the pointer dead on the edge. Native borders grab
+# about this much; the corners get more so a diagonal is easy to catch.
+_RESIZE_MARGIN_PX = 10
+_RESIZE_CORNER_PX = 20
+
+_CURSORS = {
+    Qt.LeftEdge: Qt.SizeHorCursor, Qt.RightEdge: Qt.SizeHorCursor,
+    Qt.TopEdge: Qt.SizeVerCursor, Qt.BottomEdge: Qt.SizeVerCursor,
+    Qt.TopEdge | Qt.LeftEdge: Qt.SizeFDiagCursor,
+    Qt.BottomEdge | Qt.RightEdge: Qt.SizeFDiagCursor,
+    Qt.TopEdge | Qt.RightEdge: Qt.SizeBDiagCursor,
+    Qt.BottomEdge | Qt.LeftEdge: Qt.SizeBDiagCursor,
+}
+
 
 # Edge names → Qt.Edges for startSystemResize.
 def _edges_at(window: QWidget, global_pos: QPoint) -> Qt.Edge:
     if window.isMaximized() or window.isFullScreen():
         return Qt.Edge(0)
-    pos = window.mapFromGlobal(global_pos)
-    w, h, m = window.width(), window.height(), _RESIZE_MARGIN_PX
+    # The app's own rect: with the halo backdrop on, the window carries a
+    # glow margin around it (ui/halo.py) that isn't part of the app.
+    r = window.contentsRect()
+    pos = window.mapFromGlobal(global_pos) - r.topLeft()
+    w, h = r.width(), r.height()
+    m, c = scale.px(_RESIZE_MARGIN_PX), scale.px(_RESIZE_CORNER_PX)
+    x, y = pos.x(), pos.y()
+    if not (0 <= x < w and 0 <= y < h):
+        return Qt.Edge(0)
+    left, right = x <= m, x >= w - m
+    top, bottom = y <= m, y >= h - m
+    if not (left or right or top or bottom):
+        return Qt.Edge(0)
+    # Near a corner along either edge counts as the corner.
+    left = left or ((top or bottom) and x <= c)
+    right = right or ((top or bottom) and x >= w - c)
+    top = top or ((left or right) and y <= c)
+    bottom = bottom or ((left or right) and y >= h - c)
     edges = Qt.Edge(0)
-    if pos.x() <= m:
+    if left:
         edges |= Qt.LeftEdge
-    elif pos.x() >= w - m:
+    elif right:
         edges |= Qt.RightEdge
-    if pos.y() <= m:
+    if top:
         edges |= Qt.TopEdge
-    elif pos.y() >= h - m:
+    elif bottom:
         edges |= Qt.BottomEdge
     return edges
 
@@ -68,6 +100,7 @@ class EdgeResizer(QObject):
         super().__init__(window)
         self._window = window
         self._handle: QWindow | None = None
+        self._cursor_on = False      # our resize arrow is overriding
         # the widget's own events are few; this only catches the native
         # window being created or rebuilt, so the filter can follow it
         window.installEventFilter(self)
@@ -91,15 +124,42 @@ class EdgeResizer(QObject):
             self._handle = None
 
     def detach(self) -> None:
+        self._set_cursor(Qt.Edge(0))
         self._window.removeEventFilter(self)
         self._release_handle()
+
+    def _set_cursor(self, edges: Qt.Edge) -> None:
+        # An override, not setCursor: the child under the pointer would
+        # put its own cursor straight back on the next move.
+        shape = _CURSORS.get(edges)
+        if shape is None:
+            if self._cursor_on:
+                QApplication.restoreOverrideCursor()
+                self._cursor_on = False
+            return
+        if self._cursor_on:
+            QApplication.changeOverrideCursor(QCursor(shape))
+        else:
+            QApplication.setOverrideCursor(QCursor(shape))
+            self._cursor_on = True
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self._window:
             if event.type() in (QEvent.WinIdChange, QEvent.Show):
                 self._attach()
+            elif event.type() == QEvent.Hide:
+                self._set_cursor(Qt.Edge(0))
             return False
-        if event.type() != QEvent.MouseButtonPress:
+        t = event.type()
+        if t == QEvent.Leave:
+            self._set_cursor(Qt.Edge(0))
+            return False
+        if t == QEvent.MouseMove and obj is self._handle:
+            if not (event.buttons() & Qt.LeftButton):
+                self._set_cursor(_edges_at(
+                    self._window, event.globalPosition().toPoint()))
+            return False
+        if t != QEvent.MouseButtonPress:
             return False
         if not isinstance(event, QMouseEvent) or event.button() != Qt.LeftButton:
             return False
@@ -108,6 +168,7 @@ class EdgeResizer(QObject):
         edges = _edges_at(self._window, event.globalPosition().toPoint())
         if not edges:
             return False
+        self._set_cursor(Qt.Edge(0))
         self._handle.startSystemResize(edges)
         return True
 

@@ -914,6 +914,14 @@ class HeadlineNowLabel(NowPlayingLabel):
         f.setWeight(QFont.Weight.Medium)
         return self._role_font("title", f)
 
+    def _min_height(self) -> int:
+        # The headline runs 1.25x the body, so the flat 40px the other
+        # labels use is too short for it plus the byline: the byline's
+        # bottom ran past the widget and got clipped.
+        need = (QFontMetrics(self._title_font()).height() + 2
+                + QFontMetrics(self.font()).height() + 4)
+        return max(super()._min_height(), need)
+
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing, True)

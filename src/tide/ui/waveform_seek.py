@@ -379,12 +379,12 @@ class WaveformSeek(QObject):
         elif t in (QEvent.MouseMove, QEvent.HoverMove):
             self._hovering = True
             if self.overlay is not None:
-                self.overlay.hover_x = ev.position().x()
+                self.overlay.hover_x = ev.position().x() - self._span()[0]
             self._settle()
         elif t == QEvent.MouseButtonPress:
             self._pressed = True
             if self.overlay is not None:
-                self.overlay.hover_x = ev.position().x()
+                self.overlay.hover_x = ev.position().x() - self._span()[0]
             self._settle()
         elif t == QEvent.MouseButtonRelease:
             self._pressed = False
@@ -397,17 +397,28 @@ class WaveformSeek(QObject):
 
     # ------------------------------------------------------------ look
 
+    def _span(self) -> tuple[int, int]:
+        """(x, width) of the seekable part of the bar, in its own coords.
+        Most variants seek across their whole width; brutalist's text bar
+        only spans its cells (``seek_span``)."""
+        pr = self._progress
+        if pr is None:
+            return 0, 0
+        span = getattr(pr, "seek_span", None)
+        return span() if span is not None else (0, pr.width())
+
     def _place(self) -> None:
         pr, ov = self._progress, self.overlay
         if pr is None or ov is None:
             return
         try:
             g = pr.geometry()
+            x0, w = self._span()
         except RuntimeError:
             return
         # Above the bar, standing on its top edge.
         h = scale.px(WAVE_PX)
-        ov.setGeometry(g.x(), g.top() - h - scale.px(1), g.width(), h)
+        ov.setGeometry(g.x() + x0, g.top() - h - scale.px(1), w, h)
         if self._alpha > 0:
             ov.show()
             ov.raise_()

@@ -20,6 +20,7 @@ SLUGS: tuple[str, ...] = (
     "ripples",
     "stage",
     "rimlight",
+    "halo",
     "liquid",
     "contours",
     "vinyl",
@@ -35,6 +36,7 @@ LABELS: dict[str, str] = {
     "ripples": "ripples · every kick drops a ring on the water",
     "stage": "stage lights · beams sweep through the haze",
     "rimlight": "rim light · edges hold the light",
+    "halo": "halo · the cover's colour glows around the window",
     "liquid": "liquid cover · the album art, melted",
     "contours": "contours · topo lines that shift with the bass",
     "vinyl": "vinyl · the grooves catch the light",
@@ -62,7 +64,7 @@ SURFACES: tuple[str, ...] = ("mini", "fullscreen")
 
 
 def resolve(style: str, *, adaptive_on: bool, surface: str,
-            main_style: str = "") -> str:
+            main_style: str = "", brutalist: bool = False) -> str:
     """Companion "follow" semantics, in one place: the stored pick +
     the main window's backdrop master toggle → the slug for the
     companion's ``CentralBg`` ("off" = flat card).
@@ -73,6 +75,7 @@ def resolve(style: str, *, adaptive_on: bool, surface: str,
       "off"        either       either        →  "off"
       follow / ""  fullscreen   True          →  main_style or "field"
       follow / ""  fullscreen   False         →  "off"
+      follow / ""  mini         False         →  "off" when ``brutalist``
       follow / ""  mini         either        →  main_style or "field"
 
     The mini/fullscreen split on the last rows is deliberate: fullscreen
@@ -80,6 +83,9 @@ def resolve(style: str, *, adaptive_on: bool, surface: str,
     painted nord's plainly wrong bg_alt blue over a main window showing
     none); the mini keeps its gradient because the mini IS its backdrop —
     a frameless card with nothing painted is a hole in the compositor.
+    brutalist's mini is the exception: it has its own hard frame, so a
+    flat card is a finished look there, and a gradient under a main
+    window showing none read as modern.
     Unknown non-sentinel styles pass through verbatim — validating real
     slugs stays ``central_bg.set_style``'s job (falls back to "field").
     """
@@ -88,7 +94,7 @@ def resolve(style: str, *, adaptive_on: bool, surface: str,
     style = style or FOLLOW
     if style != FOLLOW:
         return style
-    if surface == "fullscreen" and not adaptive_on:
+    if not adaptive_on and (surface == "fullscreen" or brutalist):
         return OFF
     return main_style or "field"
 

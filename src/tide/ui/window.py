@@ -3422,6 +3422,9 @@ class MainWindow(QMainWindow):
             want = bool(theme.t("layout", "window_translucent", False))
         except Exception:
             want = False
+        self._sync_halo()
+        # halo paints its glow into a see-through margin around the app
+        want = want or self._halo_wanted()
         if not want:
             try:
                 from .central_bg import corner_radius as _corner_radius
@@ -3451,6 +3454,29 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(geo)
                 self.show()
             QTimer.singleShot(0, _remap)
+
+    def _halo_wanted(self) -> bool:
+        """The halo backdrop needs tide's own titlebar: under a system
+        decoration the margin would sit inside the frame."""
+        s = getattr(self, "_settings", None)
+        return (s is not None and bool(s.adaptive_background)
+                and (s.adaptive_background_style or "") == "halo"
+                and bool(self.windowFlags() & Qt.FramelessWindowHint))
+
+    def _sync_halo(self) -> None:
+        if not hasattr(self, "central_bg"):
+            return
+        glow = getattr(self, "_halo", None)
+        want = self._halo_wanted()
+        if glow is None:
+            if not want:
+                return
+            from .halo import HaloGlow
+            glow = self._halo = HaloGlow(
+                self, self.central_bg,
+                card=lambda: self.central_bg.geometry(),
+                apply_margin=lambda m: self.setContentsMargins(m, m, m, m))
+        glow.set_active(want)
 
     def _on_theme_changed(self, theme) -> None:
         prior = self._theme
@@ -5156,6 +5182,8 @@ class MainWindow(QMainWindow):
         ambient = getattr(self, "_ambient", None)
         if ambient is not None:
             ambient.set_pulse_enabled(s.adaptive_pulse and s.adaptive_background)
+        # halo flips the window's alpha channel and its glow margin
+        self._apply_window_translucency(self._theme)
 
     def apply_text_contrast_setting(self) -> None:
         """The readability layer on the theming manager. Restyles itself

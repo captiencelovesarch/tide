@@ -18,6 +18,12 @@ Distinctives, deliberately not found in other mini players:
     visualizer's renderers over the breathing backdrop),
   * "zen" — controls fade away when the mouse has left it alone.
 
+brutalist gets its own cut of the same window: square corners (or the
+user's corner style), the hard 1px fg frame with the progress running
+square along it, the framed art tile, a ``── now playing ──`` rule,
+left-aligned text and the ``[▮▮▯▯]`` text bar. modern keeps the rounded
+centred card.
+
 Wayland rules (KDE): never self-position — moving is only ever
 `startSystemMove()`; no always-on-top; fixed layout-driven size.
 """
@@ -30,7 +36,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect, QHBoxLayout, QLabel, QLayout, QMenu,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 # Qt's QWIDGETSIZE_MAX (the "no maximum" sentinel setMaximumHeight expects).
@@ -44,7 +50,8 @@ from . import art_cache, motion as motion_module, scale as _scale, text_fx
 from .central_bg import CentralBg
 from .variants import ThinProgress
 from .visualizer import _Canvas
-from .widgets import AlbumArt, BracketButton, _color
+from .headings import line_heading
+from .widgets import AlbumArt, BracketButton, MonoProgress, _color
 
 
 # (label, slug) context-menu rows from the backdrop registry — only the
@@ -59,7 +66,8 @@ _PROGRESS_CHOICES = [
     ("thin bar", "thin"),
 ]
 
-_CORNER_RADIUS = 12          # the mini is always "rounded" — that's the look
+_CORNER_RADIUS = 12          # modern's mini is always rounded; brutalist
+                             # follows the corner style (square by default)
 _ZEN_IDLE_MS = 2600
 _LYRICS_PANEL_H = 210
 _LYRICS_FONT_SCALE = 0.65
@@ -90,6 +98,16 @@ def _mmss(seconds: float) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
+def _brutalist(theme) -> bool:
+    return getattr(theme, "aesthetic", "modern") != "modern"
+
+
+def _card_radius(theme) -> int:
+    if _brutalist(theme):
+        return theming.effective_radius_px(theme)
+    return _CORNER_RADIUS
+
+
 class _RingOverlay(QWidget):
     """Progress drawn as the window's border: a rounded-rect arc that starts
     at top-center and fills clockwise. Display-only — seeking is handled by
@@ -103,6 +121,8 @@ class _RingOverlay(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, False)
         self._frac = 0.0
         self._active = False
+        self._radius = float(_CORNER_RADIUS)
+        self._fill = True        # off: brutalist's bare frame (thin-bar mode)
         # Effective, not base: the ring paints with the accent, and the
         # mini is always built mid-song — the adaptive accent must be
         # the one already in force (no re-emit comes for the same song).
@@ -112,6 +132,16 @@ class _RingOverlay(QWidget):
     def _on_theme(self, theme) -> None:
         self._theme = theme
         self.update()
+
+    def set_radius(self, radius: float) -> None:
+        if radius != self._radius:
+            self._radius = float(radius)
+            self.update()
+
+    def set_fill(self, on: bool) -> None:
+        if on != self._fill:
+            self._fill = bool(on)
+            self.update()
 
     def set_progress(self, position: float, duration: float) -> None:
         frac = (position / duration) if duration > 0 else 0.0
@@ -127,11 +157,17 @@ class _RingOverlay(QWidget):
         painter and the seek hit-test so they can never disagree."""
         inset = self.PEN_W / 2.0 + 1.0
         rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
-        r = max(1.0, float(_CORNER_RADIUS) - inset)
         left, top = rect.left(), rect.top()
         right, bottom = rect.right(), rect.bottom()
         cx = rect.center().x()
         path = QPainterPath(QPointF(cx, top))
+        if self._radius <= inset:
+            # Square corners (brutalist): no arcs, or they'd round anyway.
+            for x, y in ((right, top), (right, bottom), (left, bottom),
+                         (left, top), (cx, top)):
+                path.lineTo(x, y)
+            return path
+        r = self._radius - inset
         path.lineTo(right - r, top)
         path.arcTo(right - 2 * r, top, 2 * r, 2 * r, 90, -90)
         path.lineTo(right, bottom - r)
@@ -161,18 +197,26 @@ class _RingOverlay(QWidget):
 
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        brutal = _brutalist(self._theme)
+        p.setRenderHint(QPainter.Antialiasing, not brutal)
+        if brutal:
+            # The hard fg box every brutalist panel wears, on the card edge.
+            p.setPen(QPen(_color(self._theme, "fg", "#e6e6e6"), 1.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
         path = self.border_path()
-        dim = _color(self._theme, "dim", "#666")
-        dim.setAlpha(70)
-        # The full track, faint.
-        p.setPen(QPen(dim, 1.0))
-        p.drawPath(path)
-        if not self._active or self._frac <= 0.0:
+        if not brutal:
+            dim = _color(self._theme, "dim", "#666")
+            dim.setAlpha(70)
+            # The full track, faint.
+            p.setPen(QPen(dim, 1.0))
+            p.drawPath(path)
+        if not self._fill or not self._active or self._frac <= 0.0:
             return
         accent = _color(self._theme, "accent", "#d4b95e")
         pen = QPen(accent, self.PEN_W)
         pen.setCapStyle(Qt.FlatCap)
+        pen.setJoinStyle(Qt.MiterJoin if brutal else Qt.RoundJoin)
         if self._frac < 1.0:
             # SVG stroke-dashoffset trick: one dash = the filled arc, one gap
             # = the rest. Pattern units are pen-width multiples; the path
@@ -212,6 +256,7 @@ class MiniPlayer(QWidget):
         self._pulse_resize_on = False
         self._pulse_pad = 0
         self._gutter = 0
+        self._halo_margin = 0               # the halo glow's room (ui/halo.py)
         self._pulse_shown = 0.0
         self._pulse_target = 0.0
         self._pulse_timer = QTimer(self)
@@ -241,6 +286,13 @@ class MiniPlayer(QWidget):
         self.art_stack.addWidget(self.art)
         self.art_stack.addWidget(self.vis_canvas)
         self.art_stack.setFixedSize(self.art.size())
+        # brutalist only: the section rule over the art, like every
+        # panel in the main window.
+        self.heading_lbl = QLabel()
+        self.heading_lbl.setTextFormat(Qt.PlainText)
+        self.heading_lbl.setProperty("class", "dim")
+        self.heading_lbl.hide()
+        col.addWidget(self.heading_lbl)
         art_row = QHBoxLayout()
         art_row.addStretch(1)
         art_row.addWidget(self.art_stack)
@@ -281,12 +333,18 @@ class MiniPlayer(QWidget):
         # re-measures (non-mono fonts give every random-glyph frame a
         # different pixel width) and the SetFixedSize layout re-negotiates
         # the WINDOW per frame — visible as the window spazzing on each new
-        # ticker line.
-        self._pin_label_widths()
+        # ticker line. (Pinned once the bars below exist: the text bar is
+        # sized there too.)
 
-        self.progress = ThinProgress()
-        self.progress.seek_requested.connect(self._on_seek_requested)
-        fg.addWidget(self.progress)
+        # One bar per personality; ``progress`` is whichever is live.
+        self.thin_progress = ThinProgress()
+        self.mono_progress = MonoProgress()
+        self.mono_progress.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        for bar in self._bars():
+            bar.seek_requested.connect(self._on_seek_requested)
+            bar.hide()
+            fg.addWidget(bar)
+        self._pin_label_widths()
 
         transport = QHBoxLayout()
         transport.setSpacing(_scale.px(6))
@@ -305,6 +363,8 @@ class MiniPlayer(QWidget):
                     self.next_btn, self.repeat_btn, self.like_btn):
             btn.setFocusPolicy(Qt.NoFocus)
         transport.addStretch(1)
+        self._transport_lead = transport.itemAt(0).spacerItem()
+        self._transport = transport
         transport.addWidget(self.shuffle_btn)
         transport.addWidget(self.prev_btn)
         transport.addWidget(self.play_btn)
@@ -350,7 +410,6 @@ class MiniPlayer(QWidget):
         self._zen_timer.timeout.connect(self._on_zen_timeout)
 
         self.central_bg = CentralBg(content)
-        self.central_bg.set_radius(_CORNER_RADIUS)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -360,6 +419,12 @@ class MiniPlayer(QWidget):
 
         self.ring = _RingOverlay(self)
         self.ring.raise_()
+        from .halo import HaloGlow
+        self._halo = HaloGlow(self, self.central_bg,
+                              card=lambda: self.central_bg.geometry(),
+                              apply_margin=self._set_halo_margin)
+        self._brutal: bool | None = None
+        self._apply_personality(theming.manager().current_effective())
 
         # ---------- wiring ----------
         self.shuffle_btn.clicked.connect(window._on_shuffle_clicked)
@@ -455,14 +520,15 @@ class MiniPlayer(QWidget):
         self.apply_settings()
 
     def resolved_backdrop_style(self) -> str:
-        # backdrops.resolve owns follow (and why the mini keeps its
-        # gradient when the main backdrop is off).
+        # backdrops.resolve owns follow (and why modern's mini keeps its
+        # gradient when the main backdrop is off, and brutalist's doesn't).
         s = self._settings()
         return backdrops.resolve(
             s.mini_backdrop_style,
             adaptive_on=bool(s.adaptive_background),
             surface="mini",
             main_style=s.adaptive_background_style,
+            brutalist=bool(self._brutal),
         )
 
     def apply_settings(self) -> None:
@@ -475,11 +541,10 @@ class MiniPlayer(QWidget):
         else:
             self.central_bg.set_style(style)
             self.central_bg.set_enabled(True)
+        self._halo.set_active(style == "halo")
         self.central_bg.set_motion(s.motion or "lite")
 
-        ring_mode = (s.mini_progress_style or "ring") != "thin"
-        self.ring.setVisible(ring_mode)
-        self.progress.setVisible(not ring_mode)
+        self._sync_progress_visibility()
 
         self.ticker_lbl.setVisible(bool(s.mini_ticker))
         self._sync_tracker_enabled()
@@ -572,8 +637,9 @@ class MiniPlayer(QWidget):
         mid-song is correct on frame one."""
         self.refresh_glyphs()
         self._apply_track(track, animate=False)
-        self.progress.setDuration(duration or 0.0)
-        self.progress.setPosition(position or 0.0)
+        for bar in self._bars():
+            bar.setDuration(duration or 0.0)
+            bar.setPosition(position or 0.0)
         self.ring.set_progress(position or 0.0, duration or 0.0)
         self._update_time(position or 0.0, duration or 0.0)
         self._on_state(state)
@@ -604,7 +670,8 @@ class MiniPlayer(QWidget):
             self.artist_lbl.setText("")
             self.art.setImage(None)
             self.central_bg.set_art(None)
-            self.progress.reset()
+            for bar in self._bars():
+                bar.reset()
             self.ring.set_progress(0.0, 0.0)
             self._update_time(0.0, 0.0)
             return
@@ -651,8 +718,19 @@ class MiniPlayer(QWidget):
 
     def _pin_label_widths(self) -> None:
         w = self.art.width()
-        for lbl in (self.title_lbl, self.artist_lbl, self.ticker_lbl):
+        for lbl in (self.title_lbl, self.artist_lbl, self.ticker_lbl,
+                    self.heading_lbl):
             lbl.setFixedWidth(w)
+        # The text bar: as many cells as fit between the brackets.
+        fm = QFontMetrics(self.mono_progress.font())
+        cell = max(1, fm.horizontalAdvance(MonoProgress.FILLED_CHAR))
+        self.mono_progress.CELLS = max(
+            4, (w - 2 * fm.horizontalAdvance("[")) // cell)
+        self.mono_progress.setFixedWidth(w)
+        hfm = QFontMetrics(self.heading_lbl.font())
+        heading_cells = max(8, w // max(1, hfm.horizontalAdvance(
+            glyphs.glyph("heading_dash"))))
+        self.heading_lbl.setText(line_heading("now playing", heading_cells))
         if self.ticker_lbl.maximumHeight() == QWIDGETSIZE_MAX:
             # First run: reserve exactly one line.
             self.ticker_lbl.setFixedHeight(self._ticker_line_height())
@@ -668,7 +746,8 @@ class MiniPlayer(QWidget):
         and the pixel height it needs."""
         fm = QFontMetrics(self.ticker_lbl.font())
         width = max(1, self.art.width())
-        flags = int(Qt.TextWordWrap | Qt.AlignHCenter)
+        flags = int(Qt.TextWordWrap
+                    | (Qt.AlignLeft if self._brutal else Qt.AlignHCenter))
         one = self._ticker_line_height()
         cap = one * _TICKER_MAX_LINES
         base = text
@@ -744,7 +823,8 @@ class MiniPlayer(QWidget):
     def _on_duration(self, secs: float) -> None:
         if not self.isVisible():
             return
-        self.progress.setDuration(secs)
+        for bar in self._bars():
+            bar.setDuration(secs)
         self.ring.set_progress(self._window._last_position, secs)
 
     def _update_time(self, pos: float, dur: float) -> None:
@@ -754,7 +834,55 @@ class MiniPlayer(QWidget):
         self.time_lbl.setText(_mmss(pos))
         self.time_lbl.setToolTip(f"{_mmss(pos)} / {_mmss(dur)}")
 
+    # ---------- personality ----------
+
+    def _bars(self):
+        return (self.thin_progress, self.mono_progress)
+
+    @property
+    def progress(self):
+        """The thin-bar progress the live personality shows."""
+        return self.mono_progress if self._brutal else self.thin_progress
+
+    def _apply_personality(self, theme) -> bool:
+        """Dress the mini for ``theme``'s personality; True if it flipped."""
+        brutal = _brutalist(theme)
+        radius = _card_radius(theme)
+        self.central_bg.set_radius(radius)
+        self.ring.set_radius(radius)
+        if brutal == self._brutal:
+            return False
+        self._brutal = brutal
+        # Framed tile and flush-left text: the main window's strip,
+        # not modern's centred card.
+        self.art.set_framed(brutal)
+        align = Qt.AlignLeft if brutal else Qt.AlignHCenter
+        for lbl in (self.title_lbl, self.artist_lbl):
+            lbl.setAlignment(align)
+        self.ticker_lbl.setAlignment(align | Qt.AlignTop)
+        self.heading_lbl.setVisible(brutal)
+        if brutal:
+            self._transport_lead.changeSize(0, 0, QSizePolicy.Fixed,
+                                            QSizePolicy.Minimum)
+        else:
+            self._transport_lead.changeSize(0, 0, QSizePolicy.Expanding,
+                                            QSizePolicy.Minimum)
+        self._transport.invalidate()
+        self._sync_progress_visibility()
+        return True
+
+    def _sync_progress_visibility(self) -> None:
+        ring_mode = (self._settings().mini_progress_style or "ring") != "thin"
+        # brutalist keeps its frame with the thin bar; only the fill goes.
+        self.ring.setVisible(ring_mode or bool(self._brutal))
+        self.ring.set_fill(ring_mode)
+        for bar in self._bars():
+            bar.setVisible(not ring_mode and bar is self.progress)
+
     def _on_theme(self, _theme) -> None:
+        if self._apply_personality(_theme) and self.isVisible():
+            # the backdrop's follow rule differs per personality
+            self.apply_settings()
         # Art rescales on ui_scale changes (its own theme handler runs
         # first, so its width is current here) — keep the pins in step.
         self._pin_label_widths()
@@ -1044,7 +1172,7 @@ class MiniPlayer(QWidget):
             ring_rect = self.ring.geometry()
             inner = ring_rect.adjusted(band, band, -band, -band)
             duration = self._window.player.duration
-            if (self.ring.isVisible() and duration > 0
+            if (self.ring.isVisible() and self.ring._fill and duration > 0
                     and not inner.contains(pos)):
                 frac = self.ring.frac_at(pos - ring_rect.topLeft())
                 self._window.player.seek(frac * duration)
@@ -1122,11 +1250,16 @@ class MiniPlayer(QWidget):
         """
         pad = self._pulse_pad if self._pulse_resize_on else 0
         g = (_PULSE_PAD_MAX - pad) if self._pulse_resize_on else 0
+        g += self._halo_margin
         self._gutter = g
         l, t, r, b = self._base_margins
         self._content_col.setContentsMargins(l + pad, t + pad, r + pad, b + pad)
         self.layout().setContentsMargins(g, g, g, g)
         self._place_ring()
+
+    def _set_halo_margin(self, m: int) -> None:
+        self._halo_margin = m
+        self._sync_gutter()
 
     def _place_ring(self) -> None:
         # The ring hugs the CARD edge, which is inset by the gutter — not
