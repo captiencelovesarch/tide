@@ -11,8 +11,9 @@ Steps:
   2. Aesthetic — "choose your tide": the two live chooser panes
      (ui.chooser.PersonalityPane) in compact form
   3. Theme — grid of themes filtered to the chosen aesthetic
-  4. Sources — toggle the 5 ready sources; YT cookie import + Local folder
-     pick run inline as sub-flows
+  4. Sign in — youtube music sign-in (ui.wizard.SignInDialog), then the
+     optional extras: the extra-sources and local-files store plugins and
+     a subsonic server
   5. Feel — adaptive accent toggle + motion intensity + ui scale
   6. Integrations — discord presence (a store plugin), optional
   7. All set — summary + launch button
@@ -295,7 +296,7 @@ class _WelcomeStep(_Step):
         title.setFont(f)
         title.setAlignment(Qt.AlignCenter)
 
-        tagline = QLabel("youtube music, spotify, your server, your files — one queue")
+        tagline = QLabel("a youtube music player for your desktop")
         f2 = QFont(tagline.font())
         f2.setPointSize(f2.pointSize() + 2)
         tagline.setFont(f2)
@@ -303,8 +304,8 @@ class _WelcomeStep(_Step):
         tagline.setAlignment(Qt.AlignCenter)
 
         body = QLabel(
-            "let's get you set up. takes about a minute.\n"
-            "every choice is reversible from Settings."
+            "let's get you set up. it takes about a minute,\n"
+            "and you can change all of it later in settings."
         )
         body.setAlignment(Qt.AlignCenter)
         body.setWordWrap(True)
@@ -349,9 +350,8 @@ class _AestheticStep(_Step):
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("same library, two completely different players. "
-                     "you'll fine-tune the theme next — all of it is "
-                     "changeable later in settings.")
+        sub = QLabel("same music, two very different players. you pick a "
+                     "theme next, and you can switch any time in settings.")
         sub.setProperty("class", "dim")
         sub.setWordWrap(True)
         sub.setAlignment(Qt.AlignCenter)
@@ -595,8 +595,7 @@ class _SourcesStep(_Step):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._enabled: dict[str, bool] = {
-            "ytmusic": False, "soundcloud": False, "bandcamp": False,
-            "mixcloud": False, "local": False, "spotify": False, "subsonic": False,
+            "ytmusic": False, "extra": False, "local": False, "subsonic": False,
         }
         self._yt_authed = False
         self._spotify_authed = False
@@ -604,53 +603,62 @@ class _SourcesStep(_Step):
         self._local_dir = ""
         self._subsonic_cfg = None  # SubsonicConfig once the user [save]s setup
 
-        prompt = QLabel("where will your music come from?")
+        prompt = QLabel("sign in to youtube music")
         f = QFont(prompt.font())
         f.setBold(True)
         f.setPointSize(f.pointSize() + 4)
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("turn on the sources you want. anything that needs setup will ask. zero is fine too.")
+        sub = QLabel("your library, playlists and recommendations come from your "
+                     "account. you can skip this and sign in later.")
         sub.setProperty("class", "dim")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
 
+        self._signin_btn = BracketButton("sign in")
+        self._signin_btn.setRole("pill")
+        self._signin_btn.clicked.connect(lambda: self._on_setup_clicked("ytmusic"))
+        self._signin_status = QLabel("")
+        self._signin_status.setProperty("class", "dim")
+        self._signin_status.setAlignment(Qt.AlignCenter)
+        signin_row = QHBoxLayout()
+        signin_row.addStretch(1)
+        signin_row.addWidget(self._signin_btn)
+        signin_row.addStretch(1)
+
+        more = QLabel("more sources")
+        more_f = QFont(more.font())
+        more_f.setBold(True)
+        more.setFont(more_f)
+        more_sub = QLabel("optional. extra sources and local files come from the "
+                          "plugin store and install once tide is open.")
+        more_sub.setProperty("class", "dim")
+        more_sub.setWordWrap(True)
+
+        # the store plugins and subsonic (built in) as optional extras;
+        # "extra" stands for soundcloud, bandcamp and mixcloud together,
+        # which is one plugin (see apply_to)
         self._cards: dict[str, _SourceCard] = {
-            "ytmusic": _SourceCard("ytmusic", "YouTube Music",
-                "the full catalog · needs browser cookie import",
+            "extra": _SourceCard("extra", "extra sources",
+                "soundcloud, bandcamp and mixcloud", needs_setup=False),
+            "local": _SourceCard("local", "local files",
+                "the music on your computer · needs a music folder",
                 needs_setup=True),
-            # these four come from store plugins since 3.0: picking one
-            # installs its plugin once tide reaches the store
-            "soundcloud": _SourceCard("soundcloud", "SoundCloud",
-                "free · from the plugin store", needs_setup=False),
-            "bandcamp": _SourceCard("bandcamp", "Bandcamp",
-                "independent artists · from the plugin store", needs_setup=False),
-            "mixcloud": _SourceCard("mixcloud", "Mixcloud",
-                "DJ mixes & radio shows · from the plugin store", needs_setup=False),
-            "local": _SourceCard("local", "Local Files",
-                "your own music · from the plugin store, needs a music folder",
+            "subsonic": _SourceCard("subsonic", "your own server",
+                "subsonic or navidrome · needs the server address and a login",
                 needs_setup=True),
-            "spotify": _SourceCard("spotify", "Spotify",
-                "shelved — search works, playback blocked by spotify",
-                needs_setup=True),
-            "subsonic": _SourceCard("subsonic", "Subsonic / Navidrome",
-                "self-hosted music server · needs server url + login",
-                needs_setup=True),
-            "apple": _SourceCard("apple", "Apple Music",
-                "Apple ID · shelved", needs_setup=False, coming_soon=True),
         }
         # Nothing arrives pre-checked (see OnboardingResult.sources_enabled).
-        for k, on in self._enabled.items():
-            self._cards[k].setChecked(on)
         for card in self._cards.values():
             card.toggled_signal.connect(self._on_toggled)
             card.setup_clicked.connect(self._on_setup_clicked)
 
         cards_col = QVBoxLayout()
         cards_col.setSpacing(8)
-        for k in ("ytmusic", "soundcloud", "bandcamp", "mixcloud", "local",
-                  "subsonic", "spotify", "apple"):
+        cards_col.addWidget(more)
+        cards_col.addWidget(more_sub)
+        for k in ("extra", "local", "subsonic"):
             cards_col.addWidget(self._cards[k])
         cards_col.addStretch(1)
 
@@ -666,6 +674,9 @@ class _SourcesStep(_Step):
         col.setSpacing(12)
         col.addWidget(prompt)
         col.addWidget(sub)
+        col.addLayout(signin_row)
+        col.addWidget(self._signin_status)
+        col.addSpacing(10)
         col.addWidget(scroll, stretch=1)
 
     def _on_toggled(self, key: str, on: bool) -> None:
@@ -700,27 +711,9 @@ class _SourcesStep(_Step):
                 dlg.deleteLater()
             if accepted:
                 self._yt_authed = True
-                self._cards["ytmusic"].setSetupDone(True, "✓ signed in")
-            else:
-                self._uncheck_cancelled("ytmusic")
-        elif key == "spotify":
-            from .spotify_signin import SpotifySignInDialog, confirm_spotify_enable
-            # Surface the shelved-state warning before any OAuth — the
-            # user needs to consent to enabling a known-broken source
-            # before we send them through a sign-in flow.
-            if not confirm_spotify_enable(self):
-                self._uncheck_cancelled("spotify")
-                return
-            dlg = SpotifySignInDialog(self)
-            try:
-                accepted = dlg.exec() == QDialog.DialogCode.Accepted
-            finally:
-                dlg.deleteLater()
-            if accepted:
-                self._spotify_authed = True
-                self._cards["spotify"].setSetupDone(True, "✓ connected (no audio)")
-            else:
-                self._uncheck_cancelled("spotify")
+                self._enabled["ytmusic"] = True
+                self._signin_status.setText("✓ signed in")
+                self._signin_btn.setLabel("sign in again")
         elif key == "subsonic":
             from .subsonic_signin import SubsonicSignInDialog
             dlg = SubsonicSignInDialog(self, initial=self._subsonic_cfg)
@@ -781,8 +774,6 @@ class _SourcesStep(_Step):
         # its setup hasn't completed.
         if self._enabled.get("ytmusic") and not self._yt_authed:
             return False
-        if self._enabled.get("spotify") and not self._spotify_authed:
-            return False
         if self._enabled.get("subsonic") and not self._subsonic_authed:
             return False
         if self._enabled.get("local") and not self._local_dir:
@@ -790,7 +781,14 @@ class _SourcesStep(_Step):
         return True
 
     def apply_to(self, result: OnboardingResult) -> None:
-        result.sources_enabled = dict(self._enabled)
+        extra = self._enabled.get("extra", False)
+        result.sources_enabled = {
+            "ytmusic": self._enabled.get("ytmusic", False),
+            "soundcloud": extra, "bandcamp": extra, "mixcloud": extra,
+            "local": self._enabled.get("local", False),
+            "spotify": False,
+            "subsonic": self._enabled.get("subsonic", False),
+        }
         result.yt_authed = self._yt_authed
         result.spotify_authed = self._spotify_authed
         result.subsonic_authed = self._subsonic_authed
@@ -800,11 +798,9 @@ class _SourcesStep(_Step):
             result.subsonic_user = self._subsonic_cfg.user
             result.subsonic_pass = self._subsonic_cfg.password
             result.subsonic_auth_style = self._subsonic_cfg.auth_style
-        # Pick a default active source — first enabled non-coming-soon.
-        # Spotify ranked last: even if the user enabled it through the
-        # shelved-state warning, picking it as the *default active* source
-        # would land them in a search-only experience first thing.
-        order = ["ytmusic", "subsonic", "soundcloud", "bandcamp", "mixcloud", "local", "spotify"]
+        # The default active source: youtube music when signed in, else
+        # the first extra picked.
+        order = ["ytmusic", "subsonic", "soundcloud", "bandcamp", "mixcloud", "local"]
         for k in order:
             if result.sources_enabled.get(k):
                 result.active_source = k
@@ -840,7 +836,7 @@ class _FeelStep(_Step):
         # music (adaptive_background + adaptive_pulse; style stays "field",
         # refinable later in Settings → appearance).
         self._living_bg_check = QCheckBox(
-            "living background — album-colored glow that breathes with the music"
+            "living background: a glow in the album's colours that moves with the music"
         )
         self._living_bg_check.setChecked(True)
         self._living_bg_check.toggled.connect(self._on_living_bg)
@@ -962,10 +958,10 @@ class _IntegrationsStep(_Step):
         discord_row.addWidget(discord_help)
 
         discord_blurb = QLabel(
-            "shows what you're listening to on your discord profile. takes "
-            "~30 seconds: create an application at the developer portal and "
-            "paste its application id. discord shows the name and image you "
-            "give that app."
+            "shows what you're listening to on your discord profile. make an "
+            "application at discord's developer portal (about 30 seconds) and "
+            "paste its application id here. discord shows the name and picture "
+            "you give that app."
         )
         discord_blurb.setWordWrap(True)
         discord_blurb.setProperty("class", "dim")
@@ -1106,7 +1102,7 @@ class _AllSetStep(_Step):
         title.setFont(f)
         title.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("hit launch and start listening. everything you just picked is reversible from Settings.")
+        sub = QLabel("hit launch and start listening. you can change any of this in settings.")
         sub.setProperty("class", "dim")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
@@ -1121,8 +1117,12 @@ class _AllSetStep(_Step):
         col.addStretch(2)
 
     def on_enter(self, result: OnboardingResult) -> None:
-        enabled = [k for k, v in result.sources_enabled.items() if v]
-        srcs = " · ".join(enabled) if enabled else "(no sources yet, add some in settings)"
+        names = {"ytmusic": "youtube music", "soundcloud": "extra sources",
+                 "bandcamp": "extra sources", "mixcloud": "extra sources",
+                 "local": "local files", "subsonic": "your server"}
+        enabled = list(dict.fromkeys(names.get(k, k) for k, v in
+                                     result.sources_enabled.items() if v))
+        srcs = " · ".join(enabled) if enabled else "not signed in yet (sign in from settings)"
         themes = theming.discover_themes()
         theme_name = themes[result.theme_slug].name if result.theme_slug in themes else result.theme_slug
         bits = [
