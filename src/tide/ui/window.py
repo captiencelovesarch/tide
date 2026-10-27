@@ -220,6 +220,11 @@ class _RadioWorker(QObject):
             self.failed.emit(str(exc), self.gen)
 
 
+def _like_status(track) -> bool:
+    extras = getattr(track, "extras", None)
+    return isinstance(extras, dict) and extras.get("likeStatus") == "LIKE"
+
+
 class _RateWorker(QObject):
     done = Signal(str, bool)        # video_id, new_liked_state
     failed = Signal(str, str)       # video_id, msg
@@ -236,6 +241,23 @@ class _RateWorker(QObject):
             self.done.emit(self.video_id, self.liked)
         except Exception as exc:
             self.failed.emit(self.video_id, str(exc))
+
+
+class _LikeStateWorker(QObject):
+    """asks the track's source whether it's liked. None = couldn't tell."""
+    done = Signal(str, object)      # video_id, bool | None
+
+    def __init__(self, source, video_id: str) -> None:
+        super().__init__()
+        self.source = source
+        self.video_id = video_id
+
+    def run(self) -> None:
+        try:
+            liked = self.source.is_liked(self.video_id)
+        except Exception:
+            liked = None
+        self.done.emit(self.video_id, liked)
 
 
 class _PlayStartedWorker(QObject):
@@ -636,6 +658,9 @@ class MainWindow(QMainWindow):
         self.nav_history_btn = BracketButton("history")
         self.nav_visualizer_btn = BracketButton("visualizer")
         self.nav_source_btn = BracketButton("source")
+        # youtube music on its own has nothing to pick between; the tab
+        # comes back with a plugin that adds sources (_sync_source_nav)
+        self.nav_source_btn.setVisible(False)
         # The audio FX panel existed since v1.2.2 but only behind a hotkey —
         # a full view the rail never admitted to. Now a first-class tab.
         self.nav_fx_btn = BracketButton("fx")
@@ -1006,6 +1031,7 @@ class MainWindow(QMainWindow):
         from .audio_fx_view import AudioFxView
         self.audio_fx_view = AudioFxView()
         self.audio_fx_view.state_changed.connect(self._on_audio_fx_state_changed)
+        self.audio_fx_view.compare_changed.connect(self._on_fx_compare)
 
         # ----- stack -----
         # search_view contains both the search bar AND explore shelves, so
@@ -1887,7 +1913,7 @@ class MainWindow(QMainWindow):
                 self.search.setFocus()
         elif name == "library":
             self._set_stack_index(1)
-            if self.library_view.playlists_list.count() == 0:
+            if self.library_view.playlist_count() == 0:
                 self.library_view.reload_playlists()
         elif name == "queue":
             self._set_stack_index(2)
@@ -1900,6 +1926,8 @@ class MainWindow(QMainWindow):
         elif name == "visualizer":
             self._set_stack_index(8)
         elif name == "source":
+            if self.nav_source_btn.isHidden():
+                return
             self._set_stack_index(9)
             self.source_view.refresh_statuses()
         elif name == "audio_fx":
@@ -2484,13 +2512,38 @@ class MainWindow(QMainWindow):
         for w in self._companions():
             w.set_like_enabled(can_like)
         self.radio_btn.setEnabled(can_radio)
-        # Best-effort like-state lookup in the background; UI defaults to ♡.
-        self._liked_current = False
+        # Like state: the track's own likeStatus when it came with one
+        # (playlists, liked songs, radio), then the source's answer.
+        self._liked_current = _like_status(self._current)
         self._refresh_like_button()
+        if can_like and self._current is not None:
+            self._lookup_like(cur_source, self._current.video_id)
         self._refresh_nav_buttons()
         # If lyrics is the active view, refresh it for the new track.
         if self.stack.currentIndex() == 3:
             self.lyrics_view.show_for(self._current)
+
+    def _lookup_like(self, source, video_id: str) -> None:
+        if not video_id:
+            return
+        thread = QThread()
+        worker = _LikeStateWorker(source, video_id)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._on_like_state)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        qthreads.retain(thread, worker)
+        thread.start()
+
+    def _on_like_state(self, video_id: str, liked) -> None:
+        if liked is None or not self._current or self._current.video_id != video_id:
+            return
+        if not self.like_btn.isEnabled():
+            return          # a like click is in flight; it has the say
+        if bool(liked) != self._liked_current:
+            self._liked_current = bool(liked)
+            self._refresh_like_button()
 
     def _on_resolve_failed(self, video_id: str, msg: str) -> None:
         self._loading.cancel()
@@ -4040,6 +4093,7 @@ class MainWindow(QMainWindow):
         widget so its controls reflect the same state, (c) the persisted
         Settings.audio_fx_state JSON (debounced to avoid a TOML write on
         every EQ-slider tick)."""
+        self._apply_sound_speed(state)
         # 1. apply (debounced).
         self._schedule_audio_fx_push(state)
         # 2. mirror — the two widgets share the dataclass instance, but
@@ -4076,9 +4130,40 @@ class MainWindow(QMainWindow):
         self._pending_audio_fx_push = state
         timer.start()
 
+    def _apply_sound_speed(self, state) -> None:
+        """A picked sound may ask for a speed (slowed + reverb). Leaving
+        it puts 1x back, but only if the speed is still the one it set."""
+        from ..audio_fx import sound_speed
+        last = getattr(self, "_fx_last_sound", state.sound)
+        self._fx_last_sound = state.sound
+        if state.sound == last:
+            return
+        new, old = sound_speed(state.sound), sound_speed(last)
+        try:
+            if new is not None:
+                self.speed_btn.set_speed(new)
+            elif old is not None and abs(self.speed_btn.speed() - old) < 1e-3:
+                self.speed_btn.set_speed(1.0)
+        except Exception:
+            pass
+
+    def _on_fx_compare(self, held: bool) -> None:
+        """[hold to compare]: no rack while held, the rack back on release.
+        Level matching makes this a fair listen."""
+        self._fx_comparing = bool(held)
+        if held:
+            try:
+                self.player.set_audio_filter_chain("")
+            except Exception:
+                return
+            self._last_audio_fx_chain = ""
+        else:
+            self._pending_audio_fx_push = self.audio_fx_view.state()
+            self._flush_audio_fx_push()
+
     def _flush_audio_fx_push(self) -> None:
         state = getattr(self, "_pending_audio_fx_push", None)
-        if state is None:
+        if state is None or getattr(self, "_fx_comparing", False):
             return
         from ..audio_fx import build_filter_chain
         try:
@@ -5367,6 +5452,29 @@ class MainWindow(QMainWindow):
         self._store.updates_changed.connect(self._store_dot.set_count)
         self._store_dot.set_count(self._store.update_count())
         self._store.start_daily()
+        self._plugin_host = host
+        host.listing_changed.connect(self._sync_source_nav)
+        host.changed.connect(self._sync_source_nav)
+        reg = source_registry()
+        reg.listing_changed.connect(self._sync_source_nav)
+        reg.enabled_changed.connect(self._sync_source_nav)
+        self._sync_source_nav()
+
+    # plugins whose sources need the source panel (local files keeps its
+    # folder picker there)
+    _SOURCE_PLUGINS = ("extra-sources", "local-files")
+
+    def _sync_source_nav(self, *_args) -> None:
+        host = getattr(self, "_plugin_host", None)
+        show = host is not None and any(
+            host.record(slug) is not None and host.is_enabled(slug)
+            for slug in self._SOURCE_PLUGINS)
+        # a built-in source you turned on (subsonic) needs the tab too
+        reg = source_registry()
+        show = show or any(s.slug != "ytmusic" for s in reg.enabled_sources())
+        self.nav_source_btn.setVisible(show)
+        if not show and self.stack.currentIndex() == 9:
+            self._switch_view("home")
 
     def _ensure_store_view(self) -> None:
         if self._store is None or hasattr(self.store_view, "shown"):

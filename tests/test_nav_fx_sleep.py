@@ -53,6 +53,8 @@ class FxNavTabTest(unittest.TestCase):
     def test_digit_row_mirrors_the_rail_order(self) -> None:
         self.w.show()
         QTest.qWait(30)
+        # the source tab only shows with a plugin that adds sources
+        self.w.nav_source_btn.setVisible(True)
         for key, attr in ((Qt.Key_6, "visualizer_view"),
                           (Qt.Key_7, "source_view"),
                           (Qt.Key_8, "audio_fx_view")):
@@ -61,6 +63,15 @@ class FxNavTabTest(unittest.TestCase):
             self.assertIs(self.w.stack.currentWidget(),
                           getattr(self.w, attr),
                           f"Ctrl+{key - Qt.Key_0} landed on the wrong view")
+
+    def test_hidden_source_tab_ignores_its_key(self) -> None:
+        self.w.show()
+        QTest.qWait(30)
+        self.assertTrue(self.w.nav_source_btn.isHidden())   # no plugins here
+        QTest.keyClick(self.w, Qt.Key_6, Qt.ControlModifier)
+        QTest.keyClick(self.w, Qt.Key_7, Qt.ControlModifier)
+        QTest.qWait(20)
+        self.assertIs(self.w.stack.currentWidget(), self.w.visualizer_view)
 
     def test_every_nav_slot_has_an_svg_icon(self) -> None:
         for slot in self.w._nav_buttons:
