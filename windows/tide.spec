@@ -14,7 +14,8 @@ BIN = ROOT / "build" / "windows" / "bin"
 os.environ["PATH"] = str(BIN) + os.pathsep + os.environ.get("PATH", "")
 
 # themes/layouts/fonts are read next to the modules, so the whole package
-# ships as plain files ("py" mode) instead of inside the archive. mpris
+# ships as files on disk instead of inside the archive: compiled .pyc
+# ("pyc" mode), so the first launch doesn't compile all of tide first. mpris
 # needs QtDBus, which Windows PySide6 doesn't have.
 hidden = [m for m in collect_submodules("tide") if m != "tide.mpris"]
 hidden += collect_submodules("yt_dlp")  # extractors load lazily
@@ -49,7 +50,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=hidden,
     excludes=["tide.mpris", "secretstorage", "tkinter"],
-    module_collection_mode={"tide": "py"},
+    module_collection_mode={"tide": "pyc"},
     noarchive=False,
 )
 pyz = PYZ(a.pure)

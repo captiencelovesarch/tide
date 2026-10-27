@@ -14,7 +14,11 @@ try:
     # a source checkout run next to an installed tide (python -m tide from
     # src/) would report the installed one's version, and the plugin store
     # judges min_tide by it
-    if _Path(_dist.locate_file("tide/__init__.py")).resolve() != _Path(__file__).resolve():
+    # (a frozen windows build ships .pyc only, so the file check can't
+    # match there; its bundled metadata is always its own)
+    import sys as _sys
+    if not getattr(_sys, "frozen", False) and \
+            _Path(_dist.locate_file("tide/__init__.py")).resolve() != _Path(__file__).resolve():
         raise LookupError("not the installed copy")
     __version__ = _dist.version
 except Exception:

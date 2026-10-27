@@ -150,6 +150,11 @@ class BrowserProfile:
 def available_profiles() -> list[BrowserProfile]:
     out: list[BrowserProfile] = []
     for cand in _CANDIDATES:
+        if sys.platform == "win32" and cand.family == "chromium":
+            # locked while the browser runs (edge never really stops) and
+            # encrypted for the browser itself: an import can't work, so
+            # it isn't offered. the sign-in window covers these browsers.
+            continue
         dbs = _cookie_dbs(cand)
         if dbs:
             out.append(BrowserProfile(

@@ -241,17 +241,25 @@ class SignInDialog(QDialog):
             row0.addWidget(self._window_btn)
             layout.addWidget(self._headline)
             layout.addLayout(row0)
-            other = QLabel("or import from a browser you're already signed in to:")
-            other.setStyleSheet("color: palette(mid);")
-            layout.addSpacing(8)
-            layout.addWidget(other)
+            if self._profiles:
+                other = QLabel("or import from firefox, if you're signed in there:")
+                other.setStyleSheet("color: palette(mid);")
+                layout.addSpacing(8)
+                layout.addWidget(other)
         else:
             self._window_btn.hide()
             layout.addWidget(self._headline)
             layout.addSpacing(4)
-        layout.addLayout(row1)
-        layout.addLayout(row2)
-        layout.addLayout(row3)
+        # with the sign-in window there, an import row with nothing to
+        # import from is only a greyed-out button to wonder about
+        if self._profiles or not self._window_browsers:
+            layout.addLayout(row1)
+            layout.addLayout(row2)
+            layout.addLayout(row3)
+        else:
+            for w in (self._step1, self._open_btn, self._step2, self._picker,
+                      self._step3, self._import_btn):
+                w.hide()
         layout.addSpacing(4)
         layout.addWidget(self._status)
         layout.addStretch(1)
