@@ -635,21 +635,59 @@ def _no_background_mode(user_data_dir: Path) -> None:
         pass
 
 
-def _close_gently(proc) -> None:
-    """Ask the browser to close the way its window's X does, so it writes
-    the session to disk first (a kill can lose the last few seconds)."""
+def _log(msg: str) -> None:
+    # stderr is tide.log in the windows build; the steps of a sign-in that
+    # stalls are otherwise invisible
+    print(f"tide: signin {msg}", file=sys.stderr, flush=True)
+
+
+def _browser_pids(browser: SignInBrowser, user_data_dir: Path) -> list[int]:
+    """The main process of ``browser`` on tide's sign-in profile (windows).
+    Not necessarily the one tide started: edge often hands off to a new
+    process and the first one quits."""
+    import subprocess
+    if sys.platform != "win32":
+        return []
+    exe = browser.exe.name.replace("'", "''")
+    folder = str(user_data_dir).replace("'", "''")
+    script = (
+        f"Get-CimInstance Win32_Process -Filter \"Name='{exe}'\" | "
+        f"Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{folder}') -and "
+        "-not $_.CommandLine.Contains('--type=') } | "
+        "ForEach-Object { $_.ProcessId }"
+    )
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                              "-Command", script],
+                             capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [int(t) for t in out.split() if t.isdigit()]
+
+
+def _close_browser(browser: SignInBrowser, proc, force: bool = False) -> None:
+    """Close the sign-in browser. Gently first, the way its window's X
+    does, so it writes the session to disk (a kill can lose the last few
+    seconds); ``force`` when that didn't work."""
     import subprocess
     if sys.platform == "win32":
-        # taskkill without /F sends the windows WM_CLOSE
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T"],
-                       capture_output=True, check=False)
+        pids = _browser_pids(browser, SIGNIN_DIR) or [proc.pid]
+        _log(f"closing {'(forced) ' if force else ''}pids {pids}")
+        for pid in pids:
+            # taskkill without /F sends the windows WM_CLOSE
+            args = ["taskkill", "/PID", str(pid), "/T"] + (["/F"] if force else [])
+            r = subprocess.run(args, capture_output=True, text=True, check=False)
+            _log(f"taskkill {pid}: {r.returncode} {(r.stdout or r.stderr).strip()[:120]}")
+    elif force:
+        proc.kill()
     else:
         proc.terminate()
 
 
 def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
                         timeout_s: float = 900,
-                        should_finish=lambda: False) -> ImportResult:
+                        should_finish=lambda: False,
+                        notify=lambda msg: None) -> ImportResult:
     """Open ``browser`` on tide's own profile at YouTube Music, wait for the
     user to sign in and close the window, then read the session from that
     profile. Blocking; call it off the GUI thread. Raises ImportError_ if
@@ -675,21 +713,34 @@ def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
     ])
     profile = BrowserProfile(slug="window", label=browser.label,
                              cookies_path=SIGNIN_DIR, family="window")
+    _log(f"started {browser.label}, pid {proc.pid}")
     deadline = time.monotonic() + timeout_s
     started = time.monotonic()
-    asked_to_close = False
+    asked_at = 0.0
+    forced = False
+    told = False
     while time.monotonic() < deadline and not should_stop():
         time.sleep(1.0)
-        if should_finish() and not asked_to_close and proc.poll() is None:
-            _close_gently(proc)
-            asked_to_close = True
+        if should_finish() and not asked_at:
+            _close_browser(browser, proc)
+            asked_at = time.monotonic()
+        elif asked_at and not forced and time.monotonic() - asked_at > 15:
+            # still open 15 s after asking: the window ignored it
+            _close_browser(browser, proc, force=True)
+            forced = True
+        elif forced and not told and time.monotonic() - asked_at > 30:
+            told = True
+            notify(f"tide couldn't close the {browser.label} window. close it "
+                   "yourself and tide carries on.")
         # the first process can hand off to another and exit at once, so
         # "closed" is the profile being free, not just our process gone
         if proc.poll() is None or _profile_in_use(SIGNIN_DIR):
             continue
         if time.monotonic() - started < 3.0:
             continue        # still starting up
+        _log("window closed, reading the session")
         result = _result_from_jar(profile, _read_profile_cookies(browser))
+        _log(f"signed in: {result.looks_signed_in}")
         if not result.looks_signed_in:
             raise ImportError_(f"the {browser.label} window closed before you signed in.")
         return result

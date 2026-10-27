@@ -57,6 +57,7 @@ class _WindowWorker(QObject):
     """Opens the sign-in window and waits for the user to sign in there."""
     done = Signal(object)   # ImportResult
     failed = Signal(str)
+    note = Signal(str)      # a status line while it waits
 
     def __init__(self, browser: bi.SignInBrowser) -> None:
         super().__init__()
@@ -68,7 +69,7 @@ class _WindowWorker(QObject):
         try:
             self.done.emit(bi.sign_in_with_window(
                 self.browser, lambda: self.stop,
-                should_finish=lambda: self.finish))
+                should_finish=lambda: self.finish, notify=self.note.emit))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -324,6 +325,7 @@ class SignInDialog(QDialog):
         thread.started.connect(worker.run)
         worker.done.connect(self._on_done)
         worker.failed.connect(self._on_window_failed)
+        worker.note.connect(self._status.setText)
         worker.done.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(thread.deleteLater)
