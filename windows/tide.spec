@@ -1,12 +1,17 @@
 # PyInstaller spec for the Windows build. From the repo root:
 #   pyinstaller --noconfirm --distpath build/windows/dist --workpath build/windows/work windows/tide.spec
 # Expects build/windows/bin (fetch-bin.ps1) and windows/tide.ico (make_ico.py).
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 ROOT = Path(SPECPATH).parent
 BIN = ROOT / "build" / "windows" / "bin"
+
+# tide.playback imports mpv, which loads libmpv-2.dll from PATH; without
+# it on PATH here, collect_submodules can't import (and so skips) it.
+os.environ["PATH"] = str(BIN) + os.pathsep + os.environ.get("PATH", "")
 
 # themes/layouts/fonts are read next to the modules, so the whole package
 # ships as plain files ("py" mode) instead of inside the archive. mpris
