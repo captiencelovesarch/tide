@@ -130,7 +130,8 @@ class ViewFacePickTests(_Case):
         for ctrl in self.view._fx_controls():
             self.assertEqual(ctrl.face(), "spring")
             self.assertIsInstance(ctrl._inner, _SpringShelfSlider)
-        self.assertEqual(len(self.view.findChildren(SpringSlider)), 7)
+        self.assertEqual(len(self.view.findChildren(SpringSlider)),
+                         len(self.view._fx_controls()))
 
     def test_show_event_lands_the_face(self) -> None:
         self.host.show()
@@ -159,26 +160,20 @@ class ViewFacePickTests(_Case):
 
     def test_flip_swaps_faces_and_preserves_values(self) -> None:
         self.view._ensure_face()
-        self.view.state().bass_db = -3.0
+        self.view.state().stereo_width = 1.5
         self.view.sync_from_state()
-        self.assertAlmostEqual(self.view._bass_slider.value(), -3.0)
+        self.assertAlmostEqual(self.view._stereo_slider.value(), 1.5)
         self.host._settings.preset = "brutalist"
         self.view._ensure_face()
         self.assertEqual(self.view.face(), "bracket")
-        self.assertIsInstance(self.view._bass_slider._inner, _ShelfSlider)
-        self.assertAlmostEqual(self.view._bass_slider.value(), -3.0)
+        self.assertIsInstance(self.view._stereo_slider._inner, _ShelfSlider)
+        self.assertAlmostEqual(self.view._stereo_slider.value(), 1.5)
 
     def test_ensure_face_is_idempotent(self) -> None:
         self.view._ensure_face()
-        inner = self.view._bass_slider._inner
+        inner = self.view._stereo_slider._inner
         self.view._ensure_face()
-        self.assertIs(self.view._bass_slider._inner, inner)
-
-    def test_eq_bands_stay_qsliders_under_both_faces(self) -> None:
-        # the vertical bands keep QSlider (SpringSlider is horizontal-only)
-        self.view._ensure_face()
-        for band in self.view._eq_bands:
-            self.assertIsInstance(band._slider, QSlider)
+        self.assertIs(self.view._stereo_slider._inner, inner)
 
 
 # ---------- spring face behavior in the view ----------
@@ -241,15 +236,15 @@ class SpringViewBehaviorTests(_Case):
         self.assertEqual(self.flush.call_count, 0)
 
     def test_detent_lands_neutral_exactly(self) -> None:
-        self.view.state().bass_db = 4.0
+        self.view.state().reverb_preset = "hall"
+        self.view.state().reverb_wet = 0.8
         self.view.sync_from_state()
-        s = self._slider(self.view._bass_slider)
-        x = s._x_for_value(0.0) + 3   # inside the magnet radius
+        s = self._slider(self.view._reverb_wet)
+        x = s._x_for_value(0.5) + 3   # inside the magnet radius
         s.mousePressEvent(_MouseEv(x))
         s.mouseReleaseEvent(_MouseEv(x))
-        self.assertEqual(self.view.state().bass_db, 0.0)
-        self.assertEqual(
-            self.view._bass_slider._inner._readout.text(), "0 dB")
+        self.assertEqual(self.view.state().reverb_wet, 0.5)
+        self.assertEqual(self.view._reverb_wet.readout_text(), "50%")
 
     def test_set_value_is_silent(self) -> None:
         self.view._reverb_wet.set_value(0.65)
@@ -258,10 +253,11 @@ class SpringViewBehaviorTests(_Case):
         self.assertEqual(self.flush.call_count, 0)
 
     def test_eq_release_flushes_under_modern(self) -> None:
-        band = self.view._eq_bands[0]
-        band._slider.setValue(30)   # 3 dB — user-driven change
+        curve = self.view._curve
+        curve.band_changed.emit(0, 3.0)   # a drag tick
+        self.assertAlmostEqual(self.view.state().eq_bands[0], 3.0)
         self.assertEqual(self.flush.call_count, 0)
-        band._slider.sliderReleased.emit()
+        curve.committed.emit()            # released
         self.assertEqual(self.flush.call_count, 1)
 
 
@@ -287,18 +283,17 @@ class BracketViewBehaviorTests(_Case):
         QTest.qWait(30)
 
     def test_bracket_slider_drives_state_without_commits(self) -> None:
-        qs = self.view._bass_slider._inner._slider
+        qs = self.view._controls["chorus"]._inner._slider
         self.assertIsInstance(qs, QSlider)
-        qs.setValue(8)   # step 0.5 → 4.0 dB
-        self.assertAlmostEqual(self.view.state().bass_db, 4.0)
+        qs.setValue(14)   # step 0.05 → 0.7
+        self.assertAlmostEqual(self.view.state().chorus_amount, 0.7)
         self.assertEqual(len(self.spy), 1)
         self.assertEqual(self.commits, [])
         self.assertEqual(self.flush.call_count, 0)
 
     def test_eq_release_does_not_flush_under_brutalist(self) -> None:
-        band = self.view._eq_bands[0]
-        band._slider.setValue(30)
-        band._slider.sliderReleased.emit()
+        self.view._curve.band_changed.emit(0, 3.0)
+        self.view._curve.committed.emit()
         self.assertEqual(self.flush.call_count, 0)
 
     def test_no_spring_sliders_in_the_tree(self) -> None:
@@ -609,6 +604,7 @@ class WindowDebounceTests(unittest.TestCase):
         self.w._settings = s
         state = self.w.audio_fx_view.state()
         state.master_enabled = True   # a live rack → non-empty chains
+        state.tremolo = True          # its speed slider is the one driven
         self.w.audio_fx_view.sync_from_state()
         self.push = mock.patch.object(
             self.w.player, "set_audio_filter_chain").start()
@@ -638,22 +634,22 @@ class WindowDebounceTests(unittest.TestCase):
 
     def test_spring_drag_never_pushes_per_tick_and_flushes_on_release(self) -> None:
         view = self._go_modern()
-        s = view._bass_slider._inner._slider
+        s = view._controls["tremolo"]._inner._slider
         s.resize(400, 30)
-        s.mousePressEvent(_MouseEv(s._x_for_value(-6)))
-        for db in (-4, -2, 2, 5):
+        s.mousePressEvent(_MouseEv(s._x_for_value(2)))
+        for db in (3, 4, 6, 8):
             # real time passes mid-drag; every tick restarts the 120 ms
             # trailing timer, so nothing may fire in between
             QTest.qWait(40)
             s.mouseMoveEvent(_MouseEv(s._x_for_value(db)))
         self.assertEqual(self.push.call_count, 0)
         self.assertEqual(self.save.call_count, 0)
-        s.mouseReleaseEvent(_MouseEv(s._x_for_value(5)))
+        s.mouseReleaseEvent(_MouseEv(s._x_for_value(8)))
         # the commit shortens the debounce rather than pushing inline
         self.assertEqual(self.push.call_count, 0)
         self._drain()
         self.assertEqual(self.push.call_count, 1)
-        self.assertIn("bass=g=5", self.push.call_args[0][0])
+        self.assertIn("tremolo=f=8", self.push.call_args[0][0])
         self.assertEqual(self.save.call_count, 1)
         QTest.qWait(500)
         self.assertEqual(self.push.call_count, 1)
@@ -662,7 +658,7 @@ class WindowDebounceTests(unittest.TestCase):
     def test_wheel_burst_at_motion_off_pushes_once(self) -> None:
         # modern face + motion off = no settle window, every notch commits
         view = self._go_modern()
-        s = view._bass_slider._inner._slider
+        s = view._controls["tremolo"]._inner._slider
         s.resize(400, 30)
         for _ in range(6):
             s.wheelEvent(_WheelEv(120))
@@ -672,11 +668,11 @@ class WindowDebounceTests(unittest.TestCase):
         self._drain()
         self.assertEqual(self.push.call_count, 1)
         self.assertEqual(self.save.call_count, 1)
-        self.assertIn("bass=g=3", self.push.call_args[0][0])
+        self.assertIn("tremolo=f=8", self.push.call_args[0][0])
 
     def test_key_repeat_burst_at_motion_off_pushes_once(self) -> None:
         view = self._go_modern()
-        s = view._bass_slider._inner._slider
+        s = view._controls["tremolo"]._inner._slider
         s.resize(400, 30)
         s.setFocus()
         for _ in range(12):
@@ -688,9 +684,9 @@ class WindowDebounceTests(unittest.TestCase):
 
     def test_release_on_the_start_value_pushes_at_most_once(self) -> None:
         view = self._go_modern()
-        s = view._bass_slider._inner._slider
+        s = view._controls["tremolo"]._inner._slider
         s.resize(400, 30)
-        x = s._x_for_value(0.0) + 3   # magnet: press lands the current 0.0
+        x = s._x_for_value(5.0) + 3   # magnet: press lands the current 5.0
         s.mousePressEvent(_MouseEv(x))
         s.mouseReleaseEvent(_MouseEv(x))
         self.assertEqual(self.push.call_count, 0)
@@ -699,27 +695,27 @@ class WindowDebounceTests(unittest.TestCase):
     def test_brutalist_drag_keeps_the_trailing_debounce(self) -> None:
         view = self.w.audio_fx_view
         self.assertEqual(view.face(), "bracket")
-        qs = view._bass_slider._inner._slider
-        for raw in (2, 4, 6, 8):   # user-driven ticks, 0.5 dB steps
+        qs = view._controls["tremolo"]._inner._slider
+        for raw in (2, 4, 6, 8):   # user-driven ticks, 0.5 Hz steps
             qs.setValue(raw)
         self.assertEqual(self.push.call_count, 0)
         QTest.qWait(500)
         self.assertEqual(self.push.call_count, 1)
-        self.assertIn("bass=g=4", self.push.call_args[0][0])
+        self.assertIn("tremolo=f=4", self.push.call_args[0][0])
         self.assertEqual(self.save.call_count, 1)
 
     def test_eq_release_flushes_modern_but_not_brutalist(self) -> None:
         view = self.w.audio_fx_view
-        band = view._eq_bands[2]
-        band._slider.setValue(30)   # 3 dB tick → scheduled
-        band._slider.sliderReleased.emit()
+        curve = view._curve
+        curve.band_changed.emit(2, 3.0)   # 3 dB tick → scheduled
+        curve.committed.emit()
         self.assertEqual(self.push.call_count, 0)   # brutalist: no commit
         QTest.qWait(500)
         self.assertEqual(self.push.call_count, 1)   # ...only the timer
         self._go_modern()
-        band._slider.setValue(50)   # 5 dB
+        curve.band_changed.emit(2, 5.0)
         self.assertEqual(self.push.call_count, 1)
-        band._slider.sliderReleased.emit()
+        curve.committed.emit()
         self._drain()
         # modern: release shortens the debounce; the second push lands
         # before the trailing edge would deliver it

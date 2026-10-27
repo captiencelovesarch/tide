@@ -30,8 +30,12 @@ from tide.audio_fx import (
     EQ_BAND_COUNT,
     LIMITER_CEILING,
     REVERB_PRESETS,
+    SOUNDS,
     build_filter_chain,
+    EQ_PEAK_ALLOWANCE_DB,
     eq_peak_boost_db,
+    eq_preamp_db,
+    makeup_db,
 )
 
 MPV = shutil.which("mpv")
@@ -93,7 +97,9 @@ class ChainBuilderTests(unittest.TestCase):
             ("flanger", True, "flanger="),
             ("phaser", True, "aphaser="),
             ("tremolo", True, "tremolo="),
-            ("exciter", True, "crystalizer="),
+            ("exciter", True, "aexciter="),
+            ("eightd", True, "apulsator="),
+            ("sub_bass", True, "equalizer=f=50:"),
             ("crossfeed", True, "crossfeed="),
             ("lofi", True, "acrusher="),
             ("compressor", True, "acompressor="),
@@ -126,14 +132,14 @@ class ChainBuilderTests(unittest.TestCase):
         s.crossfeed_strength = 0.6
         chain = build_filter_chain(s)
         self.assertIn("tremolo=f=7.5", chain)
-        self.assertIn("crystalizer=i=3.5", chain)
+        self.assertIn("aexciter=amount=1.75", chain)
         self.assertIn("crossfeed=strength=0.6", chain)
 
     def test_chain_order(self):
         chain = build_filter_chain(_full_state())
         markers = [
             "equalizer=",     # eq bands
-            "crystalizer=",   # exciter
+            "aexciter=",      # exciter
             "bass=",          # bass shelf
             "treble=",        # treble shelf
             "acrusher=",      # lofi composite
@@ -263,36 +269,50 @@ class ChainBuilderTests(unittest.TestCase):
         rest = chain.split("%", 2)[2].encode("utf-8")
         # The prefix counts bytes; a wrong count truncates the graph
         # mid-token inside mpv, or swallows the entry after it.
-        self.assertTrue(rest[declared:].startswith(b",alimiter="), rest[declared - 20:])
+        tail = rest[declared:]
+        self.assertTrue(tail.startswith(b",volume=") or tail.startswith(b",alimiter="),
+                        rest[declared - 20:])
 
 
-    def test_preamp_cancels_the_combined_boost(self):
-        # soft warmth tops out at its +3 dB 32 Hz band; overlapping bands
-        # plus a shelf stack well past any single slider
+    def test_preamp_matches_loudness_and_leaves_some_peak(self):
+        # the old preamp cancelled the whole peak boost, so every boost
+        # played 3-5 dB quieter than bypass. Now it cancels the loudness
+        # change, and only the peak past EQ_PEAK_ALLOWANCE_DB.
         s = AudioFxState(master_enabled=True)
         s.apply_eq_preset("soft warmth")
         self.assertAlmostEqual(eq_peak_boost_db(s), 3.1, places=1)
-        self.assertTrue(build_filter_chain(s).startswith("volume=volume=-3.10dB,"))
+        self.assertLess(abs(eq_preamp_db(s)), 1.0)
         s.apply_eq_preset("bass boost")
         s.bass_db = 4.0
         # ffmpeg's own impulse response peaks at +10.29 dB for this
         self.assertAlmostEqual(eq_peak_boost_db(s), 10.3, delta=0.1)
+        self.assertAlmostEqual(eq_preamp_db(s), -(10.3 - EQ_PEAK_ALLOWANCE_DB), delta=0.1)
+        self.assertTrue(build_filter_chain(s).startswith("volume=volume=-5.7"))
 
-    def test_cuts_need_no_preamp(self):
+    def test_cuts_are_given_back(self):
         s = AudioFxState(master_enabled=True, eq_bands=[-3.0] * 10, bass_db=-2.0)
         self.assertEqual(eq_peak_boost_db(s), 0.0)
-        self.assertNotIn("volume=", build_filter_chain(s))
+        pre = eq_preamp_db(s)
+        self.assertGreater(pre, 2.0)
+        self.assertLessEqual(pre, EQ_PEAK_ALLOWANCE_DB)
+
+    def test_effects_are_level_matched(self):
+        s = AudioFxState(master_enabled=True, flanger=True)
+        self.assertGreater(makeup_db(s), 2.0)
+        self.assertIn(f"volume=volume={makeup_db(s):.2f}dB,alimiter", build_filter_chain(s))
+        s = AudioFxState(master_enabled=True, compressor=True, compressor_amount=1.0)
+        self.assertGreater(makeup_db(s), 10.0)
 
     def test_no_filter_hard_clips(self):
         s = AudioFxState(master_enabled=True, exciter=True, stereo_width=1.8)
         chain = build_filter_chain(s)
-        self.assertIn("crystalizer=i=2:c=0", chain)
+        self.assertNotIn("crystalizer", chain)
         self.assertIn("extrastereo=m=1.8:c=0", chain)
 
     def test_limiter_closes_every_active_chain(self):
         chain = build_filter_chain(_full_state())
         self.assertTrue(chain.endswith(
-            f"alimiter=limit={LIMITER_CEILING}:attack=5:release=50:level=0"), chain)
+            f"alimiter=limit={LIMITER_CEILING}:attack=5:release=120:asc=1:level=0"), chain)
         self.assertEqual(build_filter_chain(AudioFxState(master_enabled=True)), "")
 
     def test_reverb_mix_is_equal_power(self):
@@ -613,3 +633,44 @@ class MpvEndToEndTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SoundTests(unittest.TestCase):
+
+    def test_every_sound_builds_a_chain(self):
+        for name in SOUNDS:
+            with self.subTest(sound=name):
+                s = AudioFxState(master_enabled=True)
+                self.assertTrue(s.apply_sound(name))
+                chain = build_filter_chain(s)
+                self.assertEqual(chain == "", name == "flat")
+
+    def test_label_says_edited(self):
+        s = AudioFxState(master_enabled=True)
+        s.apply_sound("bass")
+        self.assertEqual(s.sound_label(), "bass")
+        s.eq_bands[4] = 2.0
+        self.assertEqual(s.sound_label(), "bass · edited")
+
+    def test_saved_sound_round_trips(self):
+        s = AudioFxState(master_enabled=True, chorus=True, chorus_amount=0.8)
+        s.save_sound("night bus")
+        t = AudioFxState.from_json(s.to_json())
+        self.assertEqual([x.name for x in t.saved_sounds], ["night bus"])
+        t.apply_sound("flat")
+        self.assertFalse(t.chorus)
+        t.apply_sound("night bus")
+        self.assertTrue(t.chorus)
+        self.assertAlmostEqual(t.chorus_amount, 0.8)
+
+    def test_old_slots_become_saved_sounds(self):
+        old = {"master_enabled": True, "custom_slots": [
+            {"name": "mine", "bands": [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]},
+            {"name": "", "bands": [0] * 10}]}
+        s = AudioFxState.from_dict(old)
+        self.assertEqual([x.name for x in s.saved_sounds], ["mine"])
+        s.apply_sound("mine")
+        self.assertEqual(s.eq_bands[0], 3.0)
+
+    def test_old_wide_width_is_clamped(self):
+        self.assertEqual(AudioFxState.from_dict({"stereo_width": 2.5}).stereo_width, 2.0)

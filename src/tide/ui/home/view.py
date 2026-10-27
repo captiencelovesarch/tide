@@ -63,15 +63,35 @@ def _country_from_env() -> str:
     return "ZZ"
 
 
-def _greeting() -> str:
-    hour = time.localtime().tm_hour
+# Each line has to read right with ", <first name>" after it.
+_GREETINGS_ANYTIME = ("welcome back", "hey", "hi", "good to see you")
+_GREETINGS = {
+    "morning": ("good morning", "morning", "rise and shine", "early start",
+                "coffee first"),
+    "afternoon": ("good afternoon", "afternoon", "back at it",
+                  "afternoon break"),
+    "evening": ("good evening", "evening", "winding down", "long day"),
+    "late": ("up late", "still up", "night owl", "late one",
+             "the quiet hours"),
+}
+
+
+def _greeting(now: float | None = None) -> str:
+    """A time-of-day line, picked by the date so [refresh] doesn't reroll
+    it; a new slot or a new day gets a new one."""
+    t = time.localtime(now)
+    hour = t.tm_hour
     if 5 <= hour < 12:
-        return "good morning"
-    if 12 <= hour < 18:
-        return "good afternoon"
-    if 18 <= hour < 23:
-        return "good evening"
-    return "up late"
+        slot = "morning"
+    elif 12 <= hour < 18:
+        slot = "afternoon"
+    elif 18 <= hour < 23:
+        slot = "evening"
+    else:
+        slot = "late"
+    pool = _GREETINGS[slot] + _GREETINGS_ANYTIME
+    day = t.tm_year * 1000 + t.tm_yday
+    return pool[(day * 7 + len(slot)) % len(pool)]
 
 
 def _weekly_stats() -> str:
@@ -302,6 +322,66 @@ def pick_pattern(title: str, items: list, index: int, seed: int) -> str:
     return rotation[(seed + index) % len(rotation)]
 
 
+# How long the personalized shelves get before the loading note turns into
+# a "took too long" message. The worker keeps running, so shelves that land
+# after this still show and the message goes away.
+_SHELVES_TIMEOUT_MS = 15_000
+
+_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+class _RecoNote(QLabel):
+    """One dim line in the shelves slot: a spinner and "loading
+    recommendations" while the source's home feed is in flight, or the
+    failure text. The spinner is a glyph cycled by a timer that only runs
+    while the note is visible and loading."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setProperty("class", "dim")
+        self.setWordWrap(True)
+        self._frame = 0
+        self._loading = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(90)
+        self._timer.timeout.connect(self._tick)
+        self.set_loading()
+
+    def is_loading(self) -> bool:
+        return self._loading
+
+    def set_loading(self) -> None:
+        self._loading = True
+        self._paint_frame()
+        if self.isVisible():
+            self._timer.start()
+
+    def set_failed(self, reason: str) -> None:
+        self._loading = False
+        self._timer.stop()
+        reason = (reason or "").strip().splitlines()[0:1]
+        reason = reason[0][:200] if reason else "unknown error"
+        self.setText(theming.styled_case(
+            f"  failed to load recommended: {reason}"))
+
+    def _paint_frame(self) -> None:
+        self.setText(theming.styled_case("  loading recommendations")
+                     .replace("  ", f"{_SPIN_FRAMES[self._frame]} ", 1))
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % len(_SPIN_FRAMES)
+        self._paint_frame()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._loading:
+            self._timer.start()
+
+    def hideEvent(self, event) -> None:
+        self._timer.stop()
+        super().hideEvent(event)
+
+
 class HomeView(QWidget):
     """Drop-in successor to ExploreView — same signals + home-engine ones."""
 
@@ -329,6 +409,7 @@ class HomeView(QWidget):
         # weight -> the widgets that extra put in the extras slot
         self._extras_present: dict[int, list[QWidget]] = {}
         self._charts_band = None
+        self._reco_note: _RecoNote | None = None
         self._build_ui()
 
     # ---------- layout ----------
@@ -389,6 +470,7 @@ class HomeView(QWidget):
         self._pending_builds.clear()
         self._extras_present.clear()
         self._charts_band = None
+        self._reco_note = None      # deleted with the slots below
         while self._content_col.count():
             it = self._content_col.takeAt(0)
             w = it.widget()
@@ -439,6 +521,7 @@ class HomeView(QWidget):
         self._spawn(_ShelvesWorker(self.api, gen),
                     self._on_shelves, self._on_shelves_failed)
         if not plain:
+            self._show_reco_note(gen)
             if self.api.supports("explore"):
                 self._spawn(_ExploreWorker(self.api, gen),
                             self._on_explore, self._on_extra_failed)
@@ -504,6 +587,7 @@ class HomeView(QWidget):
         if gen != self._gen or self._mode != "home":
             return
         self._loaded = True
+        self._drop_reco_note()
         self.heading.set_label("home")
         if not shelves:
             self._dim_note("nothing on the home feed yet. play some music "
@@ -511,6 +595,11 @@ class HomeView(QWidget):
             return
         plain = self._plain_mode()
         seed = self._daily_seed()
+        # quick picks leads: youtube puts it a few shelves down, and it's
+        # the one people reach for.
+        shelves = sorted(
+            shelves,
+            key=lambda s: "quick picks" not in (s.title or "").lower())
         for i, shelf in enumerate(shelves):
             pattern = "shelf_row" if plain else pick_pattern(
                 shelf.title, shelf.items, i, seed)
@@ -523,8 +612,35 @@ class HomeView(QWidget):
         if gen != self._gen:
             return
         self._loaded = True
+        if self._reco_note is not None:
+            self._reco_note.set_failed(msg)
         self.heading.set_label("home · shelves failed")
         self.status_message.emit(f"home: {msg}")
+
+    def _show_reco_note(self, gen: int) -> None:
+        """Spinner in the shelves slot until get_home answers (the extras
+        read a disk cache and land first, so without this the page looks
+        finished). Times out into a message; a late answer still wins."""
+        self._reco_note = _RecoNote()
+        self._append(self._reco_note)
+        QTimer.singleShot(_SHELVES_TIMEOUT_MS,
+                          lambda: self._on_shelves_timeout(gen))
+
+    def _on_shelves_timeout(self, gen: int) -> None:
+        note = self._reco_note
+        if gen != self._gen or note is None or not note.is_loading():
+            return
+        note.set_failed("it took too long")
+
+    def _drop_reco_note(self) -> None:
+        note, self._reco_note = self._reco_note, None
+        if note is None:
+            return
+        self._shelves_col.removeWidget(note)
+        note.hide()
+        note.deleteLater()
+        if self._shelves_col.count() == 0:
+            self._shelves_slot.hide()
 
     def _dim_note(self, text: str) -> None:
         note = QLabel(theming.styled_case("  " + text))

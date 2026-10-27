@@ -683,6 +683,30 @@ def run(argv: list[str] | None = None) -> int:
     if hasattr(window, "apply_preset_visuals"):
         window.apply_preset_visuals()
 
+    # Home loads once the probe is back: the session is fresh by then and
+    # the greeting has the account's first name. Nothing else loads home at
+    # launch (only the nav button did), so it used to sit empty until
+    # [refresh]. A hung rotation must not keep it empty, hence the fallback.
+    from PySide6.QtCore import QObject as _HQObject, Signal as _HSignal
+
+    class _HomeBridge(_HQObject):
+        ready = _HSignal()
+
+    home_started = [False]
+
+    def _load_home_once() -> None:
+        if home_started[0]:
+            return
+        home_started[0] = True
+        try:
+            window.explore_view.ensure_loaded()
+        except Exception:
+            pass
+
+    home_bridge = _HomeBridge()
+    home_bridge.ready.connect(_load_home_once)
+    window._home_bridge = home_bridge
+
     # Cookie-death probe. Imported YT Music cookies expire silently: every
     # API call starts 401ing and the views above just render empty, so the
     # user's first hint was "the app feels broken". Fire one cheap
@@ -709,8 +733,12 @@ def run(argv: list[str] | None = None) -> int:
                     yt_source.probe_auth()
                 except Exception:
                     pass
+                home_bridge.ready.emit()
 
         QThreadPool.globalInstance().start(_YtAuthProbe())
+        QTimer.singleShot(4000, _load_home_once)
+    else:
+        QTimer.singleShot(0, _load_home_once)
     yt_session.start_keeper()
     app.aboutToQuit.connect(yt_session.stop_keeper)
 
@@ -827,6 +855,7 @@ def run(argv: list[str] | None = None) -> int:
     try:
         fx_state = audio_fx.AudioFxState.from_json(user_settings.audio_fx_state or "")
         window.audio_fx_view.set_state(fx_state)
+        window._fx_last_sound = fx_state.sound
         window.audio_fx_btn.set_state(fx_state, emit=False)
         player.set_audio_filter_chain(audio_fx.build_filter_chain(fx_state))
     except Exception:

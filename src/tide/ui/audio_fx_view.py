@@ -1,51 +1,53 @@
-"""The [audio fx] view — full rack with EQ + every knob.
+"""The [audio fx] page (reworked in 3.1).
 
-Sections, top to bottom:
-  1. Master enable + active-preset readout.
-  2. 10-band graphic EQ — vertical sliders with frequency labels.
-  3. EQ presets — clickable cards (flat / bass / treble / vocal / v-shape /
-     soft warmth).
-  4. Reverb — preset dropdown + wet slider (convolution, see fx_ir).
-  5. Effects — chorus / flanger / phaser / tremolo / exciter /
-     crossfeed / lofi toggles + their few knobs.
-  6. Shelves + glue — bass, treble, loudness norm, stereo width,
-     compressor, mono.
-  7. Custom slots — three [save] / [load] / [clear] rows.
+Top to bottom:
+  1. "sound", the on switch, what's playing through it ("bass · edited"),
+     and [hold to compare]: the rack is bypassed while it's held, at the
+     same loudness (the chain is level-matched, see audio_fx).
+  2. Sounds: one tap sets the whole rack (audio_fx.SOUNDS), then your
+     saved ones, then [save this]. Right-click a saved one to delete it.
+  3. The eq as one curve (``EqCurve``): ten band points plus the bass and
+     treble shelves as the two end points. The line is the real response
+     of the filters, so overlapping bands show as they sound.
+  4. Effect tiles in four groups (space, motion, tone, listening). Tap a
+     tile to turn it on; its one amount slider shows while it's on.
 
 The view owns a single ``AudioFxState`` and emits ``state_changed``
 whenever any control flips. ``app.py`` wires that signal to the playback
-router + a debounced settings save.
+router + a debounced settings save. ``compare_changed`` and
+the sound's speed go to the window (slowed + reverb asks for a slower
+speed; the rack itself has no speed, see window._apply_sound_speed).
 
-Two faces (v2.0): the continuous controls sit in ``_FxControl`` wrappers
-hosting the original ``_ShelfSlider`` (bracket — brutalist, behavior
-verbatim) or a ``_SpringShelfSlider`` (modern). The face lands on show
-(``showEvent`` → ``_ensure_face``) because the view is built before
-app.py attaches ``window._settings`` — construction always starts
-bracket; a mid-session flip lands the next time the page is shown.
+Two faces (v2.0): the amount sliders sit in ``_FxControl`` wrappers
+hosting a ``_ShelfSlider`` (bracket — brutalist) or a
+``_SpringShelfSlider`` (modern). The face lands on show (``showEvent`` →
+``_ensure_face``) because the view is built before app.py attaches
+``window._settings`` — construction always starts bracket; a
+mid-session flip lands the next time the page is shown.
 
 Debounce discipline: one mpv filter-chain push costs 34-62 ms ON THE GUI
 THREAD and restarts the reverb tail, so drags must NEVER push per-tick.
 Live changes ride ``state_changed`` into the window's trailing-edge
 debounce (~120 ms push / ~250 ms save); a commit SHORTENS that pending
 work via ``_commit_fx_debounce`` — never bypasses it, because commits
-arrive per wheel notch and key auto-repeat once motion is off.
-
-The 10 EQ bands stay vertical QSliders (SpringSlider is horizontal by
-contract) but join the commit discipline; swap at ``_EqBand`` if a
-vertical SpringSlider ever lands.
+arrive per wheel notch and key auto-repeat once motion is off. The curve
+commits on release under the modern face only, like the spring sliders.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QFont
+import math
+
+from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
-    QPushButton,
+    QMenu,
     QScrollArea,
     QSizePolicy,
     QSlider,
@@ -53,18 +55,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import theming
 from ..audio_fx import (
     AudioFxState,
     EQ_BAND_COUNT,
     EQ_FREQUENCIES_HZ,
     EQ_GAIN_MAX_DB,
     EQ_GAIN_MIN_DB,
-    EQ_PRESETS,
     REVERB_PRESETS,
-    detect_eq_preset,
+    SOUNDS,
+    eq_response_db,
 )
 from ..theming import styled_case
+from .flow import FlowLayout
+from .headings import Heading
 from .spring_slider import SpringSlider
+from .widgets import BracketButton
+
+
 
 
 def _format_hz(hz: int) -> str:
@@ -161,89 +169,6 @@ def _commit_fx_debounce(widget: QWidget) -> None:
     timer.start()
 
 
-class _EqBand(QWidget):
-    """One slider + frequency label + live gain readout. Emits the new
-    gain in dB on each user-driven change."""
-
-    gain_changed = Signal(int, float)   # band index, gain dB
-    # Fired on mouse-drag release. Unconnected under the bracket face
-    # (zero behavior change); the modern face flushes the debounced push.
-    gain_committed = Signal(int)        # band index
-
-    SLIDER_SCALE = 10   # 0.1 dB resolution under the int slider
-
-    def __init__(self, index: int, frequency_hz: int, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._index = index
-        self._frequency = frequency_hz
-        self._silent = False  # mute setValue → valueChanged loop during sync
-
-        self._readout = QLabel("0")
-        self._readout.setAlignment(Qt.AlignCenter)
-        self._readout.setMinimumWidth(28)
-
-        self._slider = QSlider(Qt.Vertical)
-        self._slider.setMinimum(int(EQ_GAIN_MIN_DB * self.SLIDER_SCALE))
-        self._slider.setMaximum(int(EQ_GAIN_MAX_DB * self.SLIDER_SCALE))
-        self._slider.setSingleStep(1)
-        self._slider.setPageStep(self.SLIDER_SCALE)
-        self._slider.setTickPosition(QSlider.TicksRight)
-        self._slider.setTickInterval(self.SLIDER_SCALE * 6)  # ±6 / ±12 marks
-        self._slider.setFixedHeight(170)
-        self._slider.setMinimumWidth(28)
-        self._slider.valueChanged.connect(self._on_slider)
-        self._slider.sliderReleased.connect(
-            lambda: self.gain_committed.emit(self._index))
-
-        # Double-click the readout to reset that band to 0 dB.
-        self._readout.setCursor(Qt.PointingHandCursor)
-        self._readout.mouseDoubleClickEvent = lambda _ev: self.set_gain(0.0)
-
-        self._label = QLabel(_format_hz(frequency_hz))
-        self._label.setAlignment(Qt.AlignCenter)
-        self._label.setObjectName("eqBandLabel")
-
-        col = QVBoxLayout(self)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(4)
-        col.addWidget(self._readout)
-        col.addWidget(self._slider, alignment=Qt.AlignHCenter)
-        col.addWidget(self._label)
-
-    def gain(self) -> float:
-        return self._slider.value() / self.SLIDER_SCALE
-
-    def set_gain(self, db: float) -> None:
-        clamped = max(EQ_GAIN_MIN_DB, min(EQ_GAIN_MAX_DB, float(db)))
-        target = int(round(clamped * self.SLIDER_SCALE))
-        if target == self._slider.value():
-            self._readout.setText(_format_db(clamped))
-            return
-        self._silent = True
-        try:
-            self._slider.setValue(target)
-        finally:
-            self._silent = False
-        self._readout.setText(_format_db(clamped))
-
-    def _on_slider(self, value: int) -> None:
-        db = value / self.SLIDER_SCALE
-        self._readout.setText(_format_db(db))
-        if not self._silent:
-            self.gain_changed.emit(self._index, db)
-
-
-class _PresetCard(QPushButton):
-    """A bracket-styled pill that highlights when active."""
-
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("audioFxPresetCard")
-        self.setFlat(False)
-        self.setCheckable(True)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setText(styled_case(label))
-        self.setMinimumHeight(28)
 
 
 class _ShelfSlider(QWidget):
@@ -264,8 +189,10 @@ class _ShelfSlider(QWidget):
 
         self._label = QLabel(styled_case(label))
         self._label.setMinimumWidth(110)
+        self._label.setVisible(bool(label))   # tiles carry their own name
         self._readout = QLabel("0")
         self._readout.setMinimumWidth(56)
+        self._readout.setVisible(bool(label))  # a tile shows the value itself
         self._readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self._slider = QSlider(Qt.Horizontal)
@@ -327,8 +254,10 @@ class _SpringShelfSlider(QWidget):
 
         self._label = QLabel(styled_case(label))
         self._label.setMinimumWidth(110)
+        self._label.setVisible(bool(label))   # tiles carry their own name
         self._readout = QLabel("0")
         self._readout.setMinimumWidth(56)
+        self._readout.setVisible(bool(label))  # a tile shows the value itself
         self._readout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self._slider = SpringSlider()
@@ -418,52 +347,404 @@ class _FxControl(QWidget):
     def set_value(self, v: float) -> None:
         self._inner.set_value(v)
 
+    def readout_text(self) -> str:
+        return self._inner._readout.text()
 
-class _SlotRow(QFrame):
-    """Custom-slot row: [save] [load] [clear] + a small status line."""
 
-    save_clicked = Signal(int)
-    load_clicked = Signal(int)
-    clear_clicked = Signal(int)
 
-    def __init__(self, index: int, parent: QWidget | None = None) -> None:
+
+def _tok(key: str, default: str) -> QColor:
+    t = theming.manager().current_effective()
+    return QColor(t.token(key, default) if t is not None else default)
+
+
+def _modern() -> bool:
+    t = theming.manager().current_effective()
+    return getattr(t, "aesthetic", "") == "modern"
+
+
+# ---------------------------------------------------------------------------
+# the eq curve
+# ---------------------------------------------------------------------------
+
+LOW_SHELF = EQ_BAND_COUNT          # handle index of the bass shelf
+HIGH_SHELF = EQ_BAND_COUNT + 1     # and the treble shelf
+_F_MIN, _F_MAX = 20.0, 20000.0
+_DB_RANGE = 15.0                   # the plot shows ±15 dB
+_CURVE_POINTS = 180
+
+
+class EqCurve(QWidget):
+    """Ten band points and two shelf points on the real response curve.
+    Drag a point up or down (0.5 dB steps), double-click to zero it, or
+    use the wheel over it."""
+
+    band_changed = Signal(int, float)   # handle index, dB
+    committed = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._index = index
-        self.setObjectName("audioFxSlotRow")
+        self._state: AudioFxState | None = None
+        self._drag: int | None = None
+        self._hover: int | None = None
+        self._cache_key = None
+        self._cache: list[float] = []
+        self.setMouseTracking(True)
+        self.setMinimumHeight(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(Qt.SizeVerCursor)
+        theming.manager().theme_changed.connect(self._on_theme)
 
-        self._label = QLabel(styled_case(f"slot {index + 1}"))
-        self._label.setMinimumWidth(80)
-        self._status = QLabel(styled_case("empty"))
-        self._status.setObjectName("audioFxSlotStatus")
+    def _on_theme(self, *_args) -> None:
+        self.update()
 
-        self._save_btn = QPushButton(styled_case("[save]"))
-        self._save_btn.clicked.connect(lambda: self.save_clicked.emit(self._index))
-        self._load_btn = QPushButton(styled_case("[load]"))
-        self._load_btn.clicked.connect(lambda: self.load_clicked.emit(self._index))
-        self._clear_btn = QPushButton(styled_case("[clear]"))
-        self._clear_btn.clicked.connect(lambda: self.clear_clicked.emit(self._index))
+    def sizeHint(self):  # noqa: N802
+        from PySide6.QtCore import QSize
+        return QSize(640, 190)
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(8, 4, 8, 4)
-        row.setSpacing(8)
-        row.addWidget(self._label)
-        row.addWidget(self._status, stretch=1)
-        row.addWidget(self._save_btn)
-        row.addWidget(self._load_btn)
-        row.addWidget(self._clear_btn)
+    def set_state(self, state: AudioFxState) -> None:
+        self._state = state
+        self.update()
 
-    def set_state(self, occupied: bool, summary: str = "") -> None:
-        self._status.setText(styled_case(summary or ("empty" if not occupied else "saved")))
-        self._load_btn.setEnabled(occupied)
-        self._clear_btn.setEnabled(occupied)
+    # ---- geometry ----
 
+    def _plot(self) -> QRectF:
+        return QRectF(48, 12, max(10, self.width() - 62), max(10, self.height() - 38))
+
+    def _x(self, f: float) -> float:
+        r = self._plot()
+        t = math.log(f / _F_MIN) / math.log(_F_MAX / _F_MIN)
+        return r.left() + t * r.width()
+
+    def _y(self, db: float) -> float:
+        r = self._plot()
+        db = max(-_DB_RANGE, min(_DB_RANGE, db))
+        return r.center().y() - db / _DB_RANGE * (r.height() / 2)
+
+    def _db_at(self, y: float) -> float:
+        r = self._plot()
+        db = (r.center().y() - y) / (r.height() / 2) * _DB_RANGE
+        db = max(EQ_GAIN_MIN_DB, min(EQ_GAIN_MAX_DB, db))
+        return round(db * 2) / 2
+
+    def _handle_freq(self, i: int) -> float:
+        if i == LOW_SHELF:
+            return _F_MIN
+        if i == HIGH_SHELF:
+            return _F_MAX
+        return float(EQ_FREQUENCIES_HZ[i])
+
+    def handle_db(self, i: int) -> float:
+        s = self._state
+        if s is None:
+            return 0.0
+        if i == LOW_SHELF:
+            return float(s.bass_db)
+        if i == HIGH_SHELF:
+            return float(s.treble_db)
+        return float(s.eq_bands[i])
+
+    def _nearest(self, x: float) -> int:
+        return min(range(HIGH_SHELF + 1), key=lambda i: abs(self._x(self._handle_freq(i)) - x))
+
+    # ---- input ----
+
+    def mousePressEvent(self, ev) -> None:  # noqa: N802
+        if ev.button() != Qt.LeftButton or self._state is None:
+            return
+        self._drag = self._nearest(ev.position().x())
+        self._set(self._drag, self._db_at(ev.position().y()))
+
+    def mouseMoveEvent(self, ev) -> None:  # noqa: N802
+        if self._drag is not None:
+            self._set(self._drag, self._db_at(ev.position().y()))
+        else:
+            hover = self._nearest(ev.position().x())
+            if hover != self._hover:
+                self._hover = hover
+                self.update()
+
+    def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
+        if self._drag is not None:
+            self._drag = None
+            self.update()
+            self.committed.emit()
+
+    def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
+        if self._state is None:
+            return
+        self._set(self._nearest(ev.position().x()), 0.0)
+        self.committed.emit()
+
+    def leaveEvent(self, ev) -> None:  # noqa: N802
+        self._hover = None
+        self.update()
+        super().leaveEvent(ev)
+
+    def wheelEvent(self, ev) -> None:  # noqa: N802
+        if self._state is None:
+            ev.ignore()
+            return
+        steps = ev.angleDelta().y() / 120.0
+        if not steps:
+            ev.ignore()
+            return
+        i = self._nearest(ev.position().x())
+        db = max(EQ_GAIN_MIN_DB, min(EQ_GAIN_MAX_DB, self.handle_db(i) + 0.5 * steps))
+        self._set(i, round(db * 2) / 2)
+        self.committed.emit()
+        ev.accept()
+
+    def _set(self, i: int, db: float) -> None:
+        if abs(db - self.handle_db(i)) < 1e-6:
+            return
+        self.band_changed.emit(i, db)
+        self.update()
+
+    # ---- paint ----
+
+    def _response(self) -> list[float]:
+        s = self._state
+        key = (tuple(s.eq_bands), s.bass_db, s.treble_db, s.sub_bass, s.sub_amount)
+        if key != self._cache_key:
+            freqs = [_F_MIN * (_F_MAX / _F_MIN) ** (k / (_CURVE_POINTS - 1))
+                     for k in range(_CURVE_POINTS)]
+            self._cache = list(zip(freqs, eq_response_db(s, freqs)))
+            self._cache_key = key
+        return self._cache
+
+    def paintEvent(self, _ev) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        modern = _modern()
+        accent = _tok("accent", "#d4b95e")
+        fg = _tok("fg", "#dddddd")
+        dim = _tok("dim", "#888888")
+        surface = _tok("surface_1", "#202020")
+        line = _tok("border_dim", "#333333")
+        radius = 12.0 if modern else 0.0
+        outer = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        p.setPen(QPen(line, 1))
+        p.setBrush(surface)
+        p.drawRoundedRect(outer, radius, radius)
+
+        r = self._plot()
+        small = QFont(self.font())
+        small.setPointSizeF(max(7.0, self.font().pointSizeF() * 0.85))
+        p.setFont(small)
+        # grid: 0 dB in dim, ±6 / ±12 dashed and fainter, labelled left
+        faint = QColor(dim)
+        faint.setAlpha(90)
+        for db in (-12, -6, 0, 6, 12):
+            pen = QPen(faint if db else dim, 1)
+            if db:
+                pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            y = self._y(db)
+            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+            p.setPen(dim)
+            p.drawText(QRectF(4, y - 8, r.left() - 16, 16),
+                       Qt.AlignRight | Qt.AlignVCenter,
+                       "0" if not db else f"{db:+d}".replace("-", "−"))
+        p.setPen(dim)
+        for f in EQ_FREQUENCIES_HZ:
+            x = self._x(f)
+            p.drawText(QRectF(x - 20, r.bottom() + 6, 40, 16), Qt.AlignCenter, _format_hz(f))
+
+        if self._state is None:
+            p.end()
+            return
+        pts = [QPointF(self._x(f), self._y(db)) for f, db in self._response()]
+        curve = QPainterPath(pts[0])
+        for pt in pts[1:]:
+            curve.lineTo(pt)
+        fill = QPainterPath(curve)
+        fill.lineTo(QPointF(pts[-1].x(), self._y(0)))
+        fill.lineTo(QPointF(pts[0].x(), self._y(0)))
+        fill.closeSubpath()
+        wash = QColor(accent)
+        wash.setAlpha(46)
+        p.setPen(Qt.NoPen)
+        p.setBrush(wash)
+        p.drawPath(fill)
+        p.setPen(QPen(accent, 2.0))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(curve)
+
+        active = self._drag if self._drag is not None else self._hover
+        for i in range(HIGH_SHELF + 1):
+            c = QPointF(self._x(self._handle_freq(i)), self._y(self.handle_db(i)))
+            p.setPen(QPen(accent, 2.0))
+            p.setBrush(accent if i == active else surface)
+            rad = 6.0 if i == active else 4.5
+            if i in (LOW_SHELF, HIGH_SHELF):
+                diamond = QPainterPath()
+                diamond.moveTo(c.x(), c.y() - rad - 1)
+                diamond.lineTo(c.x() + rad + 1, c.y())
+                diamond.lineTo(c.x(), c.y() + rad + 1)
+                diamond.lineTo(c.x() - rad - 1, c.y())
+                diamond.closeSubpath()
+                p.drawPath(diamond)
+            elif modern:
+                p.drawEllipse(c, rad, rad)
+            else:
+                p.drawRect(QRectF(c.x() - rad, c.y() - rad, 2 * rad, 2 * rad))
+        if active is not None:
+            db = self.handle_db(active)
+            name = {LOW_SHELF: "bass shelf", HIGH_SHELF: "treble shelf"}.get(
+                active, f"{_format_hz(EQ_FREQUENCIES_HZ[active])} hz"
+                if active < EQ_BAND_COUNT else "")
+            text = styled_case(f"{name}  {_format_db(db)} db")
+            x = self._x(self._handle_freq(active))
+            box = QRectF(x - 60, r.top(), 120, 16)
+            box.moveLeft(max(r.left(), min(r.right() - 120, box.left())))
+            p.setPen(fg)
+            p.drawText(box, Qt.AlignCenter, text)
+        p.end()
+
+
+# ---------------------------------------------------------------------------
+# effect tiles
+# ---------------------------------------------------------------------------
+
+# key, name, one line, the state switch, and the amount slider:
+# (state attr, lo, hi, step, suffix, detent, scale) — the state holds
+# slider value × scale. None = no slider. Width and reverb are special
+# cases in the view (no plain bool behind them).
+TILE_GROUPS: tuple[tuple[str, tuple], ...] = (
+    ("space", (
+        ("reverb", "reverb", "a room round the song", None,
+         ("reverb_wet", 0.0, 1.0, 0.05, "%", 0.5, 1.0)),
+        ("eightd", "8d", "the song circles your head", "eightd",
+         ("eightd_speed", 0.0, 1.0, 0.05, "%", 0.4, 1.0)),
+    )),
+    ("motion", (
+        ("chorus", "chorus", "doubled and wider", "chorus",
+         ("chorus_amount", 0.0, 1.0, 0.05, "%", 0.5, 1.0)),
+        ("flanger", "flanger", "jet sweep", "flanger",
+         ("flanger_amount", 0.0, 1.0, 0.05, "%", 0.5, 1.0)),
+        ("phaser", "phaser", "slow swirl", "phaser",
+         ("phaser_amount", 0.0, 1.0, 0.05, "%", 0.5, 1.0)),
+        ("tremolo", "tremolo", "volume wobble", "tremolo",
+         ("tremolo_speed", 0.5, 10.0, 0.5, " Hz", 5.0, 1.0)),
+    )),
+    ("tone", (
+        ("sub_bass", "sub bass", "low end you feel", "sub_bass",
+         ("sub_amount", 0.0, 1.0, 0.05, "%", 0.5, 1.0)),
+        ("exciter", "exciter", "a clearer top end", "exciter",
+         ("exciter_amount", 0.0, 1.0, 0.05, "%", 0.4, 5.0)),
+        ("lofi", "lofi", "tape wobble and crunch", "lofi",
+         ("lofi_amount", 0.0, 1.0, 0.05, "%", 0.5, 1.0)),
+        ("compressor", "compressor", "quiet parts up, loud parts down", "compressor",
+         ("compressor_amount", 0.0, 1.0, 0.05, "%", 0.5, 1.0)),
+    )),
+    ("listening", (
+        ("loudness", "even volume", "every song at about the same level",
+         "loudness_norm", None),
+        ("crossfeed", "crossfeed", "less hard left and right on headphones",
+         "crossfeed", ("crossfeed_strength", 0.0, 1.0, 0.05, "%", 0.4, 1.0)),
+        ("width", "width", "narrower or wider stereo", None,
+         ("stereo_width", 0.0, 2.0, 0.1, "x", 1.0, 1.0)),
+        ("mono", "mono", "both speakers play the same", "mono", None),
+    )),
+)
+
+
+class FxTile(QFrame):
+    """One effect: name, a line on what it does, and its amount slider
+    while it's on. Clicking anywhere but the slider toggles it."""
+
+    toggled = Signal(str, bool)
+
+    def __init__(self, key: str, name: str, blurb: str, control,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.key = key
+        self._name = name
+        self._on = False
+        self.setObjectName("fxTile")
+        self.setProperty("on", False)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.name = QLabel()
+        self.name.setObjectName("fxTileName")
+        self.value = QLabel()
+        self.value.setObjectName("fxTileValue")
+        self.value.setProperty("class", "dim")
+        self.value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.value.hide()
+        self.blurb = QLabel(styled_case(blurb))
+        self.blurb.setObjectName("fxTileBlurb")
+        self.blurb.setProperty("class", "dim")
+        self.blurb.setWordWrap(True)
+        self.control = control
+        self.extra: QWidget | None = None
+        self._col = QVBoxLayout(self)
+        self._col.setContentsMargins(12, 10, 12, 10)
+        self._col.setSpacing(4)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        top.addWidget(self.name, stretch=1)
+        top.addWidget(self.value)
+        self._col.addLayout(top)
+        self._col.addWidget(self.blurb)
+        if control is not None:
+            self._col.addWidget(control)
+            control.hide()
+            control.value_changed.connect(lambda _v: self.refresh_value())
+        self._refresh_name()
+
+    def add_extra(self, w: QWidget) -> None:
+        self.extra = w
+        self._col.insertWidget(2, w)
+        w.hide()
+
+    def is_on(self) -> bool:
+        return self._on
+
+    def set_on(self, on: bool) -> None:
+        """Silent: the view calls this while syncing."""
+        on = bool(on)
+        self._on = on
+        self.setProperty("on", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        if self.control is not None:
+            self.control.setVisible(on)
+            self.value.setVisible(on)
+            self.refresh_value()
+        if self.extra is not None:
+            self.extra.setVisible(on)
+        self._refresh_name()
+
+    def refresh_value(self) -> None:
+        if self.control is not None:
+            self.value.setText(self.control.readout_text())
+
+    def _refresh_name(self) -> None:
+        name = styled_case(self._name)
+        if not _modern():
+            name = f"[{'x' if self._on else ' '}] {name}"
+        self.name.setText(name)
+
+    def mouseReleaseEvent(self, ev) -> None:  # noqa: N802
+        if ev.button() == Qt.LeftButton and self.rect().contains(ev.position().toPoint()):
+            self.set_on(not self._on)
+            self.toggled.emit(self.key, self._on)
+        super().mouseReleaseEvent(ev)
+
+
+# ---------------------------------------------------------------------------
+# the page
+# ---------------------------------------------------------------------------
 
 class AudioFxView(QWidget):
-    """The full [audio fx] panel. The single source of truth for the
+    """The full [audio fx] page. The single source of truth for the
     rack lives in ``self._state``; UI controls reflect it and call back
     to mutate it."""
 
-    state_changed = Signal(object)   # AudioFxState
+    state_changed = Signal(object)    # AudioFxState
+    compare_changed = Signal(bool)    # held: play without the rack
 
     def __init__(self, state: AudioFxState | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -471,202 +752,88 @@ class AudioFxView(QWidget):
         # Construction always builds bracket — window._settings doesn't
         # exist yet at window-build time; showEvent lands the real face.
         self._face = "bracket"
+        self._last_width = 1.4
+        self._last_room = "hall"
 
-        heading = QLabel(styled_case("audio fx"))
-        heading.setObjectName("sectionHeading")
-
-        sub = QLabel(styled_case(
-            "10-band eq · reverb · chorus, tremolo, lofi and "
-            "the rest of the rack. filter chain rebuilds live, no restart "
-            "needed. double-click any eq slider readout to zero it."
-        ))
-        sub.setObjectName("sectionSub")
-        sub.setWordWrap(True)
-
-        # 1. Master enable row.
-        self._master_box = QCheckBox(styled_case("rack on"))
+        # 1. header
+        heading = Heading("sound", 40)
+        self._master_box = QCheckBox(styled_case("on"))
         self._master_box.setChecked(self._state.master_enabled)
         self._master_box.toggled.connect(self._on_master_toggle)
+        self._readout = QLabel("")
+        self._readout.setObjectName("audioFxActivePreset")
+        self._readout.setProperty("class", "dim")
+        self._compare_btn = BracketButton("hold to compare")
+        self._compare_btn.setRole("pill")
+        self._compare_btn.setToolTip(styled_case(
+            "plays without the rack while you hold it, at the same loudness"))
+        self._compare_btn.pressed.connect(lambda: self.compare_changed.emit(True))
+        self._compare_btn.released.connect(lambda: self.compare_changed.emit(False))
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head.addWidget(heading)
+        head.addWidget(self._master_box)
+        head.addWidget(self._readout, stretch=1)
+        head.addWidget(self._compare_btn)
 
-        self._preset_readout = QLabel("")
-        self._preset_readout.setObjectName("audioFxActivePreset")
+        # 2. sounds
+        self._sound_flow = FlowLayout(h_gap=6, v_gap=6)
+        self._sound_box = QWidget()
+        self._sound_box.setLayout(self._sound_flow)
+        self._sound_chips: dict[str, BracketButton] = {}
 
-        master_row = QHBoxLayout()
-        master_row.setContentsMargins(0, 0, 0, 0)
-        master_row.setSpacing(10)
-        master_row.addWidget(self._master_box)
-        master_row.addWidget(self._preset_readout)
-        master_row.addStretch(1)
+        # 3. eq
+        self._curve = EqCurve()
+        self._curve.band_changed.connect(self._on_curve_changed)
+        self._curve.committed.connect(self._on_curve_committed)
 
-        # 2. EQ band sliders.
-        self._eq_bands: list[_EqBand] = []
-        eq_row = QHBoxLayout()
-        eq_row.setContentsMargins(0, 0, 0, 0)
-        eq_row.setSpacing(10)
-        for idx, freq in enumerate(EQ_FREQUENCIES_HZ):
-            band = _EqBand(idx, freq)
-            band.gain_changed.connect(self._on_band_changed)
-            band.gain_committed.connect(self._on_band_committed)
-            eq_row.addWidget(band)
-            self._eq_bands.append(band)
-        eq_row.addStretch(1)
-        eq_frame = QFrame()
-        eq_frame.setObjectName("audioFxEqFrame")
-        eq_inner = QVBoxLayout(eq_frame)
-        eq_inner.setContentsMargins(8, 8, 8, 8)
-        eq_inner.setSpacing(0)
-        eq_inner.addLayout(eq_row)
-
-        # 3. EQ preset cards.
-        self._preset_cards: dict[str, _PresetCard] = {}
-        presets_grid = QGridLayout()
-        presets_grid.setHorizontalSpacing(8)
-        presets_grid.setVerticalSpacing(6)
-        for i, name in enumerate(EQ_PRESETS.keys()):
-            card = _PresetCard(name)
-            card.clicked.connect(lambda _=False, n=name: self._on_preset_picked(n))
-            self._preset_cards[name] = card
-            presets_grid.addWidget(card, i // 3, i % 3)
-
-        # 4. Reverb section.
-        self._reverb_combo = QComboBox()
+        # 4. tiles
+        self._tiles: dict[str, FxTile] = {}
+        self._controls: dict[str, _FxControl] = {}
+        self._specs: dict[str, tuple] = {}
+        # one grid for every group, so the columns line up down the page
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        for c in range(4):
+            grid.setColumnStretch(c, 1)
+        row = 0
+        for group, tiles in TILE_GROUPS:
+            grid.addWidget(self._section(group), row, 0, 1, 4)
+            row += 1
+            for i, (key, name, blurb, switch, amount) in enumerate(tiles):
+                ctrl = None
+                if amount is not None:
+                    attr, lo, hi, step, suffix, detent, scale = amount
+                    ctrl = _FxControl("", lo, hi, step, suffix=suffix, detents=(detent,))
+                    ctrl.value_changed.connect(lambda v, k=key: self._on_amount(k, v))
+                    ctrl.value_committed.connect(self._on_fx_commit)
+                    self._controls[key] = ctrl
+                tile = FxTile(key, name, blurb, ctrl)
+                tile.toggled.connect(self._on_tile)
+                self._tiles[key] = tile
+                self._specs[key] = (switch, amount)
+                grid.addWidget(tile, row + i // 4, i % 4, Qt.AlignTop)
+            row += (len(tiles) + 3) // 4
+        self._room_combo = QComboBox()
         for name in REVERB_PRESETS:
-            self._reverb_combo.addItem(styled_case(name), name)
-        self._reverb_combo.currentIndexChanged.connect(self._on_reverb_changed)
-        self._reverb_wet = _FxControl("wet", 0.0, 1.0, 0.05, suffix="%",
-                                      detents=(0.5,))
-        self._reverb_wet.value_changed.connect(self._on_reverb_wet)
-        reverb_row = QHBoxLayout()
-        reverb_row.setContentsMargins(0, 0, 0, 0)
-        reverb_row.setSpacing(10)
-        rb_lbl = QLabel(styled_case("reverb"))
-        rb_lbl.setMinimumWidth(110)
-        reverb_row.addWidget(rb_lbl)
-        reverb_row.addWidget(self._reverb_combo)
-        reverb_row.addWidget(self._reverb_wet, stretch=1)
-
-        # 5. Effects — the fx drawer. Toggles first, then the few knobs
-        # that earn a slider.
-        self._chorus_box = QCheckBox(styled_case("chorus (doubling)"))
-        self._chorus_box.toggled.connect(self._on_chorus)
-        self._flanger_box = QCheckBox(styled_case("flanger (jet sweep)"))
-        self._flanger_box.toggled.connect(self._on_flanger)
-        self._phaser_box = QCheckBox(styled_case("phaser (swirl)"))
-        self._phaser_box.toggled.connect(self._on_phaser)
-        self._tremolo_box = QCheckBox(styled_case("tremolo (wobble)"))
-        self._tremolo_box.toggled.connect(self._on_tremolo)
-        self._exciter_box = QCheckBox(styled_case("exciter (sparkle)"))
-        self._exciter_box.toggled.connect(self._on_exciter)
-        self._crossfeed_box = QCheckBox(styled_case("crossfeed (headphones)"))
-        self._crossfeed_box.toggled.connect(self._on_crossfeed)
-        self._lofi_box = QCheckBox(styled_case("lofi (tape + crush)"))
-        self._lofi_box.toggled.connect(self._on_lofi)
-
-        self._tremolo_speed_slider = _FxControl(
-            "tremolo speed", 0.5, 10.0, 0.5, suffix=" Hz", detents=(5.0,)
-        )
-        self._tremolo_speed_slider.value_changed.connect(self._on_tremolo_speed)
-        self._exciter_slider = _FxControl("exciter amount", 0.0, 5.0, 0.5,
-                                          suffix="", detents=(2.0,))
-        self._exciter_slider.value_changed.connect(self._on_exciter_amount)
-        self._crossfeed_slider = _FxControl(
-            "crossfeed amount", 0.0, 1.0, 0.05, suffix="%", detents=(0.4,)
-        )
-        self._crossfeed_slider.value_changed.connect(self._on_crossfeed_strength)
-
-        # 6. Shelves + glue.
-        self._bass_slider = _FxControl("bass shelf", EQ_GAIN_MIN_DB,
-                                       EQ_GAIN_MAX_DB, 0.5, detents=(0.0,))
-        self._bass_slider.value_changed.connect(self._on_bass)
-        self._treble_slider = _FxControl("treble shelf", EQ_GAIN_MIN_DB,
-                                         EQ_GAIN_MAX_DB, 0.5, detents=(0.0,))
-        self._treble_slider.value_changed.connect(self._on_treble)
-        self._stereo_slider = _FxControl("stereo width", 0.0, 2.5, 0.1,
-                                         suffix="x", detents=(1.0,))
-        self._stereo_slider.value_changed.connect(self._on_stereo)
-
-        # Only the spring face emits value_committed (see
-        # _commit_fx_debounce) — the brutalist rack never takes this path.
-        for _ctrl in (self._reverb_wet, self._tremolo_speed_slider,
-                      self._exciter_slider, self._crossfeed_slider,
-                      self._bass_slider, self._treble_slider,
-                      self._stereo_slider):
-            _ctrl.value_committed.connect(self._on_fx_commit)
-
-        self._loudness_box = QCheckBox(styled_case("loudness normalize (-14 lufs)"))
-        self._loudness_box.toggled.connect(self._on_loudness)
-        self._compressor_box = QCheckBox(styled_case("compressor (level boost)"))
-        self._compressor_box.toggled.connect(self._on_compressor)
-        self._mono_box = QCheckBox(styled_case("fold to mono"))
-        self._mono_box.toggled.connect(self._on_mono)
-
-        # 7. Custom slots.
-        self._slot_rows: list[_SlotRow] = []
-        slots_col = QVBoxLayout()
-        slots_col.setContentsMargins(0, 0, 0, 0)
-        slots_col.setSpacing(4)
-        for i in range(3):
-            row = _SlotRow(i)
-            row.save_clicked.connect(self._on_save_slot)
-            row.load_clicked.connect(self._on_load_slot)
-            row.clear_clicked.connect(self._on_clear_slot)
-            self._slot_rows.append(row)
-            slots_col.addWidget(row)
-
-        # ---------- assemble ----------
-        section_label_font = QFont()
-        section_label_font.setBold(True)
-
-        def _section(label_text: str) -> QLabel:
-            lab = QLabel(styled_case(label_text))
-            lab.setObjectName("audioFxSectionLabel")
-            lab.setFont(section_label_font)
-            return lab
+            if name != "off":
+                self._room_combo.addItem(styled_case(name), name)
+        self._room_combo.currentIndexChanged.connect(self._on_room)
+        self._tiles["reverb"].add_extra(self._room_combo)
+        # the names the tests and the popover know these by
+        self._reverb_wet = self._controls["reverb"]
+        self._stereo_slider = self._controls["width"]
 
         col = QVBoxLayout()
         col.setContentsMargins(28, 24, 28, 24)
-        col.setSpacing(14)
-        col.addWidget(heading)
-        col.addWidget(sub)
-        col.addLayout(master_row)
-        col.addWidget(_section("graphic eq"))
-        col.addWidget(eq_frame)
-        col.addWidget(_section("presets"))
-        col.addLayout(presets_grid)
-        col.addWidget(_section("reverb"))
-        col.addLayout(reverb_row)
-        col.addWidget(_section("effects"))
-        fx_row_a = QHBoxLayout()
-        fx_row_a.setSpacing(20)
-        fx_row_a.addWidget(self._chorus_box)
-        fx_row_a.addWidget(self._flanger_box)
-        fx_row_a.addWidget(self._phaser_box)
-        fx_row_a.addWidget(self._tremolo_box)
-        fx_row_a.addStretch(1)
-        col.addLayout(fx_row_a)
-        fx_row_b = QHBoxLayout()
-        fx_row_b.setSpacing(20)
-        fx_row_b.addWidget(self._exciter_box)
-        fx_row_b.addWidget(self._crossfeed_box)
-        fx_row_b.addWidget(self._lofi_box)
-        fx_row_b.addStretch(1)
-        col.addLayout(fx_row_b)
-        col.addWidget(self._tremolo_speed_slider)
-        col.addWidget(self._exciter_slider)
-        col.addWidget(self._crossfeed_slider)
-        col.addWidget(_section("shelves + glue"))
-        col.addWidget(self._bass_slider)
-        col.addWidget(self._treble_slider)
-        col.addWidget(self._stereo_slider)
-        toggles_row = QHBoxLayout()
-        toggles_row.setSpacing(20)
-        toggles_row.addWidget(self._loudness_box)
-        toggles_row.addWidget(self._compressor_box)
-        toggles_row.addWidget(self._mono_box)
-        toggles_row.addStretch(1)
-        col.addLayout(toggles_row)
-        col.addWidget(_section("saved slots"))
-        col.addLayout(slots_col)
+        col.setSpacing(10)
+        col.addLayout(head)
+        col.addWidget(self._section("sounds"))
+        col.addWidget(self._sound_box)
+        col.addWidget(self._section("eq · drag a point, double-click to zero it"))
+        col.addWidget(self._curve)
+        col.addLayout(grid)
         col.addStretch(1)
 
         scroll_inner = QWidget()
@@ -680,8 +847,17 @@ class AudioFxView(QWidget):
         outer.addWidget(scroll)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+        theming.manager().theme_changed.connect(self._on_theme)
+        self._restyle()
+        self._rebuild_sounds()
         # Initial sync from state — sets all the controls without emitting.
         self.sync_from_state()
+
+    def _section(self, text: str) -> QLabel:
+        lab = QLabel(styled_case(text))
+        lab.setObjectName("audioFxSectionLabel")
+        lab.setProperty("class", "dim")
+        return lab
 
     # ---------- public ----------
 
@@ -693,65 +869,118 @@ class AudioFxView(QWidget):
 
     def set_state(self, state: AudioFxState) -> None:
         self._state = state
+        self._rebuild_sounds()
         self.sync_from_state()
 
     def sync_from_state(self) -> None:
         """Push self._state to every control. Signals are gated so this
         does NOT emit ``state_changed`` — used on first show and after
         ``set_state``."""
+        s = self._state
         self._master_box.blockSignals(True)
-        self._master_box.setChecked(self._state.master_enabled)
+        self._master_box.setChecked(s.master_enabled)
         self._master_box.blockSignals(False)
-        for idx, band in enumerate(self._eq_bands):
-            band.set_gain(self._state.eq_bands[idx] if idx < len(self._state.eq_bands) else 0.0)
-        self._reverb_combo.blockSignals(True)
-        rv_idx = max(0, self._reverb_combo.findData(self._state.reverb_preset))
-        self._reverb_combo.setCurrentIndex(rv_idx)
-        self._reverb_combo.blockSignals(False)
-        self._reverb_wet.set_value(self._state.reverb_wet)
-        self._bass_slider.set_value(self._state.bass_db)
-        self._treble_slider.set_value(self._state.treble_db)
-        self._stereo_slider.set_value(self._state.stereo_width)
-        self._tremolo_speed_slider.set_value(self._state.tremolo_speed)
-        self._exciter_slider.set_value(self._state.exciter_amount)
-        self._crossfeed_slider.set_value(self._state.crossfeed_strength)
-        for box, attr in (
-            (self._loudness_box, "loudness_norm"),
-            (self._compressor_box, "compressor"),
-            (self._mono_box, "mono"),
-            (self._chorus_box, "chorus"),
-            (self._flanger_box, "flanger"),
-            (self._phaser_box, "phaser"),
-            (self._tremolo_box, "tremolo"),
-            (self._exciter_box, "exciter"),
-            (self._crossfeed_box, "crossfeed"),
-            (self._lofi_box, "lofi"),
-        ):
-            box.blockSignals(True)
-            box.setChecked(getattr(self._state, attr))
-            box.blockSignals(False)
-        for i, row in enumerate(self._slot_rows):
-            slot = self._state.custom_slots[i] if i < len(self._state.custom_slots) else None
-            occupied = bool(slot and any(abs(v) > 0.05 for v in slot.bands))
-            summary = ""
-            if occupied and slot is not None:
-                # Quick fingerprint so the user can tell their slots apart
-                # without loading each one — peak band + its gain.
-                peak_idx = max(range(EQ_BAND_COUNT), key=lambda j: abs(slot.bands[j]))
-                summary = f"{_format_hz(EQ_FREQUENCIES_HZ[peak_idx])} {_format_db(slot.bands[peak_idx])} dB"
-            row.set_state(occupied, summary)
-        self._refresh_preset_highlight()
+        self._curve.set_state(s)
+        if s.reverb_preset != "off":
+            self._last_room = s.reverb_preset
+        if abs(s.stereo_width - 1.0) >= 0.01:
+            self._last_width = s.stereo_width
+        self._room_combo.blockSignals(True)
+        self._room_combo.setCurrentIndex(max(0, self._room_combo.findData(self._last_room)))
+        self._room_combo.blockSignals(False)
+        for key, tile in self._tiles.items():
+            tile.set_on(self._is_on(key))
+            ctrl = self._controls.get(key)
+            if ctrl is not None:
+                attr, *_rest, scale = self._specs[key][1]
+                if key == "width":
+                    ctrl.set_value(self._last_width)
+                else:
+                    ctrl.set_value(float(getattr(s, attr)) / scale)
+                tile.refresh_value()
+        self._refresh_readout()
 
-    # ---------- face ----------
+    # ---------- sounds ----------
+
+    def _rebuild_sounds(self) -> None:
+        while self._sound_flow.count():
+            item = self._sound_flow.takeAt(0)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.deleteLater()
+        self._sound_chips = {}
+        names = list(SOUNDS) + [x.name for x in self._state.saved_sounds]
+        for name in names:
+            b = BracketButton(name)
+            b.setRole("pill")
+            b.clicked.connect(lambda _c=False, n=name: self._on_sound(n))
+            if name not in SOUNDS:
+                b.setContextMenuPolicy(Qt.CustomContextMenu)
+                b.customContextMenuRequested.connect(
+                    lambda _pos, n=name, w=b: self._sound_menu(n, w))
+                b.setToolTip(styled_case("your sound. right-click to delete it."))
+            self._sound_chips[name] = b
+            self._sound_flow.addWidget(b)
+        save = BracketButton("save this")
+        save.setRole("pill")
+        save.setMuted(True)
+        # a modal opened inside the click handler segfaults on PySide6 +
+        # py3.14; defer it a turn
+        save.clicked.connect(lambda: QTimer.singleShot(0, self._ask_save))
+        self._sound_flow.addWidget(save)
+        self._save_btn = save
+        self._refresh_readout()
+
+    def _on_sound(self, name: str) -> None:
+        if not self._state.apply_sound(name):
+            return
+        if name != "flat":
+            self._state.master_enabled = True
+        self._ui_sound("toggle_on")
+        self.sync_from_state()
+        self._emit()
+
+    def _ask_save(self) -> None:
+        name, ok = QInputDialog.getText(self, styled_case("save this sound"),
+                                        styled_case("name:"))
+        if not ok or not name.strip():
+            return
+        self._state.save_sound(name)
+        self._rebuild_sounds()
+        self._emit()
+
+    def _sound_menu(self, name: str, w: QWidget) -> None:
+        menu = QMenu(w)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        act = QAction(styled_case(f"delete {name}"), menu)
+        act.triggered.connect(lambda: self._delete_sound(name))
+        menu.addAction(act)
+        menu.exec(w.mapToGlobal(w.rect().bottomLeft()))
+
+    def _delete_sound(self, name: str) -> None:
+        self._state.delete_sound(name)
+        QTimer.singleShot(0, self._rebuild_sounds)
+        self._emit()
+
+    def _refresh_readout(self) -> None:
+        label = self._state.sound_label()
+        current = label.split(" · ")[0]
+        for name, chip in self._sound_chips.items():
+            chip.setActiveState(name == current and self._state.master_enabled)
+        if not self._state.master_enabled:
+            text = "off"
+        else:
+            text = label or "your own mix"
+        self._readout.setText(styled_case(text))
+
+    # ---------- face + theme ----------
 
     def showEvent(self, ev) -> None:  # noqa: N802 (Qt override)
         super().showEvent(ev)
         self._ensure_face()
 
     def _fx_controls(self) -> tuple:
-        return (self._reverb_wet, self._tremolo_speed_slider,
-                self._exciter_slider, self._crossfeed_slider,
-                self._bass_slider, self._treble_slider, self._stereo_slider)
+        return tuple(self._controls.values())
 
     def _ensure_face(self) -> None:
         """Land the personality's face. Runs every show, so a mid-session
@@ -763,8 +992,28 @@ class AudioFxView(QWidget):
         for ctrl in self._fx_controls():
             ctrl.set_face(face)
         # set_face carried each control's value; this also refreshes
-        # readouts, preset highlight and the rest, without emitting.
+        # readouts and the rest, without emitting.
         self.sync_from_state()
+
+    def _on_theme(self, *_args) -> None:
+        self._restyle()
+        for tile in self._tiles.values():
+            tile._refresh_name()
+
+    def _restyle(self) -> None:
+        modern = _modern()
+        radius = 12 if modern else 0
+        sc = _tok("surface_1", "#202020")
+        surface = f"rgba({sc.red()}, {sc.green()}, {sc.blue()}, {sc.alpha()})"
+        line = _tok("border_dim", "#333333").name()
+        accent = _tok("accent", "#d4b95e").name()
+        bold = "font-weight: 600;" if modern else ""
+        self.setStyleSheet(
+            f"#fxTile {{ background: {surface}; border: 1px solid {line};"
+            f" border-radius: {radius}px; }}"
+            f"#fxTile[on=\"true\"] {{ border: 1px solid {accent}; }}"
+            f"#fxTileName {{ {bold} }}"
+        )
 
     # ---------- handlers ----------
 
@@ -782,15 +1031,20 @@ class AudioFxView(QWidget):
         self._state.master_enabled = bool(on)
         self._emit()
 
-    def _on_band_changed(self, idx: int, db: float) -> None:
-        if 0 <= idx < len(self._state.eq_bands):
-            self._state.eq_bands[idx] = float(db)
-            self._refresh_preset_highlight()
-            self._emit()
+    def _on_curve_changed(self, idx: int, db: float) -> None:
+        s = self._state
+        if idx == LOW_SHELF:
+            s.bass_db = float(db)
+        elif idx == HIGH_SHELF:
+            s.treble_db = float(db)
+        elif 0 <= idx < len(s.eq_bands):
+            s.eq_bands[idx] = float(db)
+        else:
+            return
+        self._emit()
 
-    def _on_band_committed(self, _idx: int) -> None:
-        # EQ drag released — modern face only: brutalist keeps today's
-        # push timing verbatim (product contract).
+    def _on_curve_committed(self) -> None:
+        # modern face only: brutalist keeps the plain debounce timing
         if self._face == "spring":
             _commit_fx_debounce(self)
 
@@ -798,121 +1052,50 @@ class AudioFxView(QWidget):
         # Spring-face interaction landed — see _commit_fx_debounce.
         _commit_fx_debounce(self)
 
-    def _on_preset_picked(self, name: str) -> None:
-        self._state.apply_eq_preset(name)
-        for i, band in enumerate(self._eq_bands):
-            band.set_gain(self._state.eq_bands[i])
-        self._refresh_preset_highlight()
-        self._emit()
+    def _is_on(self, key: str) -> bool:
+        s = self._state
+        if key == "reverb":
+            return s.reverb_preset != "off" and s.reverb_wet > 0.0
+        if key == "width":
+            return abs(s.stereo_width - 1.0) >= 0.01
+        return bool(getattr(s, self._specs[key][0]))
 
-    def _on_reverb_changed(self, _idx: int) -> None:
-        self._state.reverb_preset = self._reverb_combo.currentData() or "off"
-        self._emit()
-
-    def _on_reverb_wet(self, value: float) -> None:
-        self._state.reverb_wet = max(0.0, min(1.0, value))
-        self._emit()
-
-    def _on_bass(self, value: float) -> None:
-        self._state.bass_db = float(value)
-        self._emit()
-
-    def _on_treble(self, value: float) -> None:
-        self._state.treble_db = float(value)
-        self._emit()
-
-    def _on_stereo(self, value: float) -> None:
-        self._state.stereo_width = float(value)
-        self._emit()
-
-    def _on_loudness(self, on: bool) -> None:
+    def _on_tile(self, key: str, on: bool) -> None:
         self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.loudness_norm = bool(on)
+        s = self._state
+        if key == "reverb":
+            s.reverb_preset = self._last_room if on else "off"
+            if on and s.reverb_wet <= 0.0:
+                s.reverb_wet = 0.5
+                self._reverb_wet.set_value(0.5)
+        elif key == "width":
+            s.stereo_width = self._last_width if on else 1.0
+        else:
+            setattr(s, self._specs[key][0], on)
+        if on and not s.master_enabled:
+            s.master_enabled = True
+            self._master_box.blockSignals(True)
+            self._master_box.setChecked(True)
+            self._master_box.blockSignals(False)
         self._emit()
 
-    def _on_compressor(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.compressor = bool(on)
+    def _on_amount(self, key: str, value: float) -> None:
+        attr, *_rest, scale = self._specs[key][1]
+        if key == "width":
+            self._last_width = float(value)
+            if not self._tiles["width"].is_on():
+                return
+        setattr(self._state, attr, float(value) * scale)
         self._emit()
 
-    def _on_mono(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.mono = bool(on)
-        self._emit()
-
-    def _on_chorus(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.chorus = bool(on)
-        self._emit()
-
-    def _on_flanger(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.flanger = bool(on)
-        self._emit()
-
-    def _on_phaser(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.phaser = bool(on)
-        self._emit()
-
-    def _on_tremolo(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.tremolo = bool(on)
-        self._emit()
-
-    def _on_tremolo_speed(self, value: float) -> None:
-        self._state.tremolo_speed = float(value)
-        self._emit()
-
-    def _on_exciter(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.exciter = bool(on)
-        self._emit()
-
-    def _on_exciter_amount(self, value: float) -> None:
-        self._state.exciter_amount = float(value)
-        self._emit()
-
-    def _on_crossfeed(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.crossfeed = bool(on)
-        self._emit()
-
-    def _on_crossfeed_strength(self, value: float) -> None:
-        self._state.crossfeed_strength = float(value)
-        self._emit()
-
-    def _on_lofi(self, on: bool) -> None:
-        self._ui_sound("toggle_on" if on else "toggle_off")
-        self._state.lofi = bool(on)
-        self._emit()
-
-    def _on_save_slot(self, idx: int) -> None:
-        self._state.save_custom_slot(idx)
-        self.sync_from_state()
-        self._emit()
-
-    def _on_load_slot(self, idx: int) -> None:
-        if self._state.load_custom_slot(idx):
-            for i, band in enumerate(self._eq_bands):
-                band.set_gain(self._state.eq_bands[i])
-            self._refresh_preset_highlight()
+    def _on_room(self, _idx: int) -> None:
+        room = self._room_combo.currentData() or "hall"
+        self._last_room = room
+        if self._state.reverb_preset != "off":
+            self._state.reverb_preset = room
             self._emit()
 
-    def _on_clear_slot(self, idx: int) -> None:
-        self._state.clear_custom_slot(idx)
-        self.sync_from_state()
-        self._emit()
-
-    # ---------- helpers ----------
-
-    def _refresh_preset_highlight(self) -> None:
-        active = detect_eq_preset(self._state.eq_bands)
-        for name, card in self._preset_cards.items():
-            card.setChecked(name == active)
-        self._preset_readout.setText(
-            styled_case(f"current — {active}") if active != "custom" else styled_case("current — custom")
-        )
-
     def _emit(self) -> None:
+        self._curve.update()
+        self._refresh_readout()
         self.state_changed.emit(self._state)

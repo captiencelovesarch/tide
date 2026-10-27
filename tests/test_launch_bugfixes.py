@@ -164,8 +164,9 @@ class WizardNextAfterSigninTest(unittest.TestCase):
             dlg._stack.setCurrentIndex(sources_idx)
             dlg._on_step_entered(sources_idx)
             step = dlg._steps[sources_idx]
-            step._on_toggled("ytmusic", True)
-            self.assertFalse(dlg._next_btn.isEnabled())   # setup pending
+            # signing in is optional, so [next] works before it too
+            self.assertTrue(dlg._next_btn.isEnabled())
+            step._signin_btn.click()
             QTest.qWait(80)     # deferred _do_setup runs + "signs in"
             self.assertTrue(step._yt_authed)
             self.assertTrue(step.can_advance())
@@ -173,6 +174,11 @@ class WizardNextAfterSigninTest(unittest.TestCase):
                 dlg._next_btn.isEnabled(),
                 "[next] stayed disabled after a successful sign-in",
             )
+            from tide.ui.onboarding import OnboardingResult
+            result = OnboardingResult()
+            step.apply_to(result)
+            self.assertTrue(result.sources_enabled["ytmusic"])
+            self.assertEqual(result.active_source, "ytmusic")
         finally:
             wizard_module.SignInDialog = real
             dlg.deleteLater()

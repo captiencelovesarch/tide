@@ -4,7 +4,7 @@ The index page grew tabs. "playlists" is the classic list; sources with
 the ``library_full`` capability also get songs / albums / artists /
 following, each lazily loaded on first open:
 
-  - playlists  → list; activate opens the detail page below
+  - playlists  → card grid with covers; a click opens the detail page
   - songs      → the saved-songs list (recently-added order)
   - albums     → card grid → album_requested
   - artists    → circular card grid → artist_requested (library artists)
@@ -14,6 +14,7 @@ The detail page keeps its play-all/shuffle behavior and, when the source
 supports ``playlist_edit``, adds [rename] [delete] and a per-track
 "remove from playlist" (YT needs the setVideoId that rides in the raw
 playlist item — tracks fetched any other way just don't offer removal).
+Liked songs can't be edited as a playlist; removing from it unlikes.
 
 All actions bubble up to MainWindow via signals so playback state stays in
 one place.
@@ -185,10 +186,19 @@ class LibraryView(QWidget):
         tabs_row.addStretch(1)
         tabs_row.addWidget(self.refresh_btn)
 
-        # Tab pages.
-        self.playlists_list = QListWidget()
-        self.playlists_list.setUniformItemSizes(True)
-        self.playlists_list.itemActivated.connect(self._on_playlist_activated)
+        # Tab pages. Playlists are cards with their covers; the note
+        # stands in when the source has no library.
+        self._playlists_grid, playlists_scroll = self._make_grid_page()
+        self._playlists_note = QLabel()
+        self._playlists_note.setWordWrap(True)
+        self._playlists_note.setProperty("class", "dim")
+        self._playlists_note.hide()
+        playlists_page = QWidget()
+        pl_col = QVBoxLayout(playlists_page)
+        pl_col.setContentsMargins(0, 0, 0, 0)
+        pl_col.addWidget(self._playlists_note)
+        pl_col.addWidget(playlists_scroll, stretch=1)
+        self._playlist_count = 0
 
         self.songs_list = QListWidget()
         self.songs_list.setUniformItemSizes(True)
@@ -204,7 +214,7 @@ class LibraryView(QWidget):
         self._following_grid, following_page = self._make_grid_page()
 
         self._tab_stack = QStackedWidget()
-        self._tab_stack.addWidget(self.playlists_list)   # 0
+        self._tab_stack.addWidget(playlists_page)        # 0
         self._tab_stack.addWidget(self.songs_list)       # 1
         self._tab_stack.addWidget(albums_page)           # 2
         self._tab_stack.addWidget(artists_page)          # 3
@@ -360,8 +370,13 @@ class LibraryView(QWidget):
 
     # ---------- index ----------
 
+    def playlist_count(self) -> int:
+        return self._playlist_count
+
     def reload_playlists(self) -> None:
-        self.playlists_list.clear()
+        self._playlists_grid.clear()
+        self._playlist_count = 0
+        self._playlists_note.hide()
         # Full reload: forget the lazy tabs so they refetch on next open.
         self._tabs_gen += 1
         self._tab_loaded.clear()
@@ -377,14 +392,10 @@ class LibraryView(QWidget):
             key = (win.binding_display("view_source")
                    if hasattr(win, "binding_display") else "")
             key_part = f" ({key})" if key else ""
-            placeholder = QListWidgetItem(
-                theming.styled_case(
-                    f"  switch active source in [source]{key_part} to one "
-                    "with a library, like youtube music or local files."
-                )
-            )
-            placeholder.setFlags(Qt.NoItemFlags)
-            self.playlists_list.addItem(placeholder)
+            self._playlists_note.setText(theming.styled_case(
+                f"switch active source in [source]{key_part} to one "
+                "with a library, like youtube music or local files."))
+            self._playlists_note.show()
             return
         self.index_heading.set_label("loading…")
         thread = QThread()
@@ -406,26 +417,17 @@ class LibraryView(QWidget):
             self._load_tab(self._active_tab)
 
     def _on_playlists(self, items: list[api.PlaylistEntry]) -> None:
-        marker = self._list_marker()
         self.index_heading.set_label(f"your library · {len(items)}")
-        self.playlists_list.clear()
+        self._playlists_grid.clear()
+        self._playlist_count = len(items)
         for p in items:
-            label = f"{marker}{theming.styled_case(p.title or '')}"
-            if p.description:
-                label += f"    {theming.styled_case(p.description)}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, p)
-            self.playlists_list.addItem(item)
+            c = Card(p.title or "", p.description or "playlist", p.thumbnail, p)
+            c.clicked.connect(self.open_playlist)
+            self._playlists_grid.add_card(c)
 
     def _on_playlists_failed(self, msg: str) -> None:
         self.index_heading.set_label("library load failed")
         self.status_message.emit(f"library: {msg}")
-
-    def _on_playlist_activated(self, item: QListWidgetItem) -> None:
-        p: api.PlaylistEntry = item.data(Qt.UserRole)
-        if not p:
-            return
-        self.open_playlist(p)
 
     # ---------- songs tab interactions ----------
 
@@ -579,6 +581,22 @@ class LibraryView(QWidget):
             f"deleted {entry.title}",
             and_then=lambda: (self._show_index(), self.reload_playlists()))
 
+    def _is_liked_songs(self) -> bool:
+        return (self._current_entry is not None
+                and self._current_entry.playlist_id == "LM"
+                and hasattr(self.api, "supports")
+                and self.api.supports("rating"))
+
+    def _on_unlike(self, track: api.Track) -> None:
+        entry = self._current_entry
+        if entry is None or not self._is_liked_songs():
+            return
+        vid = track.video_id
+        self._spawn_mutation(
+            lambda: (self.api.rate_song(vid, False), True)[1],
+            f"removed {track.title} from liked songs",
+            and_then=lambda: self.open_playlist(entry))
+
     def _on_remove_from_playlist(self, track: api.Track) -> None:
         entry = self._current_entry
         if entry is None or not self._can_edit_playlists():
@@ -626,6 +644,11 @@ class LibraryView(QWidget):
             a_remove = QAction("remove from playlist", menu)
             menu.addAction(a_remove)
             a_remove.triggered.connect(lambda: self._on_remove_from_playlist(tr))
+        elif self._is_liked_songs():
+            menu.addSeparator()
+            a_unlike = QAction("remove from liked songs", menu)
+            menu.addAction(a_unlike)
+            a_unlike.triggered.connect(lambda: self._on_unlike(tr))
         menu.exec(self.tracks_list.viewport().mapToGlobal(pos))
 
     def _play_from_track(self, track: api.Track) -> None:
