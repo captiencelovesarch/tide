@@ -292,7 +292,8 @@ class WidgetTests(ViewBase):
         self.assertEqual(needs, ["✓ a shell", "✗ a unicorn: sudo pacman -S unicorn"])
         self.assertTrue(page.can.text().startswith(
             "can see and control what's playing, talk to the network."))
-        self.assertIn("by captience · official", page.author.text())
+        self.assertEqual(page.author.text.text(), "by captience")
+        self.assertTrue(page.author.official())
 
         self.installed(c)
         self.assertIsNotNone(page.form)
@@ -321,7 +322,8 @@ class WidgetTests(ViewBase):
         page = self.widget(PluginPage(c))
         page.show_plugin("mine")
         self.assertFalse(page.reload_btn.isHidden())
-        self.assertEqual(page.author.text(), "not from the store")
+        self.assertEqual(page.author.text.text(), "not from the store")
+        self.assertFalse(page.author.official())
 
     def test_the_page_ends_with_more_plugins(self):
         self.publish(self.plugin_zip(), category="visuals")

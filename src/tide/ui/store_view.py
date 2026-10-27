@@ -664,6 +664,66 @@ class InstalledMark(QWidget):
         row.addStretch(1)
 
 
+class OfficialBadge(QWidget):
+    """a filled circle with a check cut out, in the live accent, so it
+    follows the cover when the adaptive colour is on. Filled so it doesn't
+    read as the installed mark's plain check."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        side = max(12, self.fontMetrics().ascent())
+        self.setFixedSize(side, side)
+        self.setToolTip(theming.styled_case("official"))
+        theming.manager().theme_changed.connect(self._on_theme)
+
+    def _on_theme(self, *_args) -> None:
+        self.update()
+
+    def paintEvent(self, _ev) -> None:  # noqa: N802
+        s = float(min(self.width(), self.height()))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(_ink("accent", "#d4b95e"))
+        p.drawEllipse(QRectF(0, 0, s, s))
+        from PySide6.QtGui import QPen
+        pen = QPen(_ink("bg", "#101010"), max(1.4, s * 0.13))
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        tick = QPainterPath()
+        tick.moveTo(s * 0.28, s * 0.52)
+        tick.lineTo(s * 0.44, s * 0.68)
+        tick.lineTo(s * 0.73, s * 0.36)
+        p.drawPath(tick)
+        p.end()
+
+
+class AuthorLine(QWidget):
+    """who made it, then the official badge when the store says so."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.text = _dim()
+        self.text.setWordWrap(False)
+        self.badge = OfficialBadge()
+        self.badge.hide()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
+        row.addWidget(self.text)
+        row.addWidget(self.badge, 0, Qt.AlignVCenter)
+        row.addStretch(1)
+
+    def set_author(self, text: str, official: bool) -> None:
+        self.text.setText(text)
+        self.badge.setVisible(official)
+
+    def official(self) -> bool:
+        return not self.badge.isHidden()
+
+
 class PluginButton(QWidget):
     """install / installing (a bar) / ✓ installed / uninstall / update /
     the reason it can't. ``compact`` is the card's: an installed plugin
@@ -749,9 +809,8 @@ class StoreCard(QFrame):
         self.name = QLabel(theming.styled_case(name))
         self.name.setTextFormat(Qt.PlainText)
         who = author or "someone"
-        self.author = _dim(f"{who} · official" if official else who)
-        if note:
-            self.author.setText(self.author.text() + f" · {note}")
+        self.author = AuthorLine()
+        self.author.set_author(f"{who} · {note}" if note else who, official)
         self.blurb = _dim(blurb)
         # always three lines tall (a mono font needs the third), so the
         # buttons in a row line up
@@ -801,7 +860,7 @@ class FeaturedTile(QFrame):
         self.label.setTextFormat(Qt.PlainText)
         self.label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.name = Heading("", 40)
-        self.author = _dim()
+        self.author = AuthorLine()
         self.note = QLabel()
         self.note.setWordWrap(True)
         self.note.setTextFormat(Qt.PlainText)
@@ -842,7 +901,7 @@ class FeaturedTile(QFrame):
         self.label.setText(theming.styled_case(label))
         self.name.set_label(entry.name)
         who = entry.author or "someone"
-        self.author.setText(f"{who} · official" if entry.official else who)
+        self.author.set_author(who, entry.official)
         self.note.setText(note)
         self.banner.set_art(entry.name, entry.banner_full or entry.banner, entry.banner_motion,
                             entry.icon)
@@ -1000,7 +1059,7 @@ class _GridPage(QWidget):
             note = ctl.origin_note(rec)
             card = StoreCard(ctl, m.slug, m.name, "", False, m.description,
                              icon_file=icon if icon.is_file() else None)
-            card.author.setText(note)
+            card.author.set_author(note, False)
             card.author.setVisible(bool(note))
             card.opened.connect(self.opened)
             self.grid.add(card)
@@ -1239,7 +1298,7 @@ class PluginPage(QWidget):
         self.banner = Banner(ctl)
         self.previews = Previews(ctl)
         self.name = Heading("", 40)
-        self.author = _dim()
+        self.author = AuthorLine()
         self.blurb = QLabel()
         self.blurb.setWordWrap(True)
         self.blurb.setTextFormat(Qt.PlainText)
@@ -1348,7 +1407,7 @@ class PluginPage(QWidget):
         self.name.set_label(name)
         if entry is not None:
             who = entry.author or "someone"
-            self.author.setText(f"by {who} · official" if entry.official else f"by {who}")
+            self.author.set_author(f"by {who}", entry.official)
             self.blurb.setText(entry.blurb)
             self.about.setText(entry.about)
             # the icon tile, for themes that drop pictures
@@ -1362,7 +1421,7 @@ class PluginPage(QWidget):
             uses = entry.uses
             needs = entry.needs
         else:
-            self.author.setText(ctl.origin_note(rec))
+            self.author.set_author(ctl.origin_note(rec), False)
             self.blurb.setText(m.description)
             self.about.setText("")
             icon = m.path / "icon.svg"
