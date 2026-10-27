@@ -62,10 +62,13 @@ class _WindowWorker(QObject):
         super().__init__()
         self.browser = browser
         self.stop = False
+        self.finish = False     # "i'm signed in": close the window for them
 
     def run(self) -> None:
         try:
-            self.done.emit(bi.sign_in_with_window(self.browser, lambda: self.stop))
+            self.done.emit(bi.sign_in_with_window(
+                self.browser, lambda: self.stop,
+                should_finish=lambda: self.finish))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -208,6 +211,10 @@ class SignInDialog(QDialog):
         self._window_btn = QPushButton("sign in")
         self._window_btn.setDefault(True)
         self._window_btn.clicked.connect(self._on_window)
+        # while the window is open: tide closes it and reads the session
+        self._finish_btn = QPushButton("done, i'm signed in")
+        self._finish_btn.clicked.connect(self._on_finish)
+        self._finish_btn.hide()
 
         row1 = QHBoxLayout()
         row1.addWidget(self._step1, stretch=1)
@@ -238,6 +245,7 @@ class SignInDialog(QDialog):
             )
             row0 = QHBoxLayout()
             row0.addStretch(1)
+            row0.addWidget(self._finish_btn)
             row0.addWidget(self._window_btn)
             layout.addWidget(self._headline)
             layout.addLayout(row0)
@@ -304,9 +312,12 @@ class SignInDialog(QDialog):
         self._window_btn.setEnabled(False)
         self._import_btn.setEnabled(False)
         self._status.setText(
-            f"opening {browser.label}… sign in to youtube music there, "
-            "then close the window."
+            f"opening {browser.label}… sign in to youtube music there, then "
+            "click \"done, i'm signed in\" here (or close that window)."
         )
+        self._finish_btn.show()
+        self._finish_btn.setEnabled(True)
+        self._finish_btn.setDefault(True)
         thread = QThread()   # unparented: must be able to outlive the dialog
         worker = _WindowWorker(browser)
         worker.moveToThread(thread)
@@ -320,8 +331,16 @@ class SignInDialog(QDialog):
         self._window_worker = worker
         thread.start()
 
+    def _on_finish(self) -> None:
+        if self._window_worker is None:
+            return
+        self._window_worker.finish = True
+        self._finish_btn.setEnabled(False)
+        self._status.setText("closing the window and reading your session…")
+
     def _on_window_failed(self, msg: str) -> None:
         self._status.setText(f"{msg} click sign in to try again.")
+        self._finish_btn.hide()
         self._window_btn.setEnabled(True)
         self._import_btn.setEnabled(bool(self._profiles))
 
@@ -332,6 +351,7 @@ class SignInDialog(QDialog):
         super().done(code)
 
     def _on_done(self, result: bi.ImportResult) -> None:
+        self._finish_btn.hide()
         if not result.looks_signed_in:
             if result.note:
                 # Not a sign-in problem: the cookies were there and tide

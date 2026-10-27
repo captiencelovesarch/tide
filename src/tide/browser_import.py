@@ -553,8 +553,16 @@ def _profile_in_use(user_data_dir: Path) -> bool:
     """A browser still has this profile open. Chromium holds "lockfile"
     open on windows for as long as it runs; elsewhere it keeps a
     SingletonLock symlink."""
-    if (user_data_dir / "SingletonLock").is_symlink():
-        return True
+    singleton = user_data_dir / "SingletonLock"
+    if singleton.is_symlink():
+        # "<host>-<pid>", and it can outlive the browser: in use only while
+        # that pid runs (chromium checks it the same way)
+        try:
+            pid = int(os.readlink(singleton).rsplit("-", 1)[1])
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError, IndexError):
+            return False
     lock = user_data_dir / "lockfile"
     try:
         with open(lock, "a"):
@@ -608,8 +616,40 @@ def _read_profile_cookies(browser: SignInBrowser, timeout_s: float = 30) -> list
             proc.kill()
 
 
+def _no_background_mode(user_data_dir: Path) -> None:
+    """Chromium (edge especially) keeps running after its last window
+    closes when background mode is on, so "closed" would never come. Off
+    for tide's own profile, in its Local State."""
+    import json
+    state_file = user_data_dir / "Local State"
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            state = {}
+    except (OSError, ValueError):
+        state = {}
+    state.setdefault("background_mode", {})["enabled"] = False
+    try:
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _close_gently(proc) -> None:
+    """Ask the browser to close the way its window's X does, so it writes
+    the session to disk first (a kill can lose the last few seconds)."""
+    import subprocess
+    if sys.platform == "win32":
+        # taskkill without /F sends the windows WM_CLOSE
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T"],
+                       capture_output=True, check=False)
+    else:
+        proc.terminate()
+
+
 def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
-                        timeout_s: float = 900) -> ImportResult:
+                        timeout_s: float = 900,
+                        should_finish=lambda: False) -> ImportResult:
     """Open ``browser`` on tide's own profile at YouTube Music, wait for the
     user to sign in and close the window, then read the session from that
     profile. Blocking; call it off the GUI thread. Raises ImportError_ if
@@ -618,11 +658,13 @@ def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
     The window is a plain browser: google won't sign anyone in to one
     started with remote debugging ("this browser or app may not be
     secure"), so devtools only come on afterwards, headless, to read the
-    cookies (see _read_profile_cookies)."""
+    cookies (see _read_profile_cookies). ``should_finish`` turning true
+    ("i'm signed in" in the dialog) closes the window for the user."""
     import subprocess
     import time
 
     SIGNIN_DIR.mkdir(parents=True, exist_ok=True)
+    _no_background_mode(SIGNIN_DIR)
     proc = subprocess.Popen([
         str(browser.exe),
         f"--user-data-dir={SIGNIN_DIR}",
@@ -635,8 +677,12 @@ def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
                              cookies_path=SIGNIN_DIR, family="window")
     deadline = time.monotonic() + timeout_s
     started = time.monotonic()
+    asked_to_close = False
     while time.monotonic() < deadline and not should_stop():
         time.sleep(1.0)
+        if should_finish() and not asked_to_close and proc.poll() is None:
+            _close_gently(proc)
+            asked_to_close = True
         # the first process can hand off to another and exit at once, so
         # "closed" is the profile being free, not just our process gone
         if proc.poll() is None or _profile_in_use(SIGNIN_DIR):
