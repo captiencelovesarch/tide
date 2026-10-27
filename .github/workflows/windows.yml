@@ -5,6 +5,10 @@ name: windows build
 # Windows build's updater looks for it there, so every release needs one.
 on:
   workflow_dispatch:
+  # by hand only works once this file is on the default branch; until the
+  # port merges, a push to its branch runs it
+  push:
+    branches: [windows-port]
   release:
     types: [published]
 
