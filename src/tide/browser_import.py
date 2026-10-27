@@ -549,21 +549,83 @@ class _DevtoolsCookie:
         self.expires = expires if expires > 0 else None
 
 
-def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
-                        timeout_s: float = 900) -> ImportResult:
-    """Open ``browser`` on tide's own profile at YouTube Music and wait for
-    the user to sign in there. Blocking; call it off the GUI thread.
-    Raises ImportError_ if the window is closed first or it times out."""
+def _profile_in_use(user_data_dir: Path) -> bool:
+    """A browser still has this profile open. Chromium holds "lockfile"
+    open on windows for as long as it runs; elsewhere it keeps a
+    SingletonLock symlink."""
+    if (user_data_dir / "SingletonLock").is_symlink():
+        return True
+    lock = user_data_dir / "lockfile"
+    try:
+        with open(lock, "a"):
+            return False
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _read_profile_cookies(browser: SignInBrowser, timeout_s: float = 30) -> list:
+    """Start ``browser`` headless on tide's sign-in profile with devtools on
+    and read its cookies, already decrypted. Nothing signs in here, so
+    google's check on remote-controlled browsers doesn't come into it."""
     import subprocess
     import time
 
-    SIGNIN_DIR.mkdir(parents=True, exist_ok=True)
     port_file = SIGNIN_DIR / "DevToolsActivePort"
     port_file.unlink(missing_ok=True)
     proc = subprocess.Popen([
         str(browser.exe),
+        "--headless=new",
         f"--user-data-dir={SIGNIN_DIR}",
         "--remote-debugging-port=0",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ])
+    try:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                lines = port_file.read_text().split()
+                port, path = int(lines[0]), lines[1]
+            except (OSError, ValueError, IndexError):
+                if proc.poll() is not None:
+                    raise ImportError_(f"{browser.label} wouldn't start to read the sign-in.")
+                continue
+            reply = _ws_call(port, path, "Storage.getCookies")
+            try:
+                _ws_call(port, path, "Browser.close")
+            except OSError:
+                pass
+            return [_DevtoolsCookie(c) for c in reply.get("result", {}).get("cookies", [])]
+        raise ImportError_(f"{browser.label} took too long to start.")
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            proc.kill()
+
+
+def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
+                        timeout_s: float = 900) -> ImportResult:
+    """Open ``browser`` on tide's own profile at YouTube Music, wait for the
+    user to sign in and close the window, then read the session from that
+    profile. Blocking; call it off the GUI thread. Raises ImportError_ if
+    the window closes without a sign-in, or it times out.
+
+    The window is a plain browser: google won't sign anyone in to one
+    started with remote debugging ("this browser or app may not be
+    secure"), so devtools only come on afterwards, headless, to read the
+    cookies (see _read_profile_cookies)."""
+    import subprocess
+    import time
+
+    SIGNIN_DIR.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen([
+        str(browser.exe),
+        f"--user-data-dir={SIGNIN_DIR}",
         "--no-first-run",
         "--no-default-browser-check",
         "--new-window",
@@ -572,28 +634,17 @@ def sign_in_with_window(browser: SignInBrowser, should_stop=lambda: False,
     profile = BrowserProfile(slug="window", label=browser.label,
                              cookies_path=SIGNIN_DIR, family="window")
     deadline = time.monotonic() + timeout_s
-    port, path = 0, ""
+    started = time.monotonic()
     while time.monotonic() < deadline and not should_stop():
-        time.sleep(1.5)
-        if not port:
-            try:
-                lines = port_file.read_text().split()
-                port, path = int(lines[0]), lines[1]
-            except (OSError, ValueError, IndexError):
-                if proc.poll() is not None and not port_file.exists():
-                    raise ImportError_(f"{browser.label} closed before you signed in.")
-                continue
-        try:
-            reply = _ws_call(port, path, "Storage.getCookies")
-        except OSError:
-            # the browser is gone: the user closed the window
+        time.sleep(1.0)
+        # the first process can hand off to another and exit at once, so
+        # "closed" is the profile being free, not just our process gone
+        if proc.poll() is None or _profile_in_use(SIGNIN_DIR):
+            continue
+        if time.monotonic() - started < 3.0:
+            continue        # still starting up
+        result = _result_from_jar(profile, _read_profile_cookies(browser))
+        if not result.looks_signed_in:
             raise ImportError_(f"the {browser.label} window closed before you signed in.")
-        jar = [_DevtoolsCookie(c) for c in reply.get("result", {}).get("cookies", [])]
-        result = _result_from_jar(profile, jar)
-        if result.looks_signed_in:
-            try:
-                _ws_call(port, path, "Browser.close")
-            except OSError:
-                pass
-            return result
+        return result
     raise ImportError_("stopped waiting for the sign-in.")

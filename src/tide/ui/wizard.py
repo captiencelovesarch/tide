@@ -233,8 +233,8 @@ class SignInDialog(QDialog):
             browser = self._window_browsers[0].label
             self._headline.setText(
                 f"click sign in. a {browser} window opens on youtube music. "
-                "sign in there and tide takes it from there; the window closes "
-                "by itself."
+                "sign in there, then close that window and tide picks up the "
+                "rest."
             )
             row0 = QHBoxLayout()
             row0.addStretch(1)
@@ -304,8 +304,8 @@ class SignInDialog(QDialog):
         self._window_btn.setEnabled(False)
         self._import_btn.setEnabled(False)
         self._status.setText(
-            f"opening {browser.label}… sign in to youtube music there. "
-            "tide notices by itself."
+            f"opening {browser.label}… sign in to youtube music there, "
+            "then close the window."
         )
         thread = QThread()   # unparented: must be able to outlive the dialog
         worker = _WindowWorker(browser)
