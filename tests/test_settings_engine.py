@@ -130,7 +130,8 @@ class GenerationTests(_DialogCase):
     def test_tab_pages_follow_the_schema_taxonomy(self) -> None:
         dlg = self._dialog()
         labels = [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())]
-        self.assertEqual(labels, list(schema.TABS) + ["about"])
+        # plugins: one line pointing at the store (3.0), then about
+        self.assertEqual(labels, list(schema.TABS) + ["plugins", "about"])
 
     def test_preview_keys_pin_the_schema_flags(self) -> None:
         from tide.ui.settings import SettingsDialog
@@ -149,12 +150,11 @@ class GenerationTests(_DialogCase):
 
     def test_dependent_rows_follow_their_controller(self) -> None:
         s = Settings()
-        s.discord_enabled = False
+        s.mini_pulse = False
         dlg = self._dialog(s)
-        self.assertFalse(dlg.discord_app_id.isEnabled())
-        dlg.discord_toggle.setChecked(True)
-        self.assertTrue(dlg.discord_app_id.isEnabled())
-        self.assertTrue(dlg.discord_lyrics_toggle.isEnabled())
+        self.assertFalse(dlg.mini_pulse_resize_toggle.isEnabled())
+        dlg.mini_pulse_toggle.setChecked(True)
+        self.assertTrue(dlg.mini_pulse_resize_toggle.isEnabled())
 
 
 class DiffApplyTests(_DialogCase):
@@ -172,7 +172,6 @@ class DiffApplyTests(_DialogCase):
         self.assertEqual(set(dlg.changed_keys()), {"csd_titlebar", "motion"})
         self.assertFalse(s.csd_titlebar)
         self.assertEqual(s.motion, "off")
-        self.assertTrue(s.local_auto_index)
 
     def test_untouched_accept_saves_nothing(self) -> None:
         dlg = self._dialog(Settings())
@@ -417,11 +416,11 @@ class _WindowCase(unittest.TestCase):
         layout_module.manager().apply(settings.layout,
                                       dict(settings.layout_overrides))
         from tide.playback import MpvBackend, PlaybackRouter
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.w._settings = settings
         return self.w
 
@@ -466,7 +465,7 @@ class LiveApplyRunTests(_WindowCase):
         w, calls = self._recorded_window()
         w.run_live_appliers(
             {"home_layout", "prefetch_warm_results", "report_plays",
-             "spotify_bitrate", "local_auto_index"})
+             "spotify_bitrate", "spotify_connect_enabled"})
         self.assertEqual(calls, [])
 
     def test_empty_change_set_is_a_noop(self) -> None:

@@ -24,7 +24,7 @@ from tide import layout as layout_module
 from tide import settings as settings_module
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui import motion as motion_module
 
 
@@ -170,7 +170,7 @@ class _FlipCase(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.w._settings = settings
         return self.w
 
@@ -313,7 +313,7 @@ class _CompanionCase(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.w._settings = Settings()
 
     def tearDown(self) -> None:

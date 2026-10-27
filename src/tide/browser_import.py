@@ -55,6 +55,7 @@ class _Candidate:
     config: tuple[str, ...]      # roots under $XDG_CONFIG_HOME
     home: tuple[str, ...] = ()   # roots under $HOME (flatpak, snap, legacy)
     windows: tuple[str, ...] = ()  # "<ENV VAR>/<path>", e.g. LOCALAPPDATA/...
+    reader: str = ""             # yt-dlp's name for it, when slug isn't one
 
 
 # Order matters: first match is the picker's default suggestion. Native and
@@ -64,6 +65,10 @@ _CANDIDATES: tuple[_Candidate, ...] = (
     _Candidate("chromium", "chromium", "chromium", ("chromium",),
                (".var/app/org.chromium.Chromium/config/chromium",),
                ("LOCALAPPDATA/Chromium/User Data",)),
+    # helium (imput) is chromium underneath, down to the "Chromium Safe
+    # Storage" keyring entry, so yt-dlp's chromium reader opens it
+    _Candidate("helium", "helium", "chromium", ("net.imput.helium",),
+               (".var/app/net.imput.helium/config/net.imput.helium",), reader="chromium"),
     _Candidate("chrome", "google chrome", "chromium", ("google-chrome",),
                (".var/app/com.google.Chrome/config/google-chrome",),
                ("LOCALAPPDATA/Google/Chrome/User Data",)),
@@ -135,6 +140,11 @@ class BrowserProfile:
     cookies_path: Path                   # newest cookie db for this browser
     family: str = "chromium"
     candidates: tuple[Path, ...] = ()    # every cookie db found, newest first
+    reader: str = ""                     # yt-dlp's name, when slug isn't one
+
+    @property
+    def ytdlp_name(self) -> str:
+        return self.reader or self.slug
 
 
 def available_profiles() -> list[BrowserProfile]:
@@ -144,7 +154,7 @@ def available_profiles() -> list[BrowserProfile]:
         if dbs:
             out.append(BrowserProfile(
                 slug=cand.slug, label=cand.label, cookies_path=dbs[0],
-                family=cand.family, candidates=tuple(dbs),
+                family=cand.family, candidates=tuple(dbs), reader=cand.reader,
             ))
     return out
 
@@ -155,6 +165,10 @@ def available_profiles() -> list[BrowserProfile]:
 # Cookies whose lifetime actually gates an authenticated session. If any one
 # of these lapses, ytmusicapi starts 401ing, so the session's effective
 # expiry is the EARLIEST of them, not the latest.
+# one of these besides __Secure-3PAPISID: the session itself, not just
+# cross-site leftovers (see ImportResult.looks_signed_in)
+_FIRST_PARTY = ("SAPISID", "SID", "__Secure-1PSID")
+
 AUTH_COOKIES = (
     "__Secure-3PAPISID",
     "__Secure-3PSID",
@@ -208,7 +222,12 @@ class ImportResult:
 
     @property
     def looks_signed_in(self) -> bool:
-        return "__Secure-3PAPISID" in self.cookies
+        # the cross-site pair alone isn't a session: a browser that was
+        # never signed in to youtube (or signed out) can keep a stray
+        # __Secure-3PAPISID, and importing that made youtube answer as
+        # signed out. a real session has a first-party one too.
+        return ("__Secure-3PAPISID" in self.cookies
+                and any(k in self.cookies for k in _FIRST_PARTY))
 
 
 def _sent_to_music(domain: str) -> bool:
@@ -318,7 +337,7 @@ def _read_jar(slug: str, profile_dir: Path, keyring: str | None) -> tuple[Iterab
 
 
 def _import_one(profile: BrowserProfile, db: Path) -> ImportResult:
-    jar, log = _read_jar(profile.slug, db.parent, None)
+    jar, log = _read_jar(profile.ytdlp_name, db.parent, None)
     result = _result_from_jar(profile, jar)
     if sys.platform == "win32":
         # no keyrings to retry; signed out with trouble means app-bound
@@ -340,7 +359,7 @@ def _import_one(profile: BrowserProfile, db: Path) -> ImportResult:
             continue
         tried.add(keyring)
         try:
-            jar, _ = _read_jar(profile.slug, db.parent, keyring)
+            jar, _ = _read_jar(profile.ytdlp_name, db.parent, keyring)
         except Exception:
             continue
         retry = _result_from_jar(profile, jar)

@@ -117,7 +117,7 @@ _FX_SEED = 20260827              # fixed so a style always looks like itself
 # The styles that go through the procedural-field renderer.
 _FX_STYLES = frozenset({
     "vbeam", "horizon", "lightning", "ripples", "stage", "rimlight",
-    "contours", "vinyl",
+    "contours", "vinyl", "halo",
 })
 
 # Ripples: how many rings can be on the water at once, and how long one
@@ -292,6 +292,9 @@ class CentralBg(QWidget):
 
         self._enabled: bool = False
         self._radius: int = 0
+        # called each animation frame with the shown bass level; the
+        # halo glow (ui/halo.py) breathes off it
+        self.on_frame = None
         # One of backdrops.SLUGS.
         self._style: str = "field"
         self._motion: str = "lite"          # "off" freezes the drift
@@ -543,7 +546,7 @@ class CentralBg(QWidget):
     def _sync_timer(self) -> None:
         # Run only when there's something to animate and we're on screen.
         active = self._enabled and self.isVisible() and (
-            self._motion != "off"
+            (self._motion != "off" and self._style != "halo")
             or self._pulse > 0.001
             or self._pulse_shown > 0.001
             or self._pulse_peak > 0.001
@@ -571,7 +574,7 @@ class CentralBg(QWidget):
         now = time.monotonic()
         dt = max(0.0, now - self._last_tick)
         self._last_tick = now
-        changed = self._motion != "off"
+        changed = self._motion != "off" and self._style != "halo"
         target = max(self._pulse, self._pulse_peak)
         self._pulse_peak = 0.0
         delta = target - self._pulse_shown
@@ -595,6 +598,8 @@ class CentralBg(QWidget):
             self._liq_blend = min(
                 1.0, self._liq_blend + dt * 1000.0 / _TONE_FADE_MS)
             changed = True
+        if self.on_frame is not None:
+            self.on_frame(self._pulse_shown)
         if changed:
             handle = self.window().windowHandle()
             if handle is not None and not handle.isExposed():
@@ -1210,6 +1215,11 @@ class CentralBg(QWidget):
             layers.append((blooms * (0.28 + 0.42 * pulse)
                            * (0.5 + 0.8 * n), qc))
             return self._fx_compose(rw, rh, layers)
+
+        if self._style == "halo":
+            # Flat inside: the colour lives outside the window, painted
+            # by ui/halo.py into the margin the window reserves for it.
+            return self._fx_compose(rw, rh, [])
 
         if self._style == "lightning":
             # Storm cell. The deck is a turbulent fbm cloud mass now, lit

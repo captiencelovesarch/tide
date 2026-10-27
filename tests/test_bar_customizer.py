@@ -18,7 +18,7 @@ from tide import layout as layout_module
 from tide import settings as settings_module
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui import bar_config, motion
 from tide.ui.bar_customizer import BarCustomizerPopover, BarEditor
 
@@ -114,7 +114,7 @@ class _WindowCase(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.w._settings = self.s
         self.w.resize(1100, 720)
         self.w.show()

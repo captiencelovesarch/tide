@@ -10,16 +10,17 @@ in the background, delivering each stage through ``updated``:
   1. **source words** — the result's own word sheet (LRClib lyricsfile /
      enhanced LRC), else NetEase's YRC, matched onto the video's lines by
      text and shifted by the median offset (lyric_words.adopt_source_words);
-  2. **precise timing** (optional, lyric_align) — the track's audio,
-     aligned against the text: re-times a sheet that sits clearly off and
-     places words on lines that still have none.
+  2. **precise timing** (optional, the lyric timing plugin's aligner,
+     :meth:`WordTimingService.set_aligner`) — the track's audio, aligned
+     against the text: re-times a sheet that sits clearly off and places
+     words on lines that still have none.
 
 Lines nobody could time stay in line mode (words spread by length across
 the line window), so karaoke always has something to sweep.
 
 Settings are read through a provider so the service stays Qt-light and
-testable: ``lyrics_word_timing`` ("sources" | "lines"),
-``lyrics_netease`` (bool), ``lyrics_precise`` (bool).
+testable: ``lyrics_word_timing`` ("sources" | "lines") and
+``lyrics_netease`` (bool). Precise timing is on while an aligner is set.
 """
 from __future__ import annotations
 
@@ -45,7 +46,7 @@ STREAM_WAIT_S = 30.0
 # The "lyrics offset" setting, in seconds to ADD to the playhead before
 # looking lyrics up (a positive ms setting = lyrics later = a negative
 # value here). Lives here, not in the ui, so the headless lyric tracker
-# (mini ticker, discord) follows it too. Set by ui.lyrics.set_offset_ms.
+# (mini ticker, plugins) follows it too. Set by ui.lyrics.set_offset_ms.
 _offset_s = 0.0
 
 
@@ -98,9 +99,22 @@ class WordTimingService(QObject):
         self._closed = False
         self._current: str | None = None
         self._sheets: dict[str, tuple[str, list[WordLine]]] = {}
+        # fn(sheet, stream_ref, should_stop, say) -> list[WordLine] | None,
+        # from the lyric timing plugin (ctx.lyrics.add_aligner)
+        self._aligner: Callable | None = None
         # test seams
         self.fetch_netease = None
         self.align = None
+
+    def set_aligner(self, fn: Callable | None) -> None:
+        """precise timing: ``fn`` re-times a sheet against the playing
+        stream. None turns it off. sheets already finished stay as they
+        are; the next track gets the new stage."""
+        self._aligner = fn
+        self._sheets.clear()
+
+    def has_aligner(self) -> bool:
+        return self._aligner is not None or self.align is not None
 
     # ---------- wiring ----------
 
@@ -127,8 +141,7 @@ class WordTimingService(QObject):
         s = self._settings_provider() if self._settings_provider is not None else None
         sources = str(getattr(s, "lyrics_word_timing", "sources") or "sources") != "lines"
         netease = bool(getattr(s, "lyrics_netease", True))
-        precise = bool(getattr(s, "lyrics_precise", False))
-        return sources, netease, precise
+        return sources, netease, self.has_aligner()
 
     def sheet_for(self, track, result) -> list[WordLine]:
         """The best sheet known now; schedules the upgrades."""
@@ -138,9 +151,6 @@ class WordTimingService(QObject):
         if key is None:
             return base
         sources, netease, precise = self._flags()
-        if precise:
-            from . import lyric_align
-            precise = lyric_align.available()
         fp = f"{_text_hash(result)}|{int(sources)}{int(netease)}{int(precise)}"
         mem = self._sheets.get(key)
         if mem is not None and mem[0] == fp:
@@ -272,8 +282,8 @@ class WordTimingService(QObject):
     def _precise(self, job: _Job, sheet: list[WordLine]) -> list[WordLine] | None:
         if self.align is not None:
             return self.align(job, sheet)
-        from . import lyric_align
-        if not lyric_align.available() or self._stream_provider is None:
+        aligner = self._aligner
+        if aligner is None or self._stream_provider is None:
             return None
         # lyrics usually land before the stream resolves: wait for it
         ref = None
@@ -288,16 +298,12 @@ class WordTimingService(QObject):
         payload = getattr(ref, "payload", None) if ref is not None else None
         if not payload or getattr(ref, "backend", "mpv") != "mpv":
             return None
-        self.status.emit(job.key, "timing words to the audio…")
         stop = lambda: self._superseded(job)
-        stereo = lyric_align.decode(payload, getattr(ref, "headers", None), should_stop=stop)
-        if stereo is None or stop():
+        say = lambda text: None if self._closed else self.status.emit(job.key, str(text))
+        try:
+            return aligner(sheet, ref, stop, say)
+        except Exception:  # noqa: BLE001 - a broken aligner leaves source timing
             return None
-        em = lyric_align.Emissions(lyric_align.vocals(stereo))
-        fit = lyric_align.align_sheet(sheet, em, should_stop=stop)
-        if fit is None:
-            return None
-        return fit.sheet
 
 
 _service: WordTimingService | None = None

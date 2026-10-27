@@ -47,7 +47,7 @@ your library is all there too: songs, albums, artists you follow, playlists. lik
   </tr>
 </table>
 
-pick one on first launch and switch whenever. each keeps its own theme and tweaks. 16 themes between them, and a theme editor for more.
+pick one on first launch and switch whenever. each keeps its own theme and tweaks. 16 themes between them, and a theme editor for more in the plugin store.
 
 ## the rest
 
@@ -58,18 +58,39 @@ pick one on first launch and switch whenever. each keeps its own theme and tweak
   </tr>
 </table>
 
-also: a mini player, a 10-band eq and reverb rack, 0.5× to 2× speed, sleep timer, mpris, tray, discord presence, listenbrainz.
+also: a mini player, a 10-band eq and reverb rack, 0.5× to 2× speed, sleep timer, mpris, tray.
+
+## plugins
+
+tide 3 ships with less. get the rest from the plugin store.
+
+the plugins button in the rail opens it. pick one, read what it does and what it can touch, click install, and it's running. uninstall is one click too, with an undo.
+
+| plugin | what it does |
+|---|---|
+| discord presence | the song on your discord profile, with the lyric line if you like |
+| extra sources | soundcloud, bandcamp and mixcloud as sources |
+| local files | the music on your computer, with covers |
+| more visualizer tiles | the loudness river, a spectrogram, a halo round the cover, a beat tapper |
+| precise lyric timing | listens to the song and puts each word where it's sung. karaoke mode comes with it |
+| tide powertools | the theme, glyph and keymap editors |
+| instrumental finder | mute lyrics: swaps in the song's instrumental, at the same spot |
+| steamvr | a watch on your wrist that opens tide in vr |
+| lights | openrgb and wled lights in the cover's colours, on the bass |
+| kde desktop | your plasma accent (and wallpaper, if you like) follows the song |
+
+writing your own: the [tide-plugins](https://github.com/captiencelovesarch/tide-plugins) readme is the guide. drop a folder in `~/.config/tide/plugins/` and it shows up in the store, marked not from the store.
 
 ## other sources
 
-youtube music is the main thing. tide can also play these, all in the same queue:
+youtube music is the main thing, and all a fresh tide plays. these go in the same queue:
 
-| source | what works |
-|---|---|
-| local files | search, albums, artists |
-| subsonic / navidrome | search, playlists, albums, artists |
-| soundcloud, bandcamp, mixcloud | search |
-| spotify | search and library only. playback is broken upstream ([why](#spotify)) |
+| source | how | what works |
+|---|---|---|
+| local files | the local files plugin | search, albums, artists |
+| soundcloud, bandcamp, mixcloud | the extra sources plugin | search |
+| subsonic / navidrome | built in | search, playlists, albums, artists |
+| spotify | built in | search and library only. playback is broken upstream ([why](#spotify)) |
 
 <details>
 <summary><b>other distros</b></summary>
@@ -89,7 +110,7 @@ needs python 3.12+, PySide6, mpv + python-mpv, ytmusicapi, yt-dlp, mutagen, cryp
 <details>
 <summary><b>how sign-in works</b></summary>
 
-google doesn't let outside apps log into youtube music, so tide borrows the session from your browser. it reads the cookies through yt-dlp (chromium, chrome, brave, vivaldi, edge, opera, whale, firefox) with your keyring's permission, and keeps the session fresh while it runs. if google ends it anyway, tide tells you and re-imports in one click. the cookies never leave your machine.
+google doesn't let outside apps log into youtube music, so tide borrows the session from your browser. it reads the cookies through yt-dlp (chromium, helium, chrome, brave, vivaldi, edge, opera, whale, firefox) with your keyring's permission, and keeps the session fresh while it runs. if google ends it anyway, tide tells you and re-imports in one click. the cookies never leave your machine.
 
 </details>
 
@@ -103,7 +124,7 @@ search and your library work. playback has been silent since spotify's february 
 <details>
 <summary><b>keys</b></summary>
 
-all rebindable in the keymap editor.
+all rebindable in the keymap editor (tide powertools, in the store).
 
 | key | does |
 |---|---|
@@ -127,6 +148,9 @@ all rebindable in the keymap editor.
 | `~/.config/tide/settings.toml` | settings. the app writes it, you don't have to |
 | `~/.config/tide/themes/` | your themes |
 | `~/.config/tide/browser.json`, `yt_cookies.txt` | the youtube session (0600) |
+| `~/.config/tide/plugin-settings/` | each plugin's settings |
+| `~/.local/share/tide/plugins/installed/` | plugins from the store |
+| `~/.config/tide/plugins/` | plugins of your own |
 | `~/.cache/tide/` | art, lyrics, beat maps, history |
 
 more in [SECURITY.md](SECURITY.md).

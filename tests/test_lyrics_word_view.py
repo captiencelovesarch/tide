@@ -35,6 +35,10 @@ class ViewTest(unittest.TestCase):
         from tide.ui import lyrics
         self.lyrics = lyrics
         self.addCleanup(lyrics.set_offset_ms, 0)
+        # karaoke and the sweep come with precise lyric timing: on, like
+        # with the plugin installed (test_without_word_view: the plain case)
+        lyrics.set_word_view(True)
+        self.addCleanup(lyrics.set_word_view, False)
         self.view = lyrics.LyricsView(SimpleNamespace())
         self.addCleanup(_app.processEvents)
         self.addCleanup(self.view.deleteLater)
@@ -45,6 +49,16 @@ class ViewTest(unittest.TestCase):
         self.view._current_track = self.track
         self.view._current_key = lyric_timing.track_key(self.track)
         self.view._on_done("v1", LyricsResult(timed_lines=list(LINES)))
+
+    def test_without_word_view_its_plain_synced_lines(self) -> None:
+        self.view.karaoke_check.setChecked(True)
+        self.lyrics.set_word_view(False)     # the plugin goes
+        try:
+            self.assertTrue(self.view.word_toggles.isHidden())
+            self.assertFalse(self.view.karaoke_check.isChecked(), "karaoke left on")
+            self.assertEqual(self.view._sweep_at, -1, "the list still sweeps")
+        finally:
+            self.lyrics.set_word_view(True)
 
     def test_line_mode_first(self) -> None:
         self.assertIn("estimated words", self.view.karaoke_check.text())
@@ -133,7 +147,7 @@ class ViewTest(unittest.TestCase):
         # mini / fullscreen / visualizer tile hide the tab chrome by name
         view = self.lyrics.LyricsView(SimpleNamespace())
         self.addCleanup(view.deleteLater)
-        for chrome in (view.heading, view.karaoke_check, view.mute_btn, view.swap_status):
+        for chrome in (view.heading, view.karaoke_check, view.plugin_row, view.plugin_status):
             chrome.hide()
         view.show()
         _app.processEvents()
@@ -168,45 +182,6 @@ class ViewTest(unittest.TestCase):
         self.assertEqual(self.lyrics.timing_of(line), "line")
         aligned = [WordLine(0, 1, "a", (Word(0, 1, "a"),), "aligned")]
         self.assertEqual(self.lyrics.timing_of(line + aligned), "aligned")
-
-
-class PreciseEditorTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.made: list = []
-
-    def tearDown(self) -> None:
-        for w in self.made:
-            w.deleteLater()
-        _app.processEvents()
-
-    def test_contract_and_states(self) -> None:
-        from unittest import mock
-        from tide.ui.lyric_timing_editor import PACKAGE, PreciseTimingEditor
-        with mock.patch("tide.lyric_align.runtime_available", return_value=False), \
-                mock.patch("tide.lyric_align.model_installed", return_value=False):
-            ed = PreciseTimingEditor()
-            self.made.append(ed)
-            self.assertFalse(ed.check.isEnabled())
-            self.assertIn(PACKAGE, ed.status.text())
-        with mock.patch("tide.lyric_align.runtime_available", return_value=True), \
-                mock.patch("tide.lyric_align.model_installed", return_value=False):
-            ed = PreciseTimingEditor()
-            self.made.append(ed)
-            self.assertFalse(ed.check.isEnabled())
-            self.assertFalse(ed.get_btn.isHidden())
-        with mock.patch("tide.lyric_align.runtime_available", return_value=True), \
-                mock.patch("tide.lyric_align.model_installed", return_value=True):
-            ed = PreciseTimingEditor()
-            self.made.append(ed)
-            fired = []
-            ed.changed.connect(lambda: fired.append(1))
-            ed.set_value(True)
-            self.assertTrue(ed.value())
-            self.assertEqual(fired, [])            # loading isn't an edit
-            ed.check.setChecked(False)
-            self.assertEqual(fired, [1])
-            self.assertIs(ed.normalize(1), True)
-            self.assertTrue(ed.get_btn.isHidden())
 
 
 if __name__ == "__main__":

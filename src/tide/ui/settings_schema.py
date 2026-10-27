@@ -152,8 +152,14 @@ def visualizer_layout_choices() -> tuple[tuple[str, str], ...]:
 
 
 def visualizer_tile_choices() -> tuple[tuple[str, str], ...]:
-    from .vis_play import TILE_KINDS
-    return TILE_KINDS
+    """what a slot can show, plus a store tile a slot already shows while
+    its plugin is off (so saving the dialog keeps the pick)."""
+    from .vis_play import SLOT_KEYS, tile_choices
+    from .. import plugin_host
+    host = plugin_host.host()
+    s = getattr(getattr(host, "window", None), "_settings", None) if host is not None else None
+    picks = tuple(str(getattr(s, k, "")) for k in SLOT_KEYS) if s is not None else ()
+    return tile_choices(keep=picks)
 
 
 def visualizer_classic_choices() -> tuple[tuple[str, str], ...]:
@@ -391,14 +397,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
         tooltip="netease cloud music has word timing for many songs. the "
                 "lookup sends the title and artist to music.163.com "
                 "(china-hosted).",
-    ),
-    OptionDesc(
-        key="lyrics_precise", label="precise timing", kind="custom",
-        tab="playback", section="lyrics",
-        live="apply_lyrics_timing_setting",
-        tooltip="listens to the song itself to place words and pull lyrics "
-                "that run early or late onto the singing. once per song, "
-                "in the background. clear vocals work best.",
     ),
     OptionDesc(
         key="lyrics_offset_ms", label="lyrics offset", kind="int",
@@ -681,57 +679,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
         live="apply_visualizer_setting", advanced=True,
         tooltip='repaint rate while the visualizer is on screen. 60 drops to 30 by itself while frames are expensive (a huge window); either way it stops repainting when paused.',
     ),
-    OptionDesc(
-        key="visualizer_river_view", label="river · shows", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("near", "the next 16 seconds"), ("far", "the next 48 seconds"), ("whole", "the whole song")),
-        live="apply_visualizer_setting",
-        tooltip="how much of the song's loudness the river shows around the playhead.",
-    ),
-    OptionDesc(
-        key="visualizer_spectrogram_history", label="spectrogram · history", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=((6, "6 seconds"), (12, "12 seconds"), (24, "24 seconds")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_spectrogram_contrast", label="spectrogram · contrast", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("soft", "soft"), ("normal", "normal"), ("punchy", "punchy")),
-        live="apply_visualizer_setting",
-        tooltip="punchy lifts quiet detail; soft keeps only what's loud.",
-    ),
-    OptionDesc(
-        key="visualizer_halo_spokes", label="halo · spokes", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=((48, "48"), (96, "96"), (144, "144")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_halo_punch", label="halo · cover on the kick", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("off", "still"), ("gentle", "gentle"), ("hard", "hard")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_tapper_target", label="tapper · tap on", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("beats", "every beat"), ("downbeats", "downbeats"), ("kicks", "kicks")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_tapper_window", label="tapper · timing window", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=(("tight", "tight"), ("normal", "normal"), ("loose", "loose")),
-        live="apply_visualizer_setting",
-    ),
-    OptionDesc(
-        key="visualizer_tapper_offset", label="tapper · your latency", kind="choice",
-        tab="appearance", section="visualizer tiles",
-        choices=((-60, "-60 ms"), (-30, "-30 ms"), (0, "0 ms"), (30, "+30 ms"), (60, "+60 ms")),
-        live="apply_visualizer_setting",
-        tooltip="if the tapper says you're always late (bluetooth, a slow screen), move this toward what it suggests.",
-    ),
 
     # ---- playback · instant play ----
     OptionDesc(
@@ -771,15 +718,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "sped-with-pitch one.",
     ),
 
-    # ---- sources · local files ----
-    OptionDesc(
-        key="local_auto_index", label="re-index music folder at launch",
-        kind="bool", tab="sources", section="local files",
-        advanced=True,
-        tooltip="walks the local music folder in the background at "
-                "startup. the folder itself is picked in the source "
-                "panel's local gear.",
-    ),
     # ---- sources · spotify ----
     OptionDesc(
         key="spotify_bitrate", label="bitrate", kind="choice",
@@ -808,111 +746,6 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "local-only.",
     ),
 
-    # ---- integrations · discord rich presence ----
-    OptionDesc(
-        key="discord_enabled", label="enable discord rich presence",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_app_id", label="app id", kind="str",
-        tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="create an application at the discord developer portal, "
-                "copy its application id, paste it here. tide shows "
-                "whatever name / image you gave that app.",
-    ),
-    OptionDesc(
-        key="discord_lyrics_enabled", label="show live lyric in presence",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="the current synced line replaces artist · album on your "
-                "profile. fast lines show two at a time so none get "
-                "skipped. everyone can see it, and lyrics can be "
-                "explicit.",
-    ),
-    OptionDesc(
-        key="discord_show_paused",
-        label="keep a '⏸ paused' presence instead of clearing it",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_show_progress",
-        label="show the elapsed / total progress bar",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_activity_type", label="activity verb", kind="choice",
-        tab="integrations", section="discord rich presence",
-        choices=(
-            ("listening", "listening to …"),
-            ("playing", "playing …"),
-            ("watching", "watching …"),
-        ),
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_status_display", label="member list shows", kind="choice",
-        tab="integrations", section="discord rich presence",
-        choices=(
-            ("song", "the song"),
-            ("app", "the app name"),
-        ),
-        live="apply_discord_setting",
-        tooltip="what people see next to your name in a server: "
-                "\"listening to <song>\" or \"listening to <your app's name>\".",
-    ),
-    OptionDesc(
-        key="discord_links", label="link the song and add a listen button",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="title, artist and cover open the track on its service. "
-                "the button shows for everyone else, not on your own "
-                "profile. local files never get links.",
-    ),
-    OptionDesc(
-        key="discord_hide_local", label="don't share local files",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-    ),
-    OptionDesc(
-        key="discord_hidden", label="hide from discord for now",
-        kind="bool", tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="clears your presence until you switch it back. the tray "
-                "menu has the same switch.",
-    ),
-    OptionDesc(
-        key="discord_details_template", label="line 1", kind="str",
-        tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="takes {title} {artists} {album} {source} placeholders. "
-                "empty = the classic default, {title}.",
-    ),
-    OptionDesc(
-        key="discord_state_template", label="line 2", kind="str",
-        tab="integrations", section="discord rich presence",
-        live="apply_discord_setting",
-        tooltip="takes {title} {artists} {album} {source} placeholders. "
-                "empty = {artists} · {album}. a live lyric still takes "
-                "over while one is playing.",
-    ),
-    # ---- integrations · listenbrainz ----
-    OptionDesc(
-        key="listenbrainz_enabled", label="enable listenbrainz scrobbling",
-        kind="bool", tab="integrations", section="listenbrainz scrobbling",
-        live="apply_listenbrainz_setting",
-        tooltip="submits 'playing now' on track start and a 'listen' once "
-                "you've heard 30s (or 50% / 4 minutes).",
-    ),
-    OptionDesc(
-        key="listenbrainz_token", label="user token", kind="str",
-        tab="integrations", section="listenbrainz scrobbling",
-        live="apply_listenbrainz_setting",
-        tooltip="listenbrainz.org → settings → token.",
-    ),
     # ---- integrations · play reporting ----
     OptionDesc(
         key="report_plays", label="report plays to youtube music",
@@ -922,6 +755,15 @@ REGISTRY: tuple[OptionDesc, ...] = (
                 "your recommendations learn from tide plays. read at "
                 "play time — no push needed. (the accept path must still "
                 "stamp report_plays_answered when this is touched.)",
+    ),
+
+    # ---- integrations · updates ----
+    OptionDesc(
+        key="check_updates", label="tell me when a new tide is out",
+        kind="bool", tab="integrations", section="updates",
+        tooltip="once at launch, tide asks github for its latest release. "
+                "nothing about you goes with it. takes effect next launch. "
+                "flatpak builds never ask, flathub tells you itself.",
     ),
 
     # ---- windows · mini player ----
@@ -1030,7 +872,6 @@ INTERNAL_FIELDS: frozenset[str] = frozenset({
     "sources_enabled",          # per-source on/off lives on the source page
     "active_source",            # picked by using the source page
     "federated_search",         # the source page's federate checkbox
-    "local_music_dir",          # local gear's folder picker (needs a file dialog)
     "subsonic_url",             # subsonic gear / onboarding sign-in form
     "subsonic_user",            # ”
     "subsonic_pass",            # ”

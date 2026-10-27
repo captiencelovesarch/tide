@@ -22,7 +22,7 @@ from tide import layout as layout_module
 from tide import settings as settings_module
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 
 
 def _app() -> QApplication:
@@ -65,7 +65,7 @@ class _WindowCase(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         return self.w
 
 

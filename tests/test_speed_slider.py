@@ -416,9 +416,9 @@ class WindowGreyWiringTests(unittest.TestCase):
         self.spot = _FakeBackend("librespot", speed=False)
         router.register(self.mpv)
         router.register(self.spot)
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.ui.window import MainWindow
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
 
     def tearDown(self) -> None:
         try:
@@ -456,20 +456,20 @@ class WindowGreyWiringTests(unittest.TestCase):
         # flip the router under the window's feet, then deliver a source
         # switch — the handler must re-grey without a track load
         from tide.sources import registry as source_registry
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         reg = source_registry()
-        if reg.get("local") is None:
-            reg.register(LocalSource())
+        if reg.get("none") is None:
+            reg.register(NullSource())
 
             def _unregister() -> None:
-                reg._sources.pop("local", None)
-                reg._enabled.pop("local", None)
+                reg._sources.pop("none", None)
+                reg._enabled.pop("none", None)
 
             self.addCleanup(_unregister)
         self.w.player.load_ref(
             StreamRef(backend="librespot", payload="payload"))
         self.assertTrue(self.w.speed_btn.isEnabled(), "stale by design")
-        self.w._on_active_source_changed("local")
+        self.w._on_active_source_changed("none")
         self.assertFalse(self.w.speed_btn.isEnabled())
 
     def test_keymap_actions_respect_the_grey_out(self) -> None:

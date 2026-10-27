@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication
 from tide import settings as settings_module, theming
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui.titlebar import TitleBar
 from tide.ui.window import MainWindow
 
@@ -30,7 +30,7 @@ class TitleBarTest(unittest.TestCase):
         QTest.qWait(30)
         router = PlaybackRouter()
         router.register(MpvBackend())
-        cls.w = MainWindow(LocalSource(), router)
+        cls.w = MainWindow(NullSource(), router)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -127,7 +127,7 @@ class AdaptiveCanvasTest(unittest.TestCase):
         QTest.qWait(30)
         router = PlaybackRouter()
         router.register(MpvBackend())
-        w = MainWindow(LocalSource(), router)
+        w = MainWindow(NullSource(), router)
         w.set_csd_titlebar(True)
         w.resize(500, 360)
         w.show()

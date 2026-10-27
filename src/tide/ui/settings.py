@@ -36,7 +36,6 @@ from .headings import Heading, line_heading
 from . import scale
 
 
-DISCORD_HELP_URL = "https://discord.com/developers/applications"
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +78,6 @@ _WIDGET_ATTRS: dict[str, str] = {
     "lyrics_list_sweep": "lyrics_list_sweep_toggle",
     "lyrics_word_timing": "lyrics_word_timing_picker",
     "lyrics_netease": "lyrics_netease_toggle",
-    "lyrics_precise": "lyrics_precise_editor",
     "lyrics_offset_ms": "lyrics_offset_spin",
     "ui_sounds_enabled": "ui_sounds_toggle",
     "audio_device": "audio_device_picker",
@@ -97,36 +95,14 @@ _WIDGET_ATTRS: dict[str, str] = {
     "visualizer_bars": "vis_bars_picker",
     "visualizer_caption": "vis_caption_toggle",
     "visualizer_fps": "vis_fps_picker",
-    "visualizer_river_view": "vis_river_view_picker",
-    "visualizer_spectrogram_history": "vis_spectro_history_picker",
-    "visualizer_spectrogram_contrast": "vis_spectro_contrast_picker",
-    "visualizer_halo_spokes": "vis_halo_spokes_picker",
-    "visualizer_halo_punch": "vis_halo_punch_picker",
-    "visualizer_tapper_target": "vis_tapper_target_picker",
-    "visualizer_tapper_window": "vis_tapper_window_picker",
-    "visualizer_tapper_offset": "vis_tapper_offset_picker",
     "prefetch_hover": "prefetch_hover_toggle",
     "prefetch_warm_results": "prefetch_warm_picker",
     "radio_mix": "radio_mix_picker",
     "preserve_pitch": "preserve_pitch_toggle",
-    "local_auto_index": "local_index_toggle",
     "spotify_bitrate": "spotify_bitrate_picker",
     "spotify_audio_device": "spotify_sink_edit",
     "spotify_connect_enabled": "spotify_connect_toggle",
-    "discord_enabled": "discord_toggle",
-    "discord_app_id": "discord_app_id",
-    "discord_lyrics_enabled": "discord_lyrics_toggle",
-    "discord_show_paused": "discord_paused_toggle",
-    "discord_show_progress": "discord_progress_toggle",
-    "discord_activity_type": "discord_activity_picker",
-    "discord_status_display": "discord_status_picker",
-    "discord_links": "discord_links_toggle",
-    "discord_hide_local": "discord_hide_local_toggle",
-    "discord_hidden": "discord_hidden_toggle",
-    "discord_details_template": "discord_details_edit",
-    "discord_state_template": "discord_state_edit",
-    "listenbrainz_enabled": "lb_toggle",
-    "listenbrainz_token": "lb_token",
+    "check_updates": "check_updates_toggle",
     "report_plays": "report_plays_toggle",
     "mini_mode_default": "mini_default_toggle",
     "mini_backdrop_style": "mini_backdrop_picker",
@@ -152,12 +128,6 @@ _INT_SPECS: dict[str, dict] = {
 
 # Line-edit tuning for str descriptors (placeholder / secret echo).
 _STR_SPECS: dict[str, dict] = {
-    "discord_app_id": {"placeholder": "paste discord application id"},
-    "discord_details_template": {"placeholder": "default · {title}"},
-    "discord_state_template": {"placeholder": "default · {artists} · {album}"},
-    "listenbrainz_token": {
-        "placeholder": "paste your listenbrainz user token", "password": True,
-    },
     "spotify_audio_device": {"placeholder": "default sink"},
 }
 
@@ -166,20 +136,6 @@ _STR_SPECS: dict[str, dict] = {
 _ENABLE_RULES: dict[str, tuple[str, ...]] = {
     "adaptive_background": ("adaptive_background_style", "adaptive_pulse"),
     "mini_pulse": ("mini_pulse_resize",),
-    "discord_enabled": (
-        "discord_app_id",
-        "discord_lyrics_enabled",
-        "discord_show_paused",
-        "discord_show_progress",
-        "discord_activity_type",
-        "discord_status_display",
-        "discord_links",
-        "discord_hide_local",
-        "discord_hidden",
-        "discord_details_template",
-        "discord_state_template",
-    ),
-    "listenbrainz_enabled": ("listenbrainz_token",),
 }
 
 # Keys whose change reshapes the DIALOG, not the app (neither `live`
@@ -209,13 +165,7 @@ def _icon_sets(dialog):
     return build_icon_set_picker(dialog)
 
 
-def _precise_timing(dialog):
-    from .lyric_timing_editor import PreciseTimingEditor
-    return PreciseTimingEditor(dialog)
-
-
 CUSTOM_BUILDERS: dict[str, object] = {
-    "lyrics_precise": _precise_timing,
     "bar_layout": _bar_editor,
     "font_roles": _type_roles,
     "icon_set": _icon_sets,
@@ -223,6 +173,31 @@ CUSTOM_BUILDERS: dict[str, object] = {
 
 
 def _dim(label: QLabel) -> QLabel:
+    label.setProperty("class", "dim")
+    label.setWordWrap(True)
+    return label
+
+
+# buttons plugins add to the dialog (ctx.ui.add_settings_button), each
+# {"section", "label", "tooltip", "fn"}: tide powertools' editors live in
+# "power tools" and "shortcuts". fn(dialog) runs a turn after the click.
+PLUGIN_BUTTONS: list[dict] = []
+
+
+def add_plugin_button(section: str, label: str, fn, tooltip: str = "") -> dict:
+    entry = {"section": section, "label": label, "tooltip": tooltip, "fn": fn}
+    PLUGIN_BUTTONS.append(entry)
+    return entry
+
+
+def remove_plugin_button(entry: dict) -> None:
+    if entry in PLUGIN_BUTTONS:
+        PLUGIN_BUTTONS.remove(entry)
+
+
+def _plugins_moved() -> QLabel:
+    label = QLabel("plugins live in the store now: the plugins button in the rail, "
+                   "above settings. their settings are on each plugin's page.")
     label.setProperty("class", "dim")
     label.setWordWrap(True)
     return label
@@ -353,16 +328,10 @@ class SettingsDialog(QDialog):
                 items.extend(self._section_chrome(tab, section))
             items.extend(self._tab_chrome(tab))
             tabs.addTab(_page(*items), tab)
-        # Plugins: their switches and plugin.toml settings. Dialog chrome
-        # like about (not a schema tab), so the Settings meta-test is
-        # untouched; plugin settings live in their own files.
-        from .. import plugin_host
-        from .plugins_tab import PluginsPage
-        self._plugins_page = None
-        host = plugin_host.host()
-        if host is not None:
-            self._plugins_page = PluginsPage(host)
-            tabs.addTab(_page(*self._plugins_page.items()), "plugins")
+        # Plugins moved to the store page in 3.0 (ui/store_view.py), their
+        # settings with them. The tab stays one line long so people who
+        # look here find them.
+        tabs.addTab(_page(_plugins_moved()), "plugins")
         # About is dialog chrome, not options — its own quiet tab.
         tabs.addTab(_page(*self._about_items()), "about")
         self._tabs = tabs
@@ -502,20 +471,7 @@ class SettingsDialog(QDialog):
         """The widget plus its row chrome: per-key extras (help buttons)
         and the ·per personality· marker for STASH_FIELDS descriptors."""
         extras: list[QWidget] = []
-        if desc.key == "discord_app_id":
-            self.discord_help = QPushButton("get an app id  →")
-            self.discord_help.setFlat(True)
-            self.discord_help.clicked.connect(
-                lambda: QDesktopServices.openUrl(QUrl(DISCORD_HELP_URL)))
-            extras.append(self.discord_help)
-        elif desc.key == "listenbrainz_token":
-            self.lb_help = QPushButton("get a token  →")
-            self.lb_help.setFlat(True)
-            self.lb_help.clicked.connect(
-                lambda: QDesktopServices.openUrl(
-                    QUrl("https://listenbrainz.org/profile/")))
-            extras.append(self.lb_help)
-        elif desc.key == "font_family_override":
+        if desc.key == "font_family_override":
             # 2.3: the live browser — search, each face in itself, a sample.
             self.font_browse_btn = QPushButton("browse  →")
             self.font_browse_btn.setFlat(True)
@@ -710,54 +666,66 @@ class SettingsDialog(QDialog):
         return []
 
     def _power_tool_chrome(self) -> list:
-        """Power-tool launchers + the shortcuts section. Every open is
-        DEFERRED out of the click emission: the theme editor via our
-        own singleShot; open_strip_builder / open_glyph_editor /
-        open_keymap_editor defer internally, so wiring those straight
-        to clicked is sanctioned."""
+        """Power-tool launchers + the shortcuts section: the strip builder,
+        and whatever plugins add (tide powertools: the theme, glyph and
+        keymap editors). Every open is DEFERRED out of the click emission:
+        plugin buttons through _run_plugin_button's singleShot,
+        open_strip_builder internally."""
         tools_heading = Heading("power tools", 34)
         tools_blurb = _dim(QLabel(
             "the deep-cut editors. everything they change is previewable, "
             "revertable and saved per-field — no config files, ever."
         ))
-        self.theme_editor_btn = QPushButton("theme editor  →")
-        self.theme_editor_btn.setToolTip(
-            "edit the active theme's colors, typography and radius live; "
-            "save the result as your own theme")
-        self.theme_editor_btn.clicked.connect(self._on_open_theme_editor)
         self.strip_builder_btn = QPushButton("strip builder  →")
         self.strip_builder_btn.setToolTip(
             "build your player bar: pick a variant per slot with a live "
             "miniature preview")
         self.strip_builder_btn.clicked.connect(self._on_open_strip_builder)
-        self.glyphs_btn = QPushButton("glyph editor  →")
-        self.glyphs_btn.setToolTip(
-            "swap any transport glyph (▶ ▮▮ ♥ …) for 1-3 characters of "
-            "your own — per personality")
-        self.glyphs_btn.clicked.connect(self._on_open_glyphs)
+        self.plugin_buttons: dict[str, QPushButton] = {}
         tools_row = QHBoxLayout()
         tools_row.setSpacing(8)
-        tools_row.addWidget(self.theme_editor_btn)
         tools_row.addWidget(self.strip_builder_btn)
-        tools_row.addWidget(self.glyphs_btn)
+        for btn in self._plugin_buttons("power tools"):
+            tools_row.addWidget(btn)
         tools_row.addStretch(1)
         tools_col = QVBoxLayout()
         tools_col.setSpacing(6)
         tools_col.addWidget(tools_blurb)
         tools_col.addLayout(tools_row)
+        if not any(e["section"] == "power tools" for e in PLUGIN_BUTTONS):
+            tools_col.addWidget(_dim(QLabel(
+                "the theme, glyph and keymap editors come with the tide "
+                "powertools plugin, in the store.")))
 
         shortcuts_heading = Heading("shortcuts", 34)
         shortcuts_blurb = _dim(QLabel(
             "every keyboard shortcut is rebindable. the keymap is global "
             "— muscle memory doesn't flip with the personality."
         ))
-        self.keymap_btn = QPushButton("keymap editor  →")
-        self.keymap_btn.clicked.connect(self._on_open_keymap)
         sc_col = QVBoxLayout()
         sc_col.setSpacing(6)
         sc_col.addWidget(shortcuts_blurb)
-        sc_col.addWidget(self.keymap_btn, alignment=Qt.AlignLeft)
+        for btn in self._plugin_buttons("shortcuts"):
+            sc_col.addWidget(btn, alignment=Qt.AlignLeft)
         return [tools_heading, tools_col, shortcuts_heading, sc_col]
+
+    def _plugin_buttons(self, section: str) -> list[QPushButton]:
+        out = []
+        for entry in PLUGIN_BUTTONS:
+            if entry["section"] != section:
+                continue
+            btn = QPushButton(f"{entry['label']}  →")
+            if entry["tooltip"]:
+                btn.setToolTip(entry["tooltip"])
+            # deferred past the click emission ([[feedback-pyside-modal]])
+            btn.clicked.connect(lambda _c=False, e=entry: self._run_plugin_button(e))
+            self.plugin_buttons[entry["label"]] = btn
+            out.append(btn)
+        return out
+
+    def _run_plugin_button(self, entry: dict) -> None:
+        self._tool_sound("modal_open")
+        QTimer.singleShot(0, lambda: entry["fn"](self))
 
     # ---------- personality (v2.0 phase 4 — the settings re-pick route) ----
 
@@ -1165,9 +1133,6 @@ class SettingsDialog(QDialog):
         self._accepted = True
         if changed:
             settings_module.save_fields(s, *changed)
-        if self._plugins_page is not None:
-            self._plugins_page.commit()
-            self._plugins_page.close()
         self.accept()
 
     def changed_keys(self) -> tuple[str, ...]:
@@ -1187,8 +1152,6 @@ class SettingsDialog(QDialog):
         if not self._accepted and not self._reverted:
             self._reverted = True
             self._revert_previews()
-        if getattr(self, "_plugins_page", None) is not None:
-            self._plugins_page.close()
         super().reject()
 
     def _revert_previews(self) -> None:
@@ -1337,19 +1300,6 @@ class SettingsDialog(QDialog):
 
     # ---------- power tools ----------
 
-    def _on_open_theme_editor(self) -> None:
-        # Deferred past the click emission ([[feedback-pyside-modal]]).
-        self._tool_sound("modal_open")
-        QTimer.singleShot(0, self._do_open_theme_editor)
-
-    def _do_open_theme_editor(self) -> None:
-        from .theme_editor import ThemeEditorDialog
-        dlg = ThemeEditorDialog(parent=self)
-        dlg.theme_saved.connect(self._on_theme_saved)
-        dlg.exec()
-        dlg.deleteLater()
-        self._tool_sound("modal_close")
-
     def _refit_for_scale(self, _theme) -> None:
         scale.fit_dialog(self, 680, 720, min_width=620, grow_only=True)
 
@@ -1436,19 +1386,6 @@ class SettingsDialog(QDialog):
             dict(self._pending_strip_overrides or {}))
         if effective is not None:
             parent.apply_layout(effective)
-
-    def _on_open_glyphs(self) -> None:
-        """open_glyph_editor defers internally. Parented to this dialog,
-        so its refresh_glyphs walk reaches the MainWindow behind it."""
-        self._tool_sound("modal_open")
-        from .glyph_editor import open_glyph_editor
-        open_glyph_editor(self._settings, self)
-
-    def _on_open_keymap(self) -> None:
-        """open_keymap_editor defers internally."""
-        self._tool_sound("modal_open")
-        from .keymap_editor import open_keymap_editor
-        open_keymap_editor(self, self._settings)
 
     # ---------- result ----------
 

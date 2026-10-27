@@ -164,11 +164,11 @@ class StripOrderTest(unittest.TestCase):
     def _window(self, slug):
         theming.manager().apply(slug)
         from tide.playback import MpvBackend, PlaybackRouter
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        return MainWindow(LocalSource(), router)
+        return MainWindow(NullSource(), router)
 
     def test_modern_files_next_under_the_title_and_flips_live(self) -> None:
         w = self._window("nord")

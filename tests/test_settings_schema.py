@@ -73,9 +73,10 @@ class CoverageTests(unittest.TestCase):
         self.assertIs(mapping["theme"], REGISTRY[0])
 
     def test_hidden_v1_fields_now_have_descriptors(self) -> None:
-        # the four options that shipped with no GUI at all in 1.x
+        # the options that shipped with no GUI at all in 1.x (the fourth,
+        # local_auto_index, left with local files for the plugin store)
         mapping = by_key()
-        for key in ("local_auto_index", "spotify_bitrate",
+        for key in ("spotify_bitrate",
                     "spotify_audio_device", "spotify_connect_enabled"):
             self.assertIn(key, mapping, key)
             self.assertEqual(mapping[key].tab, "sources", key)

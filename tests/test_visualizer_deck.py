@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QImage, QRegion
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 from tide import settings as settings_module
 from tide.beat_map import Beat, BeatMap, Hit
@@ -24,9 +24,7 @@ from tide.ui.vis_deck import (
     _perim_polyline, resolve_look,
 )
 from tide.ui import vis_play
-from tide.ui.vis_play import (
-    LAYOUTS, HaloTile, RiverTile, SpectrogramTile, TapperTile, TileGrid,
-)
+from tide.ui.vis_play import LAYOUTS, MissingTile, TileGrid
 from tide.ui.visualizer import VisualizerView, renderer_slugs
 from test_pulse_clock import h  # noqa: F401  shared player/capture clock harness
 from test_beat_ambient import KEY, beat_map as flat_beat_map
@@ -190,7 +188,7 @@ def _settings(**kw):
     return s
 
 
-def _view(layout="quad", tiles=("spectrum", "deck", "lyrics", "halo"), clock=None, **kw):
+def _view(layout="quad", tiles=("spectrum", "deck", "lyrics", "scope"), clock=None, **kw):
     s = _settings(visualizer_layout=layout, visualizer_tile_1=tiles[0],
                   visualizer_tile_2=tiles[1], visualizer_tile_3=tiles[2],
                   visualizer_tile_4=tiles[3], **kw)
@@ -217,9 +215,10 @@ def _engine(clock=None, **kw):
     return e
 
 
+# the river, spectrogram, halo and tapper are the vis-tiles plugin's now;
+# tide-plugins' tests/test_vis_tiles.py paints them
 TILE_SETS = (("spectrum", "mirror", "scope", "classic"),
-             ("deck", "lyrics", "river", "spectrogram"),
-             ("tapper", "halo", "spectrum", "deck"))
+             ("deck", "lyrics", "spectrum", "mirror"))
 
 
 @pytest.mark.parametrize("kinds", TILE_SETS)
@@ -245,7 +244,7 @@ def test_every_tile_paints_in_both_looks(kinds, look, monkeypatch):
 
 
 def test_tiles_paint_without_a_map_with_a_partial_map_and_tiny():
-    v, s, amb = _view(tiles=("spectrum", "river", "spectrogram", "halo"))
+    v, s, amb = _view(tiles=("spectrum", "mirror", "deck", "scope"))
     v.show()
     e = v.engine
     _feed(e)
@@ -259,14 +258,14 @@ def test_tiles_paint_without_a_map_with_a_partial_map_and_tiny():
 
 
 def test_layouts_keep_a_tile_whose_kind_stays():
-    v, s, _amb = _view(layout="stack", tiles=("spectrum", "tapper", "halo", "river"))
-    assert [t.kind for t in v.tiles()] == ["spectrum", "tapper"]
-    tapper = v.tiles()[1]
+    v, s, _amb = _view(layout="stack", tiles=("spectrum", "deck", "lyrics", "mirror"))
+    assert [t.kind for t in v.tiles()] == ["spectrum", "deck"]
+    deck = v.tiles()[1]
     s.visualizer_layout = "quad"
     v.apply_settings(s)
     tiles = v.tiles()
-    assert [t.kind for t in tiles] == ["spectrum", "tapper", "halo", "river"]
-    assert tiles[1] is tapper                   # the streak survives
+    assert [t.kind for t in tiles] == ["spectrum", "deck", "lyrics", "mirror"]
+    assert tiles[1] is deck                     # kept, not rebuilt
     assert [t.caption_here for t in tiles] == [True, False, False, False]
     s.visualizer_layout = "single"
     v.apply_settings(s)
@@ -389,45 +388,7 @@ def test_map_view_reads_loudness_and_falls_back_to_the_swell():
     assert old.loud_rate == old.swell_rate and old.loud.size == old.swell.size
 
 
-def test_river_draws_the_song_around_the_playhead():
-    e = _engine(visualizer_river_view="near")
-    e.mv = MapView(_loud_song())
-    e.position = 20.0
-    e.playing = True
-    river = RiverTile(e)
-    lo, hi, head = river._window(e.mv)
-    assert (lo, hi, head) == pytest.approx((20.0 - 16.0 * 0.3, 20.0 + 16.0 * 0.7, 0.3))
-    e.apply_settings(_settings(visualizer_river_view="whole"))
-    e.mv = MapView(_loud_song())
-    e.position = 20.0
-    e.duration = 40.0
-    lo, hi, head = river._window(e.mv)
-    assert (lo, hi, head) == pytest.approx((0.0, 40.0, 0.5))
-
-
-def test_spectrogram_records_history_and_marks_the_beats():
-    e = _engine(visualizer_look="glow", visualizer_spectrogram_history=6)
-    e.playing = True
-    e.spec.level[:] = np.linspace(1.0, 0.0, e.spec.n)        # loud bass
-    spec = SpectrogramTile(e)
-    spec.resize(400, 300)
-    spec._ensure()
-    assert spec._hist.shape == (6 * 30, SpectrogramTile.ROWS)
-    e.kicks_now = [1.0]
-    spec.on_frame(0.0, 0.5)                       # half a second: 15 columns
-    written = np.nonzero(spec._hist.max(axis=1))[0]
-    assert len(written) == 15
-    assert spec._hist[written[0], 0] > spec._hist[written[0], -1]   # bass row first
-    assert np.count_nonzero(spec._beats) == 1
-    e.playing = False
-    head = spec._head
-    spec.on_frame(0.0, 1.0)
-    assert spec._head == head                     # paused: time stands still
-    lut = spec._ramp()
-    assert lut.shape == (256, 4) and lut[0, 3] == 0 and lut[-1, 3] == 255
-
-
-def test_halo_takes_the_covers_colours_in_glow_and_the_theme_in_blocks():
+def test_art_colours_are_the_covers_in_glow_and_the_theme_in_blocks():
     from PySide6.QtGui import QColor as C
     art = QImage(64, 64, QImage.Format_RGB32)
     art.fill(C("#d03a2a"))
@@ -446,12 +407,6 @@ def test_halo_takes_the_covers_colours_in_glow_and_the_theme_in_blocks():
     e2 = _engine(visualizer_look="blocks")
     e2.art_cols = e.art_cols
     assert e2.colors()[0] == e2.pal.accent
-    halo = HaloTile(e)
-    halo.resize(400, 300)
-    halo.show()
-    render(halo)
-    assert halo._cover is not None and halo._cover.width() > 10
-    halo.hide()
 
 
 def test_art_colours_skip_a_grey_cover():
@@ -478,62 +433,8 @@ def test_saved_layouts_with_retired_tiles_migrate(tmp_path, monkeypatch):
     assert (s.visualizer_tile_1, s.visualizer_tile_2, s.visualizer_tile_3,
             s.visualizer_tile_4) == ("spectrogram", "deck", "river", "halo")
     assert not hasattr(s, "visualizer_pond_speed")
-    assert settings_module.Settings().visualizer_tile_4 == "halo"
-
-
-def _tapper(**kw):
-    e = _engine(**kw)
-    e.mv = MapView(song())
-    e.playing = True
-    e.speed = 1.0
-    t = TapperTile(e)
-    t.resize(500, 300)
-    return e, t
-
-
-def test_tapper_grades_taps_against_the_beat_map():
-    e, t = _tapper()
-    e.position = 2.0
-    assert t.tap() == "perfect"
-    e.position = 2.56                            # 60 ms late
-    assert t.tap() == "good"
-    e.position = 3.2
-    assert t.tap() == "miss"                     # 200 ms off either beat
-    assert (t.streak, t.best, t.taps) == (0, 2, 3)
-    e.position = 3.5
-    t.tap()
-    e.position = 3.51
-    assert t.tap() == "miss"                     # the same beat twice
-
-
-def test_tapper_offset_and_targets_follow_the_knobs():
-    e, t = _tapper(visualizer_tapper_offset=60)
-    e.position = 2.06                            # 60 ms late, compensated
-    assert t.tap() == "perfect"
-    e2, t2 = _tapper(visualizer_tapper_target="downbeats")
-    e2.position = 2.5                            # a beat, not a downbeat
-    assert t2.tap() == "miss"
-    e2.position = 4.0
-    assert t2.tap() == "perfect"
-
-
-def test_tapper_counts_beats_you_let_pass_while_playing_along():
-    e, t = _tapper()
-    e.position = 2.0
-    t.tap()
-    e.position = 2.0
-    t.on_frame(time.monotonic(), 0.016)
-    e.position = 3.3
-    t.on_frame(time.monotonic(), 0.016)
-    assert t.streak == 0
-    assert list(t.history)[-2:] == ["miss", "miss"]     # 2.5 and 3.0
-
-
-def test_tapper_waits_without_a_map():
-    e = _engine()
-    e.playing = True
-    t = TapperTile(e)
-    assert t.tap() is None and t.last[0] == "waiting"
+    # the halo is a store tile since 3.0: a fresh tide's fourth slot is core's
+    assert settings_module.Settings().visualizer_tile_4 == "scope"
 
 
 # ---------- the view ----------
@@ -547,12 +448,12 @@ def test_menus_build_and_write_the_settings(monkeypatch):
     tile_menu = v._build_tile_menu(3)
     from PySide6.QtGui import QAction
     actions = {a.text(): a for a in tile_menu.findChildren(QAction)}
-    actions["spectrogram"].trigger()
-    assert s.visualizer_tile_4 == "spectrogram" and "visualizer_tile_4" in saved
-    assert v.tiles()[3].kind == "spectrogram"
+    actions["mirror"].trigger()
+    assert s.visualizer_tile_4 == "mirror" and "visualizer_tile_4" in saved
+    assert v.tiles()[3].kind == "mirror"
     knob_menu = v._build_tile_menu(3)
     texts = [a.text() for a in knob_menu.findChildren(QAction)]
-    assert "24 seconds" in texts                  # the spectrogram's history knob
+    assert "64" in texts                          # the mirror's bars knob
     menu.deleteLater()
     tile_menu.deleteLater()
     knob_menu.deleteLater()
@@ -599,10 +500,53 @@ def test_bare_view_still_works():
 def test_choice_providers_cover_every_tile_layout_and_classic():
     from tide.ui import settings_schema
     kinds = [k for k, _l in settings_schema.visualizer_tile_choices()]
+    # core's tiles only: the store's need their plugin (none is on here)
     assert set(kinds) == set(vis_play.KIND_LABELS)
+    # but a slot's saved pick of one stays choosable, so saving keeps it
+    kept = [k for k, _l in vis_play.tile_choices(keep=("halo",))]
+    assert "halo" in kept and "river" not in kept
     assert [k for k, _l in settings_schema.visualizer_layout_choices()] == list(LAYOUTS)
     classic = [k for k, _l in settings_schema.visualizer_classic_choices()]
     assert classic[0] == "theme" and set(renderer_slugs()) <= set(classic)
+
+def test_the_menu_offers_only_what_tide_has():
+    from PySide6.QtGui import QAction
+    v, s, _amb = _view()
+    menu = v._build_tile_menu(0)
+    texts = {a.text() for a in menu.findChildren(QAction)}
+    assert "spectrum" in texts and "loudness river" not in texts
+    menu.deleteLater()
+    v.teardown()
+
+
+def test_a_store_tile_without_its_plugin_is_a_placeholder():
+    v, s, _amb = _view(tiles=("spectrum", "halo", "lyrics", "river"))
+    kinds = [t.kind for t in v.tiles()]
+    assert kinds == ["spectrum", "halo", "lyrics", "river"]      # the picks stay
+    assert isinstance(v.tiles()[1], MissingTile)
+    assert "more visualizer tiles" in v.tiles()[1].message
+    render(v)                                     # it paints its line
+    v.teardown()
+
+
+def test_a_plugin_tile_comes_and_goes():
+    from tide.ui.vis_play import PluginTile, register_tile, unregister_tile
+    from tide.ui.vis_deck import CanvasTile
+    v, s, _amb = _view(tiles=("spectrum", "halo", "lyrics", "scope"))
+    made = []
+
+    def factory(engine):
+        made.append(CanvasTile(engine))
+        return made[-1]
+    register_tile(PluginTile("halo", "art halo", factory, (), {}, lambda k, val: None))
+    try:
+        assert v.tiles()[1] in made and v.tiles()[1].plugin_settings == {}
+        assert ("halo", "art halo") in vis_play.tile_kinds()
+    finally:
+        unregister_tile("halo")
+    assert isinstance(v.tiles()[1], MissingTile)
+    v.teardown()
+
 
 # ---------- ambient: the watch-only beat clock ----------
 
@@ -876,7 +820,7 @@ def test_stream_mode_follows_tide_onto_a_new_stream(monkeypatch):
 
 
 def test_one_tile_throwing_cannot_freeze_the_others(monkeypatch):
-    v, _s, _amb = _view(tiles=("spectrum", "halo", "deck", "river"))
+    v, _s, _amb = _view(tiles=("spectrum", "mirror", "deck", "scope"))
     v.show()
     e = v.engine
     _feed(e)

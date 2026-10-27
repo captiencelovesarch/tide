@@ -542,11 +542,11 @@ class _WindowCase(unittest.TestCase):
         layout_module.manager().apply(settings.layout,
                                       dict(settings.layout_overrides))
         from tide.playback import MpvBackend, PlaybackRouter
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.w._settings = settings
         return self.w
 

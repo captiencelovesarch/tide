@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tide"
-version = "2.3.0"
-description = "a multi-source music player with two personalities"
+version = "3.0.0"
+description = "a youtube music client for linux"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "GPL-3.0-or-later" }
@@ -32,7 +32,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-discord = ["pypresence>=4.6"]
 secretservice = ["SecretStorage>=3"]
 local_watch = ["watchdog>=4"]
 lyric_align = ["onnxruntime>=1.17"]
@@ -64,7 +63,6 @@ include = [
   "src/tide/**/*.py",
   "src/tide/themes/**/*",
   "src/tide/layouts/**/*",
-  "src/tide/plugins/**/*",
   "src/tide/fonts/*.ttf",
   "src/tide/fonts/*.otf",
   "src/tide/icons/**/*.svg",
@@ -83,7 +81,6 @@ include = [
   "src/tide/**/*.py",
   "src/tide/themes/**/*",
   "src/tide/layouts/**/*",
-  "src/tide/plugins/**/*",
   "src/tide/fonts/*.ttf",
   "src/tide/fonts/*.otf",
   "src/tide/icons/**/*.svg",

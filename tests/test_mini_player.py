@@ -16,11 +16,12 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from tide import settings as settings_module
+from tide import theming
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.queue import Queue
 from tide.settings import Settings
 from tide.sources.base import Track
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui.window import MainWindow
 
 
@@ -29,9 +30,12 @@ def _app() -> QApplication:
 
 
 def _window() -> MainWindow:
+    # the mini dresses for brutalist too; these checks are modern's, and
+    # an earlier test can leave a brutalist theme on
+    theming.manager().apply("nord")
     router = PlaybackRouter()
     router.register(MpvBackend())
-    return MainWindow(LocalSource(), router)
+    return MainWindow(NullSource(), router)
 
 
 class MiniToggleTest(unittest.TestCase):

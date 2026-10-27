@@ -25,6 +25,7 @@ NAV_ICON_SETS: dict[str, dict[str, str]] = {
         "visualizer": "♬",   # beamed notes
         "source":     "⇄",   # left/right arrow — reads as "switch"
         "audio_fx":   "ƒ",   # florin f — the classic "fx" abbreviation
+        "plugins":    "▣",   # a filled square in a square, ▤'s sibling
         "settings":   "⚙",   # gear
     },
     # Emoji set — universal recognizability. Renders via the system color
@@ -39,6 +40,7 @@ NAV_ICON_SETS: dict[str, dict[str, str]] = {
         "visualizer": "🎚",
         "source":     "🔌",
         "audio_fx":   "🎛",
+        "plugins":    "🧩",
         "settings":   "⚙",
     },
 }

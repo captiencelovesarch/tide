@@ -225,69 +225,6 @@ class _GenericSourceDialog(QDialog):
         self.accept()
 
 
-class _LocalGearDialog(QDialog):
-    """Sub-dialog launched by the [⚙] gear on the Local source row.
-
-    Lets the user pick a different music directory and trigger a manual
-    rescan. Closes immediately on Done; rescans run in the background.
-    """
-
-    dir_changed = Signal(str)
-    rescan_requested = Signal()
-
-    def __init__(self, local_source, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("local files")
-        self._local = local_source
-
-        heading = QLabel(styled_case("local files"))
-        heading.setObjectName("sectionHeading")
-
-        self.dir_label = QLabel(local_source.music_dir)
-        self.dir_label.setObjectName("sourceStatus")
-        self.dir_label.setWordWrap(True)
-
-        pick_btn = QPushButton(styled_case("[change directory]"))
-        pick_btn.clicked.connect(self._pick_dir)
-
-        self.count_label = QLabel(styled_case(f"{local_source.track_count():,} tracks indexed"))
-        self.count_label.setObjectName("sourceStatus")
-
-        rescan_btn = QPushButton(styled_case("[rescan now]"))
-        rescan_btn.clicked.connect(self._on_rescan)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(self.reject)
-
-        col = QVBoxLayout()
-        col.setContentsMargins(20, 18, 20, 18)
-        col.setSpacing(10)
-        col.addWidget(heading)
-        col.addWidget(QLabel(styled_case("directory")))
-        col.addWidget(self.dir_label)
-        col.addWidget(pick_btn)
-        col.addSpacing(6)
-        col.addWidget(self.count_label)
-        col.addWidget(rescan_btn)
-        col.addStretch(1)
-        col.addWidget(buttons)
-        self.setLayout(col)
-        self.resize(420, 280)
-
-    def _pick_dir(self) -> None:
-        chosen = QFileDialog.getExistingDirectory(
-            self, "pick music directory", self._local.music_dir
-        )
-        if not chosen:
-            return
-        self.dir_label.setText(chosen)
-        self.dir_changed.emit(chosen)
-
-    def _on_rescan(self) -> None:
-        self.count_label.setText(styled_case("indexing…"))
-        self.rescan_requested.emit()
-
-
 class _PlaceholderRow(QFrame):
     """Greyed-out row for sources that ship later in v1.2."""
 
@@ -317,7 +254,6 @@ class SourcePanel(QWidget):
     active_changed = Signal(str)
     enabled_changed = Signal(str, bool)
     settings_changed = Signal()              # ask host to persist + relayout
-    local_dir_changed = Signal(str)          # for LocalSource rescan trigger
     # Emitted from pool threads when a background probe finishes; the queued
     # delivery marshals the row repaint onto the GUI thread. (The previous
     # QTimer.singleShot-from-a-pool-thread approach silently never fires for
@@ -349,23 +285,12 @@ class SourcePanel(QWidget):
         rows_col = QVBoxLayout()
         rows_col.setContentsMargins(0, 0, 0, 0)
         rows_col.setSpacing(8)
-
+        self._rows_col = rows_col
+        self._build_rows()
+        # sources from plugins come and go while tide runs
         reg = source_registry()
-        for source in reg.all():
-            enabled = reg.is_enabled(source.slug)
-            is_active = reg.active_slug == source.slug
-            row = _SourceRow(source, enabled=enabled, is_active=is_active)
-            self._rows[source.slug] = row
-            self._active_group.addButton(row.active_radio)
-            row.enable_toggled.connect(self._on_row_enable)
-            row.activate_requested.connect(self._on_row_activate)
-            row.gear_clicked.connect(self._on_row_gear)
-            rows_col.addWidget(row)
-
-        # Future-source placeholder. Spotify used to be a placeholder
-        # here too — in v1.2.1 it became a real (registered, but shelved)
-        # source so the row above renders it directly via _SourceRow.
-        rows_col.addWidget(_PlaceholderRow("apple music", "shelved"))
+        reg.listing_changed.connect(self._build_rows)
+        reg.active_changed.connect(self._on_registry_active)
 
         rows_wrap = QWidget()
         rows_wrap.setLayout(rows_col)
@@ -388,6 +313,39 @@ class SourcePanel(QWidget):
         # instantly with the dot in "unknown" state; the probe runs on a
         # background worker and we refresh statuses once it lands.
         QTimer.singleShot(0, self._probe_async_sources)
+
+    def _build_rows(self) -> None:
+        col = self._rows_col
+        for row in self._rows.values():
+            self._active_group.removeButton(row.active_radio)
+        while col.count():
+            item = col.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._rows = {}
+        reg = source_registry()
+        for source in reg.all():
+            enabled = reg.is_enabled(source.slug)
+            is_active = reg.active_slug == source.slug
+            row = _SourceRow(source, enabled=enabled, is_active=is_active)
+            self._rows[source.slug] = row
+            self._active_group.addButton(row.active_radio)
+            row.enable_toggled.connect(self._on_row_enable)
+            row.activate_requested.connect(self._on_row_activate)
+            row.gear_clicked.connect(self._on_row_gear)
+            col.addWidget(row)
+        # Future-source placeholder. Spotify used to be a placeholder
+        # here too — in v1.2.1 it became a real (registered, but shelved)
+        # source so the row above renders it directly via _SourceRow.
+        col.addWidget(_PlaceholderRow("apple music", "shelved"))
+        # what the store has for more (local files, soundcloud...)
+        col.addWidget(_PlaceholderRow("more sources", "in the plugin store"))
+
+    def _on_registry_active(self, slug: str) -> None:
+        """the registry moved the active source itself (its plugin left)."""
+        row = self._rows.get(slug)
+        if row is not None:
+            row.active_radio.setChecked(True)
 
     # ---------- slots ----------
 
@@ -497,15 +455,20 @@ class SourcePanel(QWidget):
         QTimer.singleShot(0, lambda: self._do_row_gear(slug))
 
     def _do_row_gear(self, slug: str) -> None:
-        if slug == "local":
-            self._configure_local()
-            return
         if slug == "subsonic":
             self._run_subsonic_setup()
             return
         reg = source_registry()
         source = reg.get(slug)
         if source is None:
+            return
+        # a plugin's source can bring its own setup (local files: the folder)
+        configure = getattr(source, "configure", None)
+        if callable(configure):
+            configure(self)
+            row = self._rows.get(slug)
+            if row is not None:
+                row.refresh_status()
             return
         dlg = _GenericSourceDialog(source, self)
         dlg.sign_out_requested.connect(self._sign_out_source)
@@ -686,61 +649,8 @@ class SourcePanel(QWidget):
         self._probe_async_sources()
         return True
 
-    # ---------- local ----------
-
-    def _configure_local(self) -> None:
-        reg = source_registry()
-        local = reg.get("local")
-        if local is None:
-            return
-        dlg = _LocalGearDialog(local, self)
-        dlg.dir_changed.connect(self._apply_new_local_dir)
-        dlg.rescan_requested.connect(self._rescan_local)
-        dlg.exec()
-
-    def _apply_new_local_dir(self, new_dir: str) -> None:
-        reg = source_registry()
-        local = reg.get("local")
-        if local is None:
-            return
-        self._settings.local_music_dir = new_dir
-        local.set_music_dir(new_dir)
-        self.settings_changed.emit()
-        self.local_dir_changed.emit(new_dir)
-        row = self._rows.get("local")
-        if row is not None:
-            row.status_label.setText(styled_case(f"{new_dir} · indexing…"))
-
-    def _rescan_local(self) -> None:
-        reg = source_registry()
-        local = reg.get("local")
-        if local is None:
-            return
-
-        panel = self
-        row = self._rows.get("local")
-        if row is not None:
-            row.status_label.setText(styled_case(f"{local.music_dir} · indexing…"))
-
-        class _Job(QRunnable):
-            def run(self_inner):
-                try:
-                    local.rescan()
-                except Exception:
-                    pass
-
-        QThreadPool.globalInstance().start(_Job())
-        QTimer.singleShot(1500, panel.refresh_statuses)
-        QTimer.singleShot(5000, panel.refresh_statuses)
-
     def refresh_statuses(self) -> None:
         for row in self._rows.values():
-            row.refresh_status()
-
-    def update_local_status_from_index(self) -> None:
-        """Force a status refresh — useful after a rescan completes."""
-        row = self._rows.get("local")
-        if row is not None:
             row.refresh_status()
 
     def bind_settings(self, settings: Settings) -> None:

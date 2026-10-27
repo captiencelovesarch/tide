@@ -69,12 +69,47 @@ def _is_fetchable_art_url(url: str) -> bool:
     return qurl.scheme().lower() in _ALLOWED_ART_SCHEMES and bool(qurl.host())
 
 
+def store_local(key: str, raw: bytes) -> str:
+    """keep ``raw`` (a cover read from a file on this computer) in the
+    disk cache under ``tide-art:<key>`` and return that url. ``request``
+    finds it on disk; it's never fetched, since only http(s) ever is. any
+    thread may call this."""
+    url = f"tide-art:{key}"
+    if raw and len(raw) <= MAX_ART_BYTES and not _disk_path(url).is_file():
+        _write_disk(url, raw)
+    return url
+
+
 def _hash(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()
 
 
 def _disk_path(url: str) -> Path:
     return config.ART_CACHE_DIR / _hash(url)
+
+
+def _write_disk(url: str, raw: bytes) -> None:
+    path = _disk_path(url)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Write via a unique temp + atomic replace rather than opening the
+        # deterministic sha1 target directly: if someone pre-plants a
+        # symlink at that name, write_bytes would follow it and clobber an
+        # arbitrary file. mkstemp creates a fresh 0600 regular file, and
+        # os.replace onto the final name never traverses a symlink target.
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".art.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw)
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass
 
 
 class _ArtCache(QObject):
@@ -201,27 +236,8 @@ class _ArtCache(QObject):
         return img
 
     def _save_disk(self, url: str, raw: bytes) -> None:
-        path = _disk_path(url)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # Write via a unique temp + atomic replace rather than opening the
-            # deterministic sha1 target directly: if someone pre-plants a
-            # symlink at that name, write_bytes would follow it and clobber an
-            # arbitrary file. mkstemp creates a fresh 0600 regular file, and
-            # os.replace onto the final name never traverses a symlink target.
-            fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".art.", suffix=".tmp")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(raw)
-                os.replace(tmp_name, path)
-            except BaseException:
-                try:
-                    os.unlink(tmp_name)
-                except OSError:
-                    pass
-                raise
-        except OSError:
-            pass
+        _write_disk(url, raw)
+
 
     def _fetch(self, url: str) -> None:
         if url in self._inflight:

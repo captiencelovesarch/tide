@@ -14,7 +14,7 @@ Steps:
   4. Sources — toggle the 5 ready sources; YT cookie import + Local folder
      pick run inline as sub-flows
   5. Feel — adaptive accent toggle + motion intensity + ui scale
-  6. Integrations — discord rich presence + listenbrainz, both optional
+  6. Integrations — discord presence (a store plugin), optional
   7. All set — summary + launch button
 
 The wizard only runs on a config-less first launch. Settings →
@@ -93,8 +93,6 @@ class OnboardingResult:
     # working integration.
     discord_enabled: bool = False
     discord_app_id: str = ""
-    listenbrainz_enabled: bool = False
-    listenbrainz_token: str = ""
     # v1.5 play reporting — a privacy decision, so the wizard step has no
     # pre-checked answer and [next] holds until the user picks one.
     # ``answered`` False means the user cancelled before reaching the step;
@@ -622,14 +620,16 @@ class _SourcesStep(_Step):
             "ytmusic": _SourceCard("ytmusic", "YouTube Music",
                 "the full catalog · needs browser cookie import",
                 needs_setup=True),
+            # these four come from store plugins since 3.0: picking one
+            # installs its plugin once tide reaches the store
             "soundcloud": _SourceCard("soundcloud", "SoundCloud",
-                "free · no setup needed", needs_setup=False),
+                "free · from the plugin store", needs_setup=False),
             "bandcamp": _SourceCard("bandcamp", "Bandcamp",
-                "independent artists · no setup needed", needs_setup=False),
+                "independent artists · from the plugin store", needs_setup=False),
             "mixcloud": _SourceCard("mixcloud", "Mixcloud",
-                "DJ mixes & radio shows · no setup needed", needs_setup=False),
+                "DJ mixes & radio shows · from the plugin store", needs_setup=False),
             "local": _SourceCard("local", "Local Files",
-                "your own music · needs a music directory",
+                "your own music · from the plugin store, needs a music folder",
                 needs_setup=True),
             "spotify": _SourceCard("spotify", "Spotify",
                 "shelved — search works, playback blocked by spotify",
@@ -915,14 +915,14 @@ class _FeelStep(_Step):
 
 
 class _IntegrationsStep(_Step):
-    """Optional integrations — both need a credential the user has to go
-    fetch in a browser, so both default off and the step is skippable.
-    Discord gets no bundled app ID on purpose (see discord_rpc.py: presences
-    show the app OWNER's name + assets, so a shared ID is a trust problem);
-    the flow here mirrors Settings → discord."""
+    """Optional discord presence. It needs an app id the user has to go
+    fetch in a browser, so it defaults off and the step is skippable.
+    Discord gets no bundled app ID on purpose (presences show the app
+    OWNER's name + assets, so a shared ID is a trust problem). It's a
+    store plugin since 3.0: a pick here queues the install, app id
+    included (plugin_migrate.queue_install)."""
 
     DISCORD_HELP_URL = "https://discord.com/developers/applications"
-    LB_HELP_URL = "https://listenbrainz.org/profile/"
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -934,8 +934,8 @@ class _IntegrationsStep(_Step):
         prompt.setFont(f)
         prompt.setAlignment(Qt.AlignCenter)
 
-        sub = QLabel("both optional, both in settings later. "
-                     "skip if you just want music.")
+        sub = QLabel("optional. tide installs it from the plugin store, "
+                     "and it's there later too. skip if you just want music.")
         sub.setProperty("class", "dim")
         sub.setAlignment(Qt.AlignCenter)
         sub.setWordWrap(True)
@@ -970,33 +970,6 @@ class _IntegrationsStep(_Step):
         discord_blurb.setWordWrap(True)
         discord_blurb.setProperty("class", "dim")
 
-        # -- listenbrainz --
-        self._lb_check = QCheckBox("listenbrainz scrobbling")
-        self._lb_check.setFont(fb)
-        self._lb_check.toggled.connect(self._on_changed)
-
-        self._lb_token = QLineEdit()
-        self._lb_token.setPlaceholderText("paste your listenbrainz user token")
-        self._lb_token.setEchoMode(QLineEdit.Password)
-        self._lb_token.setEnabled(False)
-        self._lb_token.textChanged.connect(self._on_changed)
-        self._lb_check.toggled.connect(self._lb_token.setEnabled)
-
-        lb_help = BracketButton("get a token")
-        lb_help.clicked.connect(
-            lambda: QDesktopServices.openUrl(QUrl(self.LB_HELP_URL))
-        )
-        lb_row = QHBoxLayout()
-        lb_row.addWidget(self._lb_token, stretch=1)
-        lb_row.addWidget(lb_help)
-
-        lb_blurb = QLabel(
-            "keeps an open-source record of your listening history at "
-            "listenbrainz.org. free account → settings → copy the token."
-        )
-        lb_blurb.setWordWrap(True)
-        lb_blurb.setProperty("class", "dim")
-
         col = QVBoxLayout(self)
         col.setSpacing(10)
         col.addWidget(prompt)
@@ -1005,10 +978,6 @@ class _IntegrationsStep(_Step):
         col.addWidget(self._discord_check)
         col.addLayout(discord_row)
         col.addWidget(discord_blurb)
-        col.addSpacing(12)
-        col.addWidget(self._lb_check)
-        col.addLayout(lb_row)
-        col.addWidget(lb_blurb)
         col.addStretch(1)
 
     def _on_changed(self, *_a) -> None:
@@ -1019,18 +988,12 @@ class _IntegrationsStep(_Step):
         # [next] until the field is filled or the box is unchecked again.
         if self._discord_check.isChecked() and not self._discord_id.text().strip():
             return False
-        if self._lb_check.isChecked() and not self._lb_token.text().strip():
-            return False
         return True
 
     def apply_to(self, result: OnboardingResult) -> None:
         result.discord_app_id = self._discord_id.text().strip()
         result.discord_enabled = (
             self._discord_check.isChecked() and bool(result.discord_app_id)
-        )
-        result.listenbrainz_token = self._lb_token.text().strip()
-        result.listenbrainz_enabled = (
-            self._lb_check.isChecked() and bool(result.listenbrainz_token)
         )
 
 
@@ -1170,7 +1133,6 @@ class _AllSetStep(_Step):
         ]
         integrations = [name for name, on in (
             ("discord", result.discord_enabled),
-            ("listenbrainz", result.listenbrainz_enabled),
         ) if on]
         if integrations:
             bits.append("integrations: " + " · ".join(integrations))

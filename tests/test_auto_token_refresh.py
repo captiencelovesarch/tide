@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QApplication
 from tide import auth, theming
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.sources import registry as source_registry
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 
 
 def _app() -> QApplication:
@@ -88,7 +88,7 @@ class _RefreshTestBase(unittest.TestCase):
 
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
 
     def tearDown(self) -> None:
         from tide.ui import toast as toast_module, wizard as wizard_module

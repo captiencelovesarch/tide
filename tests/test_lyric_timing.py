@@ -53,8 +53,7 @@ class ServiceTest(unittest.TestCase):
         self.addCleanup(p.stop)
         self.svc = lyric_timing.WordTimingService()
         self.addCleanup(self.svc.close)
-        self.settings = SimpleNamespace(lyrics_word_timing="sources",
-                                        lyrics_netease=True, lyrics_precise=False)
+        self.settings = SimpleNamespace(lyrics_word_timing="sources", lyrics_netease=True)
         self.svc.set_settings_provider(lambda: self.settings)
         self.got: list = []
         self.svc.updated.connect(lambda key, sheet: self.got.append((key, sheet)))
@@ -125,25 +124,33 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(self.got[-1][1][0].text, "White shirt now red")
 
     def test_precise_stage_runs_after_sources(self) -> None:
-        self.settings.lyrics_precise = True
+        # the lyric timing plugin's aligner (ctx.lyrics.add_aligner)
+        from tide.sources.base import StreamRef
         seen = []
 
-        def fake_align(job, sheet):
-            seen.append([l.timing for l in sheet])
+        def aligner(sheet, ref, should_stop, say):
+            seen.append(([l.timing for l in sheet], ref.payload))
+            say("timing words to the audio...")
             return [lw.shift(l, 0.25) for l in sheet]
-        self.svc.align = fake_align
-        with mock.patch("tide.lyric_align.available", return_value=True):
-            self.svc.sheet_for(self.track, self.result)
-            self.assertTrue(_wait(lambda: len(self.got) >= 2))
-        self.assertEqual(seen, [["source"] * 3])
+        self.svc.set_aligner(aligner)
+        self.svc.set_stream_provider(lambda track: StreamRef(backend="mpv", payload="file:///song"))
+        self.svc.sheet_for(self.track, self.result)
+        self.assertTrue(_wait(lambda: len(self.got) >= 2))
+        self.assertEqual(seen, [(["source"] * 3, "file:///song")])
         self.assertAlmostEqual(self.got[-1][1][1].words[0].start, 13.25, places=3)
 
-    def test_precise_without_model_is_sources_only(self) -> None:
-        self.settings.lyrics_precise = True
-        self.svc.align = lambda job, sheet: self.fail("no model, no alignment")
-        with mock.patch("tide.lyric_align.available", return_value=False):
-            self.svc.sheet_for(self.track, self.result)
-            self.assertTrue(_wait(lambda: self.got))
+    def test_no_aligner_is_sources_only(self) -> None:
+        self.svc.set_stream_provider(lambda track: self.fail("no aligner, no stream wait"))
+        self.svc.sheet_for(self.track, self.result)
+        self.assertTrue(_wait(lambda: self.got))
+        self.assertEqual(self.got[-1][1][0].timing, "source")
+
+    def test_a_broken_aligner_keeps_source_timing(self) -> None:
+        from tide.sources.base import StreamRef
+        self.svc.set_aligner(lambda *a: 1 / 0)
+        self.svc.set_stream_provider(lambda track: StreamRef(backend="mpv", payload="x"))
+        self.svc.sheet_for(self.track, self.result)
+        self.assertTrue(_wait(lambda: self.got))
         self.assertEqual(self.got[-1][1][0].timing, "source")
 
 

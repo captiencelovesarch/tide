@@ -2,9 +2,15 @@
 restart, and hands each one its ``ctx``. design/plugins.md is the why.
 
 Where plugins live (later roots override earlier ones, like themes):
-bundled in ``tide/plugins/``, ``/usr/share/tide/plugins/`` from packages,
-and ``~/.config/tide/plugins/``. Only bundled plugins can be on by
-default; anything else starts off until the user switches it on.
+what the store installed in ``<data>/plugins/installed/`` (store.py),
+``/usr/share/tide/plugins/`` from packages, and ``~/.config/tide/plugins/``.
+A store plugin is on once it's installed (uninstalling is how you switch
+it off); anything else starts off until the user switches it on. tide 3
+ships no plugins of its own.
+
+A plugin's ``vendor/`` folder (python modules it carries in its zip) goes
+first on ``sys.path`` while it runs and comes off when it stops, with
+every module imported from it.
 
 Undo by construction: each plugin connects to signals on its own relay
 object, never to the player or queue directly. Switching it off deletes
@@ -19,6 +25,7 @@ switched off and the user told. ``tide --no-plugins`` skips them all.
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
 import importlib.util
 import logging
 import os
@@ -42,7 +49,6 @@ from .plugin_api import (
 
 log = logging.getLogger("tide.plugins")
 
-BUNDLED_DIR = Path(__file__).parent / "plugins"
 SYSTEM_DIR = Path("/usr/share/tide/plugins")
 MODULE_ROOT = "tide_plugins"
 # this many uncaught errors from one plugin inside the window switches it off
@@ -56,7 +62,8 @@ _ENTRY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Z
 
 
 def plugin_roots() -> list[tuple[Path, str]]:
-    return [(BUNDLED_DIR, "bundled"), (SYSTEM_DIR, "system"), (config.USER_PLUGINS_DIR, "yours")]
+    return [(config.PLUGIN_STORE_DIR, "store"), (SYSTEM_DIR, "system"),
+            (config.USER_PLUGINS_DIR, "yours")]
 
 
 # ---------------------------------------------------------------------------
@@ -94,13 +101,17 @@ class Manifest:
     origin: str
     requires: tuple[str, ...] = ()
     uses: tuple[str, ...] = ()
-    default: bool = False
     settings: tuple[SettingDesc, ...] = ()
 
     @property
     def ident(self) -> str:
         """the slug as a python identifier (module name)."""
         return self.slug.replace("-", "_")
+
+    @property
+    def vendor(self) -> Path:
+        """python modules the plugin carries with it."""
+        return self.path / "vendor"
 
 
 def _choices(raw, key: str):
@@ -198,8 +209,6 @@ def parse_manifest(folder: Path, origin: str = "yours") -> Manifest:
         slug=slug, name=meta["name"], description=meta["description"],
         version=meta["version"], api=api, entry=meta["entry"], path=folder.resolve(),
         origin=origin, requires=tuple(requires), uses=tuple(uses),
-        # only tide's own plugins may start switched on
-        default=bool(meta.get("default", False)) and origin == "bundled",
         settings=settings,
     )
 
@@ -223,6 +232,7 @@ def discover(roots: list[tuple[Path, str]] | None = None) -> Discovered:
             try:
                 m = parse_manifest(child, origin)
             except ManifestError as exc:
+                log.warning("plugin folder %s skipped: %s", child, exc)
                 out.broken.append((child, str(exc)))
                 continue
             if m.slug in out.manifests:
@@ -545,6 +555,50 @@ class _Lyrics:
             self._on = False
             self._ctx._host._lyrics_unsubscribe(self._ctx.slug)
 
+    def enable_word_view(self) -> None:
+        """show karaoke mode and the word sweep in the lyrics views. without
+        a plugin that does, lyrics are plain synced lines. undone when the
+        plugin stops."""
+        if getattr(self, "_word_view", False):
+            return
+        from .ui import lyrics as lyrics_ui
+        self._word_view = True
+        lyrics_ui.set_word_view(True)
+
+        def off() -> None:
+            self._word_view = False
+            lyrics_ui.set_word_view(False)
+        self._ctx.on_stop(off)
+
+    def add_aligner(self, fn: Callable) -> None:
+        """precise word timing: ``fn(sheet, stream, should_stop, say)`` gets
+        the word sheet tide has (list[WordLine], tide.plugin_api), the
+        StreamRef playing (``payload`` is what mpv plays, ``headers`` its
+        http headers) and returns a better sheet, or None to keep it.
+        it runs off the gui thread; ``should_stop()`` turns true when the
+        song changed, ``say(text)`` shows a status line under the lyrics.
+        one aligner at a time; it goes when the plugin stops."""
+        from . import lyric_timing
+        svc = lyric_timing.service()
+        ctx = self._ctx
+
+        def run(sheet, ref, should_stop, say):
+            if not ctx.alive:
+                return None
+            return fn(sheet, ref, lambda: should_stop() or not ctx.alive, say)
+        svc.set_aligner(run)
+        self._aligner = run
+        ctx.on_stop(self.remove_aligner)
+
+    def remove_aligner(self) -> None:
+        """take this plugin's aligner away (its model is gone, say)."""
+        from . import lyric_timing
+        svc = lyric_timing.service()
+        run = getattr(self, "_aligner", None)
+        if run is not None and svc._aligner is run:
+            svc.set_aligner(None)
+        self._aligner = None
+
     def sheet(self):
         return self._ctx._host._lyric_sheet
 
@@ -688,6 +742,28 @@ class _Music:
         seed = (bool(getattr(host.window, "_auto_radio_on_play", True)) if radio is None
                 else bool(radio))
         host.call_window("_play_now", track.ref, seed)
+
+    def search_all(self, query: str, limit: int = 10) -> list[tuple[str, TrackInfo]]:
+        """songs for ``query`` from every source that's switched on, as
+        (source name, track). blocking: call it inside ctx.jobs.run. a
+        source that fails is left out."""
+        from .sources import registry
+        out = []
+        for src in registry().enabled_sources():
+            try:
+                for t in src.search_songs(query, limit) or []:
+                    info = track_info(t)
+                    if info is not None and info.id:
+                        out.append((getattr(src, "name", "") or src.slug, info))
+            except Exception:  # noqa: BLE001 - one source down isn't a failed search
+                continue
+        return out
+
+    def play_at(self, track: TrackInfo, seconds: float) -> None:
+        """play ``track`` and jump to ``seconds`` as soon as it's playing
+        (a swap that feels like the same song carrying on)."""
+        if track is not None and track.ref is not None:
+            self._ctx._host.call_window("_play_track_then_seek", track.ref, float(seconds))
 
     def radio(self, track: TrackInfo) -> None:
         """start a radio from ``track``: it plays now, songs like it follow."""
@@ -997,9 +1073,98 @@ class _Jobs:
         qthreads.join(self.group, wait_ms=1000)
 
 
+class _TrayAction:
+    """what add_tray_action hands back: change it later, or read it."""
+
+    def __init__(self, action) -> None:
+        self._a = action
+
+    def set_label(self, text: str) -> None:
+        self._a.setText(str(text))
+
+    def set_checked(self, on: bool) -> None:
+        # a plugin setting its own item mustn't call its own handler back
+        self._a.blockSignals(True)
+        self._a.setChecked(bool(on))
+        self._a.blockSignals(False)
+
+    def checked(self) -> bool:
+        return self._a.isChecked()
+
+    def set_visible(self, on: bool) -> None:
+        self._a.setVisible(bool(on))
+
+
 class _Ui:
-    def __init__(self, host: "PluginHost") -> None:
+    def __init__(self, host: "PluginHost", ctx: "PluginContext | None" = None) -> None:
         self._h = host
+        self._ctx = ctx
+
+    def add_tray_action(self, label: str, fn: Callable, checkable: bool = False,
+                        checked: bool = False) -> _TrayAction:
+        """an item in the tray menu, above quit. ``fn()`` when clicked, or
+        ``fn(on)`` for a checkable one. it goes when the plugin stops. no
+        tray (some desktops have none): the item exists, nobody sees it."""
+        from PySide6.QtGui import QAction
+        ctx = self._ctx
+        action = QAction(str(label))
+        action.setCheckable(bool(checkable))
+        action.setChecked(bool(checked))
+        if checkable:
+            action.toggled.connect(lambda on: ctx._call(fn, bool(on)))
+        else:
+            action.triggered.connect(lambda _c=False: ctx._call(fn))
+        tray = getattr(self._h.window, "_tray", None)
+        if tray is not None and hasattr(tray, "add_plugin_action"):
+            tray.add_plugin_action(action)
+            ctx.on_stop(lambda: tray.remove_plugin_action(action))
+        ctx.adopt(action)
+        return _TrayAction(action)
+
+    def add_lyrics_toggle(self, label: str, fn: Callable):
+        """a checkable [label] in the lyrics view's row of toggles (karaoke,
+        sweep...). ``fn(on, track)`` runs on a click with the song the view
+        shows. returns a handle: ``set_checked(on)``, ``set_status(text)``
+        (one line under the toggles). it goes when the plugin stops."""
+        from .ui import lyrics as lyrics_ui
+        ctx = self._ctx
+        entry = lyrics_ui.LyricsToggle(label, lambda on, track: ctx._call(fn, on, track))
+        lyrics_ui.add_toggle(entry)
+        ctx.on_stop(lambda: lyrics_ui.remove_toggle(entry))
+        return entry
+
+    def add_settings_button(self, section: str, label: str, fn: Callable,
+                            tooltip: str = "") -> None:
+        """a button in the settings dialog's ``section`` ("power tools",
+        "shortcuts"). ``fn(dialog)`` runs a turn after the click, with the
+        settings dialog to parent a window of your own to. it goes when the
+        plugin stops (an open dialog keeps its button until it closes)."""
+        from .ui import settings as settings_ui
+        ctx = self._ctx
+        entry = settings_ui.add_plugin_button(section, label,
+                                              lambda dialog: ctx._call(fn, dialog), tooltip)
+        ctx.on_stop(lambda: settings_ui.remove_plugin_button(entry))
+
+    def add_visualizer_tile(self, kind: str, label: str, factory: Callable,
+                            knobs: tuple[str, ...] = ()) -> None:
+        """a tile each visualizer slot can show. ``factory(engine)`` builds
+        one (subclass tide.plugin_vis.PlayTile); ``knobs`` are this plugin's
+        choice settings that the tile's menu offers. it goes when the
+        plugin stops; a slot showing it keeps the pick for next time."""
+        from .ui import vis_play
+        ctx = self._ctx
+        if not kind or kind in vis_play.KIND_LABELS:
+            raise ValueError(f"tide already has a tile called {kind!r}")
+        for key in knobs:
+            ctx.settings.desc(key)          # KeyError for an undeclared knob
+
+        def set_knob(key, value) -> None:
+            if ctx.alive and ctx.settings.set(key, value):
+                ctx._host.apply_settings(ctx.slug, {key})
+
+        vis_play.register_tile(vis_play.PluginTile(kind, label, factory, knobs,
+                                                   ctx.settings, set_knob))
+        ctx.on_stop(lambda: vis_play.unregister_tile(kind))
 
     def toast(self, text: str, action_label: str | None = None,
               on_action: Callable | None = None) -> None:
@@ -1009,6 +1174,60 @@ class _Ui:
             return
         from .ui.toast import show_toast
         show_toast(win.toast_host(), text, action_label=action_label, on_action=on_action)
+
+
+class _Sources:
+    """music sources a plugin adds (soundcloud, local files...). they sit
+    in the source panel like tide's own, with the same on switch, and go
+    when the plugin stops."""
+
+    def __init__(self, ctx: "PluginContext") -> None:
+        self._ctx = ctx
+        self._mine: list[str] = []
+        ctx.on_stop(self._unregister_all)
+
+    def _settings(self):
+        return getattr(self._ctx._host.window, "_settings", None)
+
+    def register(self, source, on: bool = True) -> None:
+        """add ``source`` to tide. ``on``: whether it starts switched on when
+        tide has never had a switch for it; one from before (tide 2's own
+        soundcloud, or the source panel since) is kept."""
+        from .sources import registry
+        slug = getattr(source, "slug", "")
+        if not slug:
+            raise ValueError("a source needs a slug")
+        reg = registry()
+        if reg.get(slug) is not None and slug not in self._mine:
+            raise ValueError(f"tide already has a source called {slug}")
+        s = self._settings()
+        enabled_map = dict(getattr(s, "sources_enabled", {}) or {})
+        if slug not in enabled_map:
+            enabled_map[slug] = bool(on)
+            if s is not None:
+                s.sources_enabled = enabled_map
+                try:
+                    from . import settings as settings_module
+                    settings_module.save_fields(s, "sources_enabled")
+                except Exception:  # noqa: BLE001 - tests run without a file
+                    pass
+        reg.register(source, enabled=bool(enabled_map.get(slug, True)))
+        self._mine.append(slug)
+        # the user's active source comes back when its plugin does
+        if s is not None and getattr(s, "active_source", "") == slug and reg.is_enabled(slug):
+            reg.set_active(slug)
+
+    def is_on(self, slug: str) -> bool:
+        """is that source switched on in the source panel?"""
+        from .sources import registry
+        return registry().is_enabled(slug)
+
+    def _unregister_all(self) -> None:
+        from .sources import registry
+        reg = registry()
+        for slug in reversed(self._mine):
+            reg.unregister(slug)
+        self._mine.clear()
 
 
 class _Paths:
@@ -1055,9 +1274,10 @@ class PluginContext:
         self.theme = _Theme(self._relay)
         self.motion = _Motion()
         self.jobs = _Jobs(self)
-        self.ui = _Ui(host)
+        self.ui = _Ui(host, self)
         self.paths = _Paths(manifest.slug)
         self._on_stop: list[Callable] = []
+        self.sources = _Sources(self)
         self._adopted: list = []
         self.speech = _Speech(self)
 
@@ -1129,6 +1349,10 @@ class PluginRecord:
     errors: deque = field(default_factory=deque)
     overrides: str = ""            # the origin this one replaced, if any
     detail: str = ""               # the plugin's own status line, while it runs
+    stamp: float = 0.0             # plugin.toml's mtime when it was read
+
+    def __post_init__(self) -> None:
+        self.stamp = _toml_stamp(self.manifest)
 
     @property
     def running(self) -> bool:
@@ -1136,9 +1360,12 @@ class PluginRecord:
 
     def missing(self) -> list[str]:
         out = []
+        vendor = self.manifest.vendor
         for name in self.manifest.requires:
             try:
-                found = importlib.util.find_spec(name) is not None
+                found = (vendor.is_dir() and importlib.machinery.PathFinder.find_spec(
+                    name.split(".")[0], [str(vendor)]) is not None) \
+                    or importlib.util.find_spec(name) is not None
             except (ImportError, ValueError):
                 found = False
             if not found:
@@ -1155,9 +1382,17 @@ class PluginRecord:
         return ""
 
 
+def _toml_stamp(m: Manifest) -> float:
+    try:
+        return (m.path / "plugin.toml").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 class PluginHost(QObject):
     notice = Signal(str)        # a line for a toast
     changed = Signal(str)       # a plugin's status or switch changed
+    listing_changed = Signal()  # a plugin was installed or removed
     _too_many = Signal(str)     # crosses threads: errors from plugin threads
 
     def __init__(self, window=None, player=None, queue=None, *,
@@ -1185,6 +1420,10 @@ class PluginHost(QObject):
         self._prev_thread_hook = None
         self._logged: set[str] = set()
         self._too_many.connect(self._switch_off_for_errors)
+        self._vendor_paths: dict[str, str] = {}
+        # tide --no-plugins: nothing starts this run, not even a fresh
+        # install (it starts next launch)
+        self.paused_run = False
         found = discover(roots)
         self.broken = found.broken
         self._records: dict[str, PluginRecord] = {}
@@ -1209,7 +1448,9 @@ class PluginHost(QObject):
         rec = self._records.get(slug)
         if rec is None:
             return False
-        return self._enabled.get(slug, rec.manifest.default)
+        # installed from the store = on, unless safe mode or too many
+        # errors switched it off since
+        return self._enabled.get(slug, rec.manifest.origin == "store")
 
     def records(self) -> list[PluginRecord]:
         return sorted(self._records.values(), key=lambda r: r.manifest.name.lower())
@@ -1373,7 +1614,9 @@ class PluginHost(QObject):
             self.changed.emit(slug)
             return False
         rec.manifest = m
+        rec.stamp = _toml_stamp(m)
         rec.settings = PluginSettings(m, self.settings_dir / f"{slug}.toml")
+        self.changed.emit(slug)
         return self._start(rec) if self.is_enabled(slug) else True
 
     def apply_settings(self, slug: str, keys) -> None:
@@ -1387,12 +1630,77 @@ class PluginHost(QObject):
                 self._stop(rec)
         self.uninstall_hooks()
 
+    # ---- the store adds and removes plugins while tide runs ----
+
+    def rescan(self) -> list[str]:
+        """read the roots again: start what's new and switched on, stop and
+        forget what's gone, restart what changed folder (an update) or had
+        its plugin.toml edited. returns the slugs that came, went or
+        changed."""
+        found = discover(self._roots)
+        broken_changed = found.broken != self.broken
+        self.broken = found.broken
+        touched = []
+        for slug in [s for s in self._records if s not in found.manifests]:
+            rec = self._records.pop(slug)
+            if rec.running:
+                self._stop(rec)
+            touched.append(slug)
+        for slug, m in found.manifests.items():
+            rec = self._records.get(slug)
+            if rec is not None and rec.manifest.path == m.path \
+                    and rec.manifest.version == m.version and rec.stamp == _toml_stamp(m):
+                rec.overrides = found.overrides.get(slug, "")
+                continue
+            was_running = rec is not None and rec.running
+            if was_running:
+                self._stop(rec)
+            new = PluginRecord(m, PluginSettings(m, self.settings_dir / f"{slug}.toml"))
+            new.overrides = found.overrides.get(slug, "")
+            self._records[slug] = new
+            touched.append(slug)
+            if self.is_enabled(slug):
+                self._start(new)
+        if touched or broken_changed:
+            self.listing_changed.emit()
+        return touched
+
+    def installed(self, slug: str) -> bool:
+        """after the store unpacked ``slug``: pick it up and switch it on.
+        False if it didn't start (its status says why)."""
+        self._enabled.pop(slug, None)      # installing is switching it on
+        self._save_state()
+        self.rescan()
+        rec = self._records.get(slug)
+        if rec is None:
+            return False
+        if not rec.running and self.is_enabled(slug):
+            return self._start(rec)
+        return rec.running
+
+    def release(self, slug: str) -> None:
+        """before the store moves ``slug``'s folder: stop it."""
+        rec = self._records.get(slug)
+        if rec is not None and rec.running:
+            self._stop(rec)
+
+    def uninstalled(self, slug: str) -> None:
+        """after the store removed ``slug``'s folder."""
+        self._enabled.pop(slug, None)
+        self._save_state()
+        self.rescan()
+
     # ---- start / stop ----
 
     def _module_prefix(self, m: Manifest) -> str:
         return f"{MODULE_ROOT}.{m.ident}"
 
     def _import_entry(self, m: Manifest):
+        if m.vendor.is_dir():
+            path = str(m.vendor)
+            if path not in sys.path:
+                sys.path.insert(0, path)
+            self._vendor_paths[m.slug] = path
         if MODULE_ROOT not in sys.modules:
             root = types.ModuleType(MODULE_ROOT)
             root.__path__ = []
@@ -1410,10 +1718,24 @@ class PluginHost(QObject):
         prefix = self._module_prefix(m)
         for name in [n for n in sys.modules if n == prefix or n.startswith(prefix + ".")]:
             del sys.modules[name]
+        vendor = self._vendor_paths.pop(m.slug, None)
+        if vendor is not None:
+            while vendor in sys.path:
+                sys.path.remove(vendor)
+            sys.path_importer_cache.pop(vendor, None)
+            under = vendor + os.sep
+            for name, mod in list(sys.modules.items()):
+                where = getattr(mod, "__file__", None) or ""
+                if where.startswith(under):
+                    del sys.modules[name]
         importlib.invalidate_caches()
 
     def _start(self, rec: PluginRecord) -> bool:
         m = rec.manifest
+        if self.paused_run:
+            rec.status = "off for this run (tide --no-plugins)"
+            self.changed.emit(m.slug)
+            return False
         why = rec.blocked()
         if why:
             rec.status = why

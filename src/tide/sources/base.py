@@ -499,3 +499,22 @@ class MusicSource(ABC):
     def set_taste_profile(self, artists: list) -> bool:
         """Select these artists as the user's taste seeds."""
         raise NotSupportedError(f"{self.slug}: set_taste_profile")
+
+
+class NullSource(MusicSource):
+    """No music at all: what the window binds to when no source is on
+    (a fresh tide with youtube music signed out), and what tests hand the
+    window. Searches find nothing and nothing plays."""
+
+    slug = "none"
+    name = "no source"
+    short_tag = "--"
+
+    def status_text(self) -> str:
+        return "no source is on"
+
+    def search_songs(self, query: str, limit: int = 20) -> list[Track]:
+        return []
+
+    def resolve_stream(self, track: Track) -> StreamRef:
+        raise NotSupportedError("no source is on")

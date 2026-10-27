@@ -49,6 +49,8 @@ class TrackInfo:
     source: str = ""
     link: str = ""             # a web page for the track, "" when there isn't one
     art_url: str = ""
+    artist_link: str = ""      # the first artist's page, "" when there isn't one
+    album_link: str = ""
     # tide's own record, so handing this back to ctx (play it, queue it)
     # plays exactly what was found. opaque to plugins.
     ref: object = field(default=None, compare=False, repr=False)
@@ -72,15 +74,83 @@ class Plugin(Protocol):
     def start(self, ctx) -> None: ...
 
 
+# ---- for plugins that add a music source (ctx.sources.register) ----
+# a source subclasses MusicSource and hands out Track records; tide's
+# player, queue, search and library take it from there. the stream cache
+# keeps resolved urls across launches, per source.
+from .sources.base import (  # noqa: E402 - the source plugin surface
+    AlbumDetail, AlbumEntry, ArtistDetail, ArtistEntry, MusicSource, NotSupportedError,
+    PlaylistDetail, PlaylistEntry, Shelf, ShelfItem, StreamRef, Track, safe_int,
+)
+
+
+# ---- for plugins that time lyrics (ctx.lyrics.add_aligner) ----
+from .lyric_words import Word, WordLine, shift as shift_line, split_words  # noqa: E402
+
+
+def store_art(key: str, data: bytes) -> str:
+    """a cover read from a file on this computer, kept in tide's art cache.
+    returns the url to put in Track.thumbnail. ``key`` names it (the same
+    key keeps the first image stored). any thread."""
+    from .ui import art_cache
+    return art_cache.store_local(key, data)
+
+
+def stream_cache_get(source: str, key: str) -> str | None:
+    from . import cache
+    return cache.get_stream_url(source, key)
+
+
+def stream_cache_put(source: str, key: str, url: str, ttl_seconds: float) -> None:
+    from . import cache
+    cache.put_stream_url(source, key, url, ttl_seconds=ttl_seconds)
+
+
+STREAM_NEVER_EXPIRES = float("inf")
+
+
 def track_link(video_id: str, source: str) -> str:
     """The public page for a track, or "" (local files have none)."""
-    if not video_id:
-        return ""
-    if video_id.startswith(("https://", "http://")):
-        return video_id
-    if source == "ytmusic":
-        return f"https://music.youtube.com/watch?v={video_id}"
+    return links_for(video_id, source)[0]
+
+
+def _first_id(value) -> str:
+    """The ``id`` of an artists list's first entry, or of an album dict."""
+    if isinstance(value, list) and value:
+        value = value[0]
+    if isinstance(value, dict):
+        return str(value.get("id") or "")
     return ""
+
+
+def links_for(video_id: str, source: str, extras: dict | None = None) -> tuple[str, str, str]:
+    """(track, first artist, album) pages, as far as the source has them.
+    https only, so they're safe to hand to discord or a browser. local files
+    and self-hosted servers have none."""
+    from urllib.parse import quote
+    vid = str(video_id or "")
+    extras = extras or {}
+    artist_id = _first_id(extras.get("artists"))
+    album_id = _first_id(extras.get("album"))
+    track = artist = album = ""
+    if vid.startswith("https://"):
+        track = vid                        # soundcloud, bandcamp, mixcloud: the permalink
+    elif source == "ytmusic" and vid:
+        track = f"https://music.youtube.com/watch?v={quote(vid)}"
+        if artist_id:
+            artist = f"https://music.youtube.com/channel/{quote(artist_id)}"
+        if album_id:
+            album = f"https://music.youtube.com/browse/{quote(album_id)}"
+    elif source == "spotify" and vid:
+        track = f"https://open.spotify.com/track/{quote(vid)}"
+        if artist_id:
+            artist = f"https://open.spotify.com/artist/{quote(artist_id)}"
+        if album_id:
+            album = f"https://open.spotify.com/album/{quote(album_id)}"
+
+    def ok(url: str) -> str:
+        return url if url.startswith("https://") and len(url) <= 512 else ""
+    return ok(track), ok(artist), ok(album)
 
 
 def track_info(track) -> TrackInfo | None:
@@ -89,6 +159,7 @@ def track_info(track) -> TrackInfo | None:
         return None
     source = str(getattr(track, "source", "") or "")
     vid = str(getattr(track, "video_id", "") or "")
+    link, artist_link, album_link = links_for(vid, source, getattr(track, "extras", None))
     return TrackInfo(
         id=vid,
         title=str(getattr(track, "title", "") or ""),
@@ -96,8 +167,9 @@ def track_info(track) -> TrackInfo | None:
         album=str(getattr(track, "album", "") or ""),
         duration=int(getattr(track, "duration_seconds", 0) or 0),
         source=source,
-        link=track_link(vid, source),
+        link=link,
         art_url=str(getattr(track, "thumbnail", "") or ""),
+        artist_link=artist_link, album_link=album_link,
         ref=track,
     )
 

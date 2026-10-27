@@ -4,6 +4,32 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [3.0.0] — 2026-10-22 — plugins
+
+tide 3 ships with less. get the rest from the plugin store.
+
+### Added
+- **the plugin store.** the plugins button in the rail, above settings. pick a plugin, read what it does, what it needs and what it can touch, and click install: it's running, no restart. uninstall stops it and gives you a few seconds to undo. installed plugins with a newer version get an update button and a dot on the rail. the store's list is signed, and every download is checked against it before anything is unpacked.
+- **ten plugins to start with:** discord presence, extra sources (soundcloud, bandcamp, mixcloud), local files, more visualizer tiles, precise lyric timing, tide powertools (the theme, glyph and keymap editors), the instrumental finder, steamvr, lights (openrgb and wled) and kde desktop. a plugin's settings are on its page in the store and apply as you change them.
+- **plugin of the week**, at the top of the store.
+- **the halo backdrop:** a glow in the cover's colour round the outside of the window, breathing with the bass. clicks on the glow go to whatever's behind it. maximized and fullscreen windows go without.
+- **local files shows covers**, from a cover.jpg in the folder or the art inside the files.
+- **helium** as a browser to sign in from.
+- an off switch for the update check (settings → integrations → updates).
+- for plugin authors: plugins can now add a music source, a visualizer tile, a tray item, a toggle in the lyrics view, a button in settings and a word timing aligner. the guide is the [tide-plugins](https://github.com/captiencelovesarch/tide-plugins) readme. a plugin you drop in `~/.config/tide/plugins/` still works, marked not from the store.
+
+### Changed
+- **a fresh tide plays youtube music and nothing else.** everything above that isn't youtube music left the core for the store. if you used any of it, tide installs its plugin for you the first time it starts, with your settings, and says so. offline, it tries again next launch.
+- karaoke mode and the word sweep come with precise lyric timing. without it, lyrics are plain synced lines.
+- the settings dialog's plugins tab is one line pointing at the store.
+- the visualizer's river, spectrogram, halo and tapper are the more visualizer tiles plugin. a slot showing one keeps your pick while the plugin's away.
+- listenbrainz is gone. it wasn't moved to a plugin.
+
+### Fixed
+- **refresh token signed you out.** it took the first browser with any youtube cookie, and a browser that was never signed in can keep one. it now takes a browser that's really signed in, the one you used last first.
+- a session left on a soundcloud or local song waits for that plugin to start instead of failing to load.
+- with the halo on, toasts stay inside the window, where their ✕ works.
+
 ## [2.3.0] — 2026-10-16 — the remaster
 
 ### Added

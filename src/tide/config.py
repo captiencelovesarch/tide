@@ -27,7 +27,7 @@ if sys.platform == "win32":
     # spots: config and data roam, cache stays on this machine.
     _roaming = Path(os.environ.get("APPDATA") or Path.home() / "AppData/Roaming")
     _local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local")
-    CONFIG_DIR: Path = Path(os.environ.get("XDG_CONFIG_HOME") or _roaming) / APP_NAME
+    _DEFAULT_CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or _roaming) / APP_NAME
     DATA_DIR: Path = Path(os.environ.get("XDG_DATA_HOME") or _roaming) / APP_NAME
     CACHE_DIR: Path = (
         Path(os.environ["XDG_CACHE_HOME"]) / APP_NAME
@@ -35,13 +35,30 @@ if sys.platform == "win32":
         else _local / APP_NAME / "cache"
     )
 else:
-    CONFIG_DIR: Path = _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME
+    _DEFAULT_CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config") / APP_NAME
     CACHE_DIR: Path = _xdg("XDG_CACHE_HOME", ".cache") / APP_NAME
     DATA_DIR: Path = _xdg("XDG_DATA_HOME", ".local/share") / APP_NAME
 
-OAUTH_FILE: Path = CONFIG_DIR / "oauth.json"
-BROWSER_AUTH_FILE: Path = CONFIG_DIR / "browser.json"
-SPOTIFY_AUTH_FILE: Path = CONFIG_DIR / "spotify.json"
+# TIDE_CONFIG_DIR moves tide's own config folder (a dev build on a copy of
+# your config). Moving XDG_CONFIG_HOME instead hides every browser's
+# profile from the cookie import too. Sign-ins stay in the real folder:
+# youtube music rotates its cookies, so a copy of them goes stale the
+# moment the other tide rotates, and the copy showed "token expired".
+_SIGNIN_DIR: Path | None = (_DEFAULT_CONFIG_DIR
+                            if os.environ.get("TIDE_CONFIG_DIR") else None)
+CONFIG_DIR: Path = (Path(os.environ["TIDE_CONFIG_DIR"]).expanduser()
+                    if os.environ.get("TIDE_CONFIG_DIR")
+                    else _DEFAULT_CONFIG_DIR)
+
+
+def signin_dir() -> Path:
+    """where sign-ins live: CONFIG_DIR, unless TIDE_CONFIG_DIR moved it."""
+    return _SIGNIN_DIR if _SIGNIN_DIR is not None else CONFIG_DIR
+
+
+OAUTH_FILE: Path = signin_dir() / "oauth.json"
+BROWSER_AUTH_FILE: Path = signin_dir() / "browser.json"
+SPOTIFY_AUTH_FILE: Path = signin_dir() / "spotify.json"
 WEBVIEW_PROFILE_DIR: Path = DATA_DIR / "webview"
 SETTINGS_FILE: Path = CONFIG_DIR / "settings.toml"
 STREAM_CACHE_FILE: Path = CACHE_DIR / "streams.json"
@@ -59,6 +76,11 @@ PLUGIN_SETTINGS_DIR: Path = CONFIG_DIR / "plugin-settings"
 PLUGIN_DATA_DIR: Path = DATA_DIR / "plugins"
 PLUGIN_CACHE_DIR: Path = CACHE_DIR / "plugins"
 PLUGIN_START_STAMP: Path = CACHE_DIR / "plugin-starting"
+# what the store installed (store.py); its downloads, previews and the
+# signed index it read last live under PLUGIN_CACHE_DIR
+PLUGIN_STORE_DIR: Path = PLUGIN_DATA_DIR / "installed"
+# plugins to install once the store answers (plugin_migrate.py)
+PLUGIN_PENDING_FILE: Path = CONFIG_DIR / "plugins-pending.toml"
 
 
 def ensure_dirs() -> None:

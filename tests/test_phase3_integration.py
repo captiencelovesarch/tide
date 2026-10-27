@@ -25,7 +25,7 @@ from tide import config, glyphs, presets, theming
 from tide import layout as layout_module
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui import motion as motion_module
 from tide.ui.variants import SpringVolume
 from tide.ui_sounds import SOUND_KEYS, UiSoundPlayer
@@ -103,7 +103,7 @@ class _WindowCase(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.w._settings = settings
         return self.w
 

@@ -262,8 +262,8 @@ class FullscreenPlayer(QWidget):
         # Chrome that belongs to the in-app panel, not this surface.
         for chrome in (self.lyrics_panel.heading,
                        self.lyrics_panel.karaoke_check,
-                       self.lyrics_panel.mute_btn,
-                       self.lyrics_panel.swap_status):
+                       self.lyrics_panel.plugin_row,
+                       self.lyrics_panel.plugin_status):
             chrome.hide()
         self.lyrics_panel.setSizePolicy(QSizePolicy.Expanding,
                                         QSizePolicy.Expanding)

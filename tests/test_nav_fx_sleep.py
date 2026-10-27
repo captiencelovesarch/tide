@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication
 
 from tide import theming
 from tide.playback import MpvBackend, PlaybackRouter
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui import nav_icons
 
 
@@ -32,7 +32,7 @@ def _window():
     from tide.ui.window import MainWindow
     router = PlaybackRouter()
     router.register(MpvBackend())
-    return MainWindow(LocalSource(), router)
+    return MainWindow(NullSource(), router)
 
 
 class FxNavTabTest(unittest.TestCase):

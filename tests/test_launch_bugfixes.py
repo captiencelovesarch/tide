@@ -17,7 +17,7 @@ from tide import theming
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.settings import Settings
 from tide.sources import registry as source_registry
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 
 
 def _app() -> QApplication:
@@ -64,6 +64,45 @@ class _RegistrySandbox(unittest.TestCase):
         reg._active = self._saved[2]
 
 
+class RestoreWaitsForAPluginSourceTest(_RegistrySandbox):
+    """3.0: soundcloud and local files come from plugins, which start
+    after the window. A session left on one of their songs must wait for
+    the source instead of failing to resolve, and say which plugin it
+    needs meanwhile."""
+
+    def test_the_song_loads_once_its_source_arrives(self) -> None:
+        from tide import session as session_module
+        from tide.sources.base import StreamRef
+        from tide.ui.window import MainWindow
+        theming.manager().apply("nord")
+        router = PlaybackRouter()
+        router.register(MpvBackend())
+        w = MainWindow(NullSource(), router)
+        self.addCleanup(w.close)
+        loaded = []
+        w.player.load_ref = lambda ref: loaded.append(ref.payload)
+        w.player.pause = lambda: None
+        snap = session_module.Snapshot(
+            tracks=[{"video_id": "https://soundcloud.com/a/b", "title": "t", "artists": "a",
+                     "source": "soundcloud"}],
+            current_index=0, position_seconds=0.0)
+        w.restore_session(snap)
+        self.assertIn("extra sources plugin", w.statusBar().currentMessage())
+        self.assertEqual(loaded, [])
+
+        class SoundCloud(NullSource):
+            slug = "soundcloud"
+
+            def resolve_stream(self, track):
+                return StreamRef(backend="mpv", payload="https://cdn/b.mp3")
+        source_registry().register(SoundCloud())
+        for _ in range(100):
+            QTest.qWait(20)
+            if loaded:
+                break
+        self.assertEqual(loaded, ["https://cdn/b.mp3"])
+
+
 class CsdKeepsWindowVisibleTest(unittest.TestCase):
     """setWindowFlag hides a mapped window; set_csd_titlebar must re-show.
 
@@ -79,7 +118,7 @@ class CsdKeepsWindowVisibleTest(unittest.TestCase):
         from tide.ui.window import MainWindow
         router = PlaybackRouter()
         router.register(MpvBackend())
-        w = MainWindow(LocalSource(), router)
+        w = MainWindow(NullSource(), router)
         try:
             w.show()
             QTest.qWait(30)
@@ -173,7 +212,7 @@ class DisabledSpotifyStaysQuietTest(_RegistrySandbox):
         source_registry().register(fake, enabled=False)
         router = PlaybackRouter()
         router.register(MpvBackend())
-        w = MainWindow(LocalSource(), router)
+        w = MainWindow(NullSource(), router)
         toasts = []
         real = toast_module.show_toast
         toast_module.show_toast = lambda *a, **k: toasts.append(a)

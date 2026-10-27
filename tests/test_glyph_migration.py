@@ -21,7 +21,7 @@ from tide.player import PlayState
 from tide.playback import MpvBackend, PlaybackRouter
 from tide.queue import RepeatMode
 from tide.settings import Settings
-from tide.sources.local import LocalSource
+from tide.sources.base import NullSource
 from tide.ui.headings import line_heading
 from tide.ui.window import MainWindow
 
@@ -33,7 +33,7 @@ def _app() -> QApplication:
 def _window() -> MainWindow:
     router = PlaybackRouter()
     router.register(MpvBackend())
-    return MainWindow(LocalSource(), router)
+    return MainWindow(NullSource(), router)
 
 
 def _destroy_window(w: MainWindow) -> None:
@@ -301,6 +301,7 @@ class BackdropChoicesMigrationTest(unittest.TestCase):
         ("ripples", "ripples"),
         ("stage lights", "stage"),
         ("rim light", "rimlight"),
+        ("halo", "halo"),
         ("liquid cover", "liquid"),
         ("contours", "contours"),
         ("vinyl", "vinyl"),
@@ -315,6 +316,7 @@ class BackdropChoicesMigrationTest(unittest.TestCase):
         ("ripples · every kick drops a ring on the water", "ripples"),
         ("stage lights · beams sweep through the haze", "stage"),
         ("rim light · edges hold the light", "rimlight"),
+        ("halo · the cover's colour glows around the window", "halo"),
         ("liquid cover · the album art, melted", "liquid"),
         ("contours · topo lines that shift with the bass", "contours"),
         ("vinyl · the grooves catch the light", "vinyl"),

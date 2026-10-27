@@ -99,7 +99,7 @@ def save_browser_auth(
 
 
 def _meta_file() -> Path:
-    return config.CONFIG_DIR / "browser_meta.json"
+    return config.signin_dir() / "browser_meta.json"
 
 
 def session_expires_at() -> float | None:
@@ -124,6 +124,15 @@ def seconds_until_expiry() -> float | None:
     return None if at is None else at - time.time()
 
 
+def _db_mtime(path) -> float:
+    if not isinstance(path, Path):
+        return 0.0
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def refresh_from_browser() -> str | None:
     """Re-harvest cookies from whichever browser still holds a live YouTube
     Music session and overwrite the saved auth. Returns the profile label on
@@ -141,7 +150,11 @@ def refresh_from_browser() -> str | None:
     from . import browser_import as bi
 
     last_error: Exception | None = None
-    for profile in bi.available_profiles():
+    # the browser you used last first: its session is the freshest, and
+    # with two signed in (an old one and the one you moved to) it's yours
+    profiles = sorted(bi.available_profiles(),
+                      key=lambda p: _db_mtime(getattr(p, "cookies_path", None)), reverse=True)
+    for profile in profiles:
         try:
             result = bi.import_cookies(profile)
         except Exception as exc:
@@ -298,5 +311,5 @@ def clear_saved_auth() -> None:
     config.OAUTH_FILE.unlink(missing_ok=True)
     # Drop the live jar so a signed-out user resolves streams anonymously
     # again (and a re-sign-in seeds it fresh), with its rotation record.
-    (config.CONFIG_DIR / "yt_cookies.txt").unlink(missing_ok=True)
-    (config.CONFIG_DIR / "yt_session.json").unlink(missing_ok=True)
+    (config.signin_dir() / "yt_cookies.txt").unlink(missing_ok=True)
+    (config.signin_dir() / "yt_session.json").unlink(missing_ok=True)

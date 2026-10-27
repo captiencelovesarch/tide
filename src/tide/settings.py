@@ -19,33 +19,6 @@ from . import config
 @dataclass
 class Settings:
     theme: str = "brutalist-mono"
-    discord_enabled: bool = False
-    discord_app_id: str = ""
-    # Show the live synced-lyric line in the presence "state" field
-    # (replaces artist · album while a line is active). Off by default —
-    # lyrics get broadcast to everyone who can see the profile.
-    discord_lyrics_enabled: bool = False
-    # v1.4 — presence customization. Templates are format-style strings with
-    # {title} {artists} {album} {source} placeholders; empty = the classic
-    # defaults ("{title}" / "{artists} · {album}"). A live lyric still takes
-    # over the state line while discord_lyrics_enabled is on.
-    discord_details_template: str = ""
-    discord_state_template: str = ""
-    # Keep a "⏸ paused" presence up instead of clearing it entirely.
-    discord_show_paused: bool = False
-    # Include the elapsed/total progress-bar timestamps.
-    discord_show_progress: bool = True
-    # Presence verb: "listening" | "playing" | "watching".
-    discord_activity_type: str = "listening"
-    # What the member list shows after the verb: "song" (line 1) | "app".
-    discord_status_display: str = "song"
-    # Link title / artist / cover to the track's page, with a listen button.
-    discord_links: bool = True
-    # The tray's "hide from discord" switch. Kept across restarts, so a
-    # hidden presence doesn't come back on its own.
-    discord_hidden: bool = False
-    # Never share a local file.
-    discord_hide_local: bool = False
     volume: int = 80
     sleep_preset_minutes: int = 30
     mini_mode_default: bool = False
@@ -83,12 +56,14 @@ class Settings:
     # ---- the visualizer tab (2.3 remaster, ui/vis_deck.py + vis_play.py) ----
     # Tile layout: "single" | "split" | "stack" | "trio" | "quad".
     visualizer_layout: str = "stack"
-    # What each slot shows (vis_play.TILE_KINDS), in layout order; slots
+    # What each slot shows (vis_play.tile_kinds(): a plugin's tile too), in
+    # layout order; slots
     # past the layout's count are kept for when it grows back.
     visualizer_tile_1: str = "spectrum"
     visualizer_tile_2: str = "deck"
     visualizer_tile_3: str = "lyrics"
-    visualizer_tile_4: str = "halo"
+    # (tide 2.3's default fourth tile was the halo, a store tile since 3.0)
+    visualizer_tile_4: str = "scope"
     # What a "classic renderer" tile draws: "theme" (the theme's own pick)
     # or one of the pre-2.3 renderer slugs.
     visualizer_classic: str = "theme"
@@ -109,17 +84,6 @@ class Settings:
     visualizer_fps: int = 60
     # Title · artist over the first spectrum / mirror / scope tile.
     visualizer_caption: bool = True
-    # Interactive tile knobs (vis_play.py).
-    visualizer_river_view: str = "near"         # "near" (16 s) | "far" (48 s) | "whole" song
-    visualizer_spectrogram_history: int = 12    # seconds shown: 6 | 12 | 24
-    visualizer_spectrogram_contrast: str = "normal"  # "soft" | "normal" | "punchy"
-    visualizer_halo_spokes: int = 96            # 48 | 96 | 144
-    visualizer_halo_punch: str = "gentle"       # cover kick: "off" | "gentle" | "hard"
-    visualizer_tapper_target: str = "beats"     # "beats" | "downbeats" | "kicks"
-    visualizer_tapper_window: str = "normal"    # "tight" | "normal" | "loose"
-    visualizer_tapper_offset: int = 0           # ms your taps are judged earlier by
-    listenbrainz_enabled: bool = False
-    listenbrainz_token: str = ""
     layout: str = "classic"
     layout_overrides: dict = field(default_factory=dict)
     adaptive_accent: bool = False
@@ -182,9 +146,8 @@ class Settings:
     lyrics_word_timing: str = "sources"
     # Ask NetEase Cloud Music for word-synced lyrics (sends title + artist).
     lyrics_netease: bool = True
-    # Time words against the track's own audio (lyric_align; needs
-    # python-onnxruntime-cpu + a 95 MB model the dialog downloads).
-    lyrics_precise: bool = False
+    # (precise timing, against the track's own audio, is the lyric timing
+    # store plugin since 3.0: installed = on)
     # Lyrics vs the playhead, ms; positive shows them later.
     lyrics_offset_ms: int = 0
     # Window + tray icon: "theme" draws it in the active theme's colours
@@ -194,6 +157,9 @@ class Settings:
     # on a light one, from the system's light/dark setting), "app" is the
     # window icon.
     tray_icon: str = "mono"
+    # the once-a-launch github release check (updates.py). off: tide never
+    # asks. flatpak builds skip it whatever this says.
+    check_updates: bool = True
     # Font-family override. Empty = use the active theme's typography.family.
     # When set, the theming manager pushes this family on every theme apply.
     font_family_override: str = ""
@@ -228,17 +194,13 @@ class Settings:
     active_source: str = "ytmusic"
     federated_search: bool = False
     # Per-source on/off. Keys are source slugs; values are bools.
+    # Sources from plugins (soundcloud, local files...) keep their switch
+    # here too, under their own slug, once their plugin has added them.
     sources_enabled: dict = field(default_factory=lambda: {
         "ytmusic": True,
-        "soundcloud": True,
-        "bandcamp": True,
-        "mixcloud": False,
-        "local": True,
         "subsonic": False,
         "spotify": False,
     })
-    local_music_dir: str = ""
-    local_auto_index: bool = True
     # v1.2.1 — Spotify (Librespot backend)
     # (spotify_client_id lived here through v1.x, unread; deleted in 2.0
     # — load()'s unknown-key filter drops the stale key from old files)

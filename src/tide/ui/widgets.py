@@ -7,7 +7,7 @@ tokens and repaint here.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QByteArray, QEvent, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPainterPath, QPen,
     QPixmap,
@@ -679,18 +679,23 @@ class MonoProgress(QWidget):
         self._enabled = False
         self.update()
 
+    def seek_span(self) -> tuple[int, int]:
+        """(x, width) of the cells between the brackets. The text bar is
+        only as wide as its cells, not the widget, so seeks and the
+        waveform above it (waveform_seek) both measure against this."""
+        fm = QFontMetrics(self.font())
+        x = fm.horizontalAdvance("[")
+        cells = max(fm.horizontalAdvance(self.FILLED_CHAR * self.CELLS),
+                    fm.horizontalAdvance(self.EMPTY_CHAR * self.CELLS))
+        return x, max(0, min(cells, self.width() - 2 * x))
+
     def mousePressEvent(self, event) -> None:
         if not self._enabled or self._duration <= 0:
             return
-        x = event.position().x()
-        # Inner content rect leaves a single character of padding at each end
-        # for the [ and ] brackets so seeks land where the user sees fill.
-        fm = QFontMetrics(self.font())
-        bracket_w = fm.horizontalAdvance("[")
-        inner = QRect(int(bracket_w), 0, int(self.width() - 2 * bracket_w), self.height())
-        if inner.width() <= 0:
+        x0, w = self.seek_span()
+        if w <= 0:
             return
-        frac = max(0.0, min(1.0, (x - inner.x()) / inner.width()))
+        frac = max(0.0, min(1.0, (event.position().x() - x0) / w))
         self.seek_requested.emit(frac * self._duration)
 
     def paintEvent(self, event) -> None:
@@ -1099,9 +1104,8 @@ class NowPlayingLabel(QWidget):
                                  tuple[str, ...] | None] = (None, None)
         self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
-        from . import scale as _scale
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setMinimumHeight(_scale.px(40))
+        self.setMinimumHeight(self._min_height())
         self.setCursor(Qt.PointingHandCursor)
         # A title wider than the strip scrolls instead of losing its tail.
         # The tooltip is the always-available answer underneath it: it
@@ -1268,11 +1272,21 @@ class NowPlayingLabel(QWidget):
         self._marquee.stop()
         super().hideEvent(ev)
 
+    def _min_height(self) -> int:
+        from . import scale as _scale
+        return _scale.px(40)
+
     def _on_theme(self, theme) -> None:
         self._theme = theme
-        from . import scale as _scale
-        self.setMinimumHeight(_scale.px(40))
+        self.setMinimumHeight(self._min_height())
         self.update()
+
+    def changeEvent(self, ev) -> None:
+        # The ui scale and font overrides land as font changes; a label
+        # that sizes from its fonts has to grow with them.
+        if ev.type() == QEvent.FontChange:
+            self.setMinimumHeight(self._min_height())
+        super().changeEvent(ev)
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.LeftButton:

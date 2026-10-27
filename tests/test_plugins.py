@@ -1,6 +1,6 @@
 """The plugin host (plugin_host.py): manifests, discovery, on/off without a
 restart, undo by construction, settings that only exist if declared, safe
-mode, and error counting. Every bundled plugin's manifest is checked too.
+mode, and error counting.
 
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/
 """
@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 from tide import plugin_api, plugin_host
 from tide.plugin_host import (
-    BUNDLED_DIR, ManifestError, PluginHost, PluginSettings, discover, parse_manifest,
+    ManifestError, PluginHost, PluginSettings, discover, parse_manifest,
 )
 from tide.sources.base import Track
 
@@ -116,9 +116,9 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="tide-plugins-"))
         self.user = self.tmp / "user"
-        self.bundled = self.tmp / "bundled"
+        self.store_root = self.tmp / "store"
         self.user.mkdir()
-        self.bundled.mkdir()
+        self.store_root.mkdir()
         self.events = []
         sys.modules["tests_plugin_events"] = self.events
         self.player, self.queue = FakePlayer(), FakeQueue()
@@ -138,7 +138,7 @@ class Base(unittest.TestCase):
 
     def host(self, **kw):
         h = PluginHost(None, self.player, self.queue,
-                       roots=[(self.bundled, "bundled"), (self.user, "yours")],
+                       roots=[(self.store_root, "store"), (self.user, "yours")],
                        state_file=self.tmp / "plugins.toml",
                        settings_dir=self.tmp / "plugin-settings",
                        stamp=self.tmp / "plugin-starting", data_dir=self.tmp / "data", **kw)
@@ -177,17 +177,18 @@ class ManifestTests(Base):
             with self.subTest(why), self.assertRaises(ManifestError):
                 parse_manifest(folder, "yours")
 
-    def test_only_bundled_may_default_on(self):
-        self.assertFalse(parse_manifest(self.write("mine", default="true"), "yours").default)
-        self.assertTrue(parse_manifest(self.write("ours", root=self.bundled, default="true"),
-                                       "bundled").default)
+    def test_a_default_line_switches_nothing_on(self):
+        # tide 2.x let its own bundled plugins say default = true; tide 3
+        # has none, and a folder you drop in always starts off
+        self.write("mine", default="true")
+        self.assertFalse(self.host().is_enabled("mine"))
 
     def test_later_root_overrides(self):
-        self.write("same", root=self.bundled, name="bundled one")
+        self.write("same", root=self.store_root, name="store one")
         self.write("same", name="my one")
-        found = discover([(self.bundled, "bundled"), (self.user, "yours")])
+        found = discover([(self.store_root, "store"), (self.user, "yours")])
         self.assertEqual(found.manifests["same"].name, "my one")
-        self.assertEqual(found.overrides["same"], "bundled")
+        self.assertEqual(found.overrides["same"], "store")
 
     def test_broken_ones_are_listed_not_fatal(self):
         (self.user / "broken").mkdir()
@@ -206,8 +207,8 @@ class LifecycleTests(Base):
         self.assertFalse(h.is_enabled("mine"))
         self.assertEqual(self.events, [])
 
-    def test_bundled_default_on_starts(self):
-        self.write("ours", root=self.bundled, default="true")
+    def test_a_store_plugin_starts_on(self):
+        self.write("ours", root=self.store_root)
         h = self.host()
         h.start_enabled()
         self.assertEqual(self.events, [("start", "ours", "hi")])
@@ -376,6 +377,107 @@ class CtxTests(Base):
         self.player.position_changed.emit(3.0)
         self.assertEqual(ctx.playback.position(), 3.0)
 
+    def test_tray_action_comes_and_goes(self):
+        from types import SimpleNamespace
+        tray = SimpleNamespace(actions=[])
+        tray.add_plugin_action = tray.actions.append
+        tray.remove_plugin_action = tray.actions.remove
+        self.write("mine")
+        h = PluginHost(SimpleNamespace(_tray=tray), self.player, self.queue,
+                       roots=[(self.user, "yours")], state_file=self.tmp / "plugins.toml",
+                       settings_dir=self.tmp / "plugin-settings",
+                       stamp=self.tmp / "plugin-starting", data_dir=self.tmp / "data")
+        self.addCleanup(h.shutdown)
+        h.set_enabled("mine", True)
+        got = []
+        item = h.record("mine").ctx.ui.add_tray_action("a thing", got.append, checkable=True)
+        tray.actions[0].setChecked(True)
+        item.set_checked(False)                 # the plugin's own change: no callback
+        self.assertEqual(got, [True])
+        h.set_enabled("mine", False)
+        self.assertEqual(tray.actions, [])
+
+    def test_sources_come_and_go_with_the_plugin(self):
+        from types import SimpleNamespace
+        from tide.sources import registry
+        from tide.sources.base import NullSource
+        from tide.settings import Settings
+
+        class Fake(NullSource):
+            def __init__(self, slug):
+                self.slug = slug
+
+        reg = registry()
+        before_active = reg.active_slug
+        self.addCleanup(lambda: (reg.unregister("fake-a"), reg.unregister("fake-b")))
+        s = Settings()
+        s.sources_enabled = {"fake-b": False}          # a switch from before
+        s.active_source = "fake-a"
+        self.write("mine")
+        with __import__("unittest.mock").mock.patch("tide.settings.save_fields"):
+            h = PluginHost(SimpleNamespace(_settings=s), self.player, self.queue,
+                           roots=[(self.user, "yours")], state_file=self.tmp / "plugins.toml",
+                           settings_dir=self.tmp / "plugin-settings",
+                           stamp=self.tmp / "plugin-starting", data_dir=self.tmp / "data")
+            self.addCleanup(h.shutdown)
+            h.set_enabled("mine", True)
+            ctx = h.record("mine").ctx
+            listed = []
+            reg.listing_changed.connect(lambda: listed.append(1))
+            ctx.sources.register(Fake("fake-a"))
+            ctx.sources.register(Fake("fake-b"))
+        self.assertTrue(reg.is_enabled("fake-a"), "new: on")
+        self.assertFalse(reg.is_enabled("fake-b"), "the old switch is kept")
+        self.assertEqual(reg.active_slug, "fake-a", "your active source comes back")
+        self.assertTrue(ctx.sources.is_on("fake-a"))
+        h.set_enabled("mine", False)
+        self.assertIsNone(reg.get("fake-a"))
+        self.assertIsNone(reg.get("fake-b"))
+        self.assertNotEqual(reg.active_slug, "fake-a")
+        self.assertGreaterEqual(len(listed), 4)
+        if reg.get(before_active) is not None:
+            reg.set_active(before_active)
+
+    def test_a_lyrics_toggle_comes_and_goes(self):
+        from tide.sources.base import NullSource
+        from tide.ui.lyrics import LyricsView
+        import shiboken6
+        self.write("mine")
+        h = self.host()
+        h.set_enabled("mine", True)
+        got = []
+        handle = h.record("mine").ctx.ui.add_lyrics_toggle("a toggle", lambda on, t: got.append((on, t.title)))
+        view = LyricsView(NullSource())
+        self.addCleanup(lambda: shiboken6.isValid(view) and shiboken6.delete(view))
+        with __import__("unittest.mock").mock.patch.object(view, "_on_done", lambda *a: None), \
+                __import__("unittest.mock").mock.patch("tide.ui.lyrics.QThread.start", lambda self: None):
+            view.show_for(Track("v1", "a song", "artist"))
+        btns = [b for _e, b in view._plugin_btns]
+        self.assertEqual([b.text().strip("[]").lower() for b in btns], ["a toggle"])
+        self.assertTrue(btns[0].isEnabled())
+        btns[0].click()
+        self.assertEqual(got, [(True, "a song")])
+        handle.set_status("busy")
+        self.assertEqual(view.plugin_status.text().lower(), "busy")
+        h.set_enabled("mine", False)
+        self.assertEqual(view._plugin_btns, [])
+
+    def test_no_plugins_run_starts_nothing(self):
+        self.write("mine")
+        h = self.host()
+        h.paused_run = True
+        self.assertFalse(h.set_enabled("mine", True))
+        self.assertEqual(h.record("mine").status, "off for this run (tide --no-plugins)")
+        self.assertEqual(self.events, [])
+
+    def test_track_links(self):
+        info = plugin_api.track_info(Track(
+            "abc", "t", "a", extras={"artists": [{"name": "a", "id": "UC1"}],
+                                     "album": {"name": "al", "id": "MP1"}}))
+        self.assertEqual(info.artist_link, "https://music.youtube.com/channel/UC1")
+        self.assertEqual(info.album_link, "https://music.youtube.com/browse/MP1")
+        self.assertEqual(plugin_api.track_info(Track("x", "t", "a", source="local")).link, "")
+
     def test_track_info(self):
         info = plugin_api.track_info(Track("abc", "t", "a", album="al", duration_seconds=200,
                                            thumbnail="https://x/y.jpg"))
@@ -400,108 +502,8 @@ class CtxTests(Base):
         self.assertEqual(got, [(True, True)])
 
 
-class BundledTests(unittest.TestCase):
-    def test_every_bundled_manifest_is_valid(self):
-        if not BUNDLED_DIR.is_dir():
-            self.skipTest("no bundled plugins")
-        found = discover([(BUNDLED_DIR, "bundled")])
-        self.assertEqual(found.broken, [], found.broken)
-        for m in found.manifests.values():
-            with self.subTest(m.slug):
-                self.assertEqual(m.api, plugin_api.API_VERSION)
-                self.assertEqual(m.name, m.name.lower(), "names are lowercase")
-                for d in m.settings:
-                    self.assertEqual(d.label, d.label.lower(), f"{d.key}: labels are lowercase")
-
-
 if __name__ == "__main__":
     unittest.main()
-
-
-class PluginsTabTests(Base):
-    """the settings dialog's plugins tab (ui/plugins_tab.py)."""
-
-    def page(self, h):
-        """the page inside a container, the way the dialog holds it: the
-        container owns the widgets and deleting it takes them all (loose
-        widgets would live until python's exit and crash it there)."""
-        import shiboken6
-        from tide.ui.plugins_tab import PluginsPage
-        from tide.ui.settings import _page
-        p = PluginsPage(h)
-        holder = _page(*p.items())
-
-        def cleanup():
-            p.close()
-            if shiboken6.isValid(holder):
-                shiboken6.delete(holder)
-        self.addCleanup(cleanup)
-        return p, {s.slug: s for s in p.sections}
-
-    def test_switch_and_settings_apply_on_commit(self):
-        self.write("mine")
-        h = self.host()
-        page, sections = self.page(h)
-        sec = sections["mine"]
-        sec.switch.setChecked(True)
-        sec.widgets["greeting"].setText("hello")
-        self.assertEqual(self.events, [])            # nothing until save
-        page.commit()
-        self.assertTrue(h.is_enabled("mine"))
-        self.assertEqual(self.events, [("start", "mine", "hello")])
-
-    def test_settings_reach_a_running_plugin(self):
-        self.write("mine")
-        h = self.host()
-        h.set_enabled("mine", True)
-        page, sections = self.page(h)
-        sections["mine"].widgets["loud"].setChecked(True)
-        idx = sections["mine"].widgets["mode"].findData("b")
-        sections["mine"].widgets["mode"].setCurrentIndex(idx)
-        page.commit()
-        _pump()
-        self.assertIn(("settings", ["loud", "mode"]), self.events)
-        self.assertEqual(h.record("mine").settings["mode"], "b")
-
-    def test_untouched_page_changes_nothing(self):
-        self.write("mine")
-        h = self.host()
-        h.set_enabled("mine", True)
-        page, _ = self.page(h)
-        self.events.clear()
-        page.commit()
-        _pump()
-        self.assertEqual(self.events, [])
-
-    def test_blocked_plugin_cant_be_switched_on(self):
-        self.write("needy", requires='["definitely_not_a_module_xyz"]')
-        h = self.host()
-        _page, sections = self.page(h)
-        self.assertFalse(sections["needy"].switch.isEnabled())
-        self.assertIn("needs definitely_not_a_module_xyz", sections["needy"].status.text())
-
-    def test_status_follows_the_plugin(self):
-        self.write("mine")
-        h = self.host()
-        _page, sections = self.page(h)
-        h.set_enabled("mine", True)
-        h.record("mine").ctx.set_status("connected")
-        self.assertTrue(sections["mine"].status.text().startswith("connected"))
-
-    def test_dialog_has_the_tab(self):
-        from tide.settings import Settings
-        from tide.ui.settings import SettingsDialog
-        self.write("mine")
-        h = self.host()
-        plugin_host.set_host(h)
-        self.addCleanup(plugin_host.set_host, None)
-        import shiboken6
-        dlg = SettingsDialog(Settings())
-        self.addCleanup(lambda: shiboken6.isValid(dlg) and dlg.reject() is None
-                        and shiboken6.delete(dlg))
-        names = [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())]
-        self.assertIn("plugins", names)
-        self.assertEqual(names[-1], "about")
 
 
 class MusicAndSpeedTests(Base):

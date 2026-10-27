@@ -298,13 +298,13 @@ class ReportThresholdTest(unittest.TestCase):
         from tide import settings as settings_module
         from tide.playback import MpvBackend, PlaybackRouter
         from tide.settings import Settings
-        from tide.sources.local import LocalSource
+        from tide.sources.base import NullSource
         from tide.ui.window import MainWindow
         self._real_save = settings_module.save
         settings_module.save = lambda s: None
         router = PlaybackRouter()
         router.register(MpvBackend())
-        self.w = MainWindow(LocalSource(), router)
+        self.w = MainWindow(NullSource(), router)
         self.w._settings = Settings(report_plays=True)
         self.spawned: list[dict] = []
         self.w._spawn_play_started_worker = (
