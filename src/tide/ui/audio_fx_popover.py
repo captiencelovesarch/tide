@@ -2,7 +2,7 @@
 
 Reads + mutates the same shared ``AudioFxState`` the full panel owns.
 The user clicks the button → small popover with the most-reached-for
-knobs: master enable, preset dropdown, reverb dropdown + wet, bass +
+knobs: master enable, sound dropdown, reverb dropdown + wet, bass +
 treble shelves, lofi + crossfeed toggles. Everything else lives in the
 full rack. Right-clicking the button toggles master enable inline.
 
@@ -33,8 +33,8 @@ from ..audio_fx import (
     AudioFxState,
     EQ_GAIN_MAX_DB,
     EQ_GAIN_MIN_DB,
-    EQ_PRESETS,
     REVERB_PRESETS,
+    SOUNDS,
 )
 from .audio_fx_view import _commit_fx_debounce
 from .spring_slider import SpringSlider
@@ -160,14 +160,13 @@ class AudioFxPopover(QFrame):
         self._master_btn.setCheckable(True)
         self._master_btn.toggled.connect(self._on_master)
 
-        # preset row
+        # sound row (3.1: whole-rack sounds, then your saved ones; the
+        # list is refilled on every sync so new saved sounds show)
         self._preset_combo = QComboBox()
-        for name in EQ_PRESETS:
-            self._preset_combo.addItem(name, name)
         self._preset_combo.currentIndexChanged.connect(self._on_preset)
         preset_row = QHBoxLayout()
         preset_row.setSpacing(8)
-        preset_lbl = QLabel("preset")
+        preset_lbl = QLabel("sound")
         preset_row.addWidget(preset_lbl)
         preset_row.addWidget(self._preset_combo, stretch=1)
 
@@ -257,19 +256,17 @@ class AudioFxPopover(QFrame):
         try:
             self._master_btn.setChecked(state.master_enabled)
             self._master_btn.setLabel("rack on" if state.master_enabled else "rack off")
-            # Preset combo — find the nearest match, fall back to "custom".
-            from ..audio_fx import detect_eq_preset
-            active_preset = detect_eq_preset(state.eq_bands)
-            if active_preset == "custom":
-                # Add (or update) a transient "custom" entry so the
-                # combo can show it without us mutating EQ_PRESETS.
-                if self._preset_combo.findData("custom") < 0:
-                    self._preset_combo.addItem("custom", "custom")
-                self._preset_combo.setCurrentIndex(self._preset_combo.findData("custom"))
+            # Sound combo: the sounds, your saved ones, and the current
+            # label ("bass · edited", "your own mix") when it isn't one.
+            label = state.sound_label()
+            self._preset_combo.clear()
+            for name in list(SOUNDS) + [x.name for x in state.saved_sounds]:
+                self._preset_combo.addItem(name, name)
+            if self._preset_combo.findData(label) < 0:
+                self._preset_combo.addItem(label or "your own mix", "custom")
+                self._preset_combo.setCurrentIndex(self._preset_combo.count() - 1)
             else:
-                self._preset_combo.setCurrentIndex(
-                    max(0, self._preset_combo.findData(active_preset))
-                )
+                self._preset_combo.setCurrentIndex(self._preset_combo.findData(label))
             self._reverb_combo.setCurrentIndex(
                 max(0, self._reverb_combo.findData(state.reverb_preset))
             )
@@ -309,8 +306,11 @@ class AudioFxPopover(QFrame):
         name = self._preset_combo.currentData()
         if not name or name == "custom":
             return
-        self._state.apply_eq_preset(name)
-        self._emit()
+        if self._state.apply_sound(name):
+            if name != "flat":
+                self._state.master_enabled = True
+            self.sync(self._state)
+            self._emit()
 
     def _on_reverb(self, _idx: int) -> None:
         if self._state is None or self._silent:

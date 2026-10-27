@@ -128,6 +128,14 @@ class CustomSlot:
 
 
 @dataclass
+class SavedSound:
+    """A whole rack you saved under a name (not the on switch, not the
+    other saved sounds). ``data`` is a partial to_dict()."""
+    name: str
+    data: dict = field(default_factory=dict)
+
+
+@dataclass
 class AudioFxState:
     """The whole rack as a plain Python object. Mutated by the UI, read
     by ``build_filter_chain``, round-tripped to JSON for settings.toml."""
@@ -161,6 +169,24 @@ class AudioFxState:
     crossfeed_strength: float = 0.4   # 0–1
     # Lofi — a composite: band-limit + bit crush + slow tape wow.
     lofi: bool = False
+    # ---- 3.1: an amount for every effect, two new ones, sounds ----
+    # Amounts run 0..1; build_filter_chain maps each to its filter's
+    # own parameters (see the effect's comment there).
+    chorus_amount: float = 0.5
+    flanger_amount: float = 0.5
+    phaser_amount: float = 0.5
+    lofi_amount: float = 0.5
+    compressor_amount: float = 0.5
+    # 8d: the song circles your head (an auto-panner on a narrowed mix).
+    eightd: bool = False
+    eightd_speed: float = 0.4
+    # Sub bass: a wide peak at 50 Hz, below where the bass shelf works.
+    sub_bass: bool = False
+    sub_amount: float = 0.5
+    # The sound last picked (a SOUNDS name or a saved sound's), so the
+    # page can say "bass · edited" once you move a knob. "" = none.
+    sound: str = ""
+    saved_sounds: list[SavedSound] = field(default_factory=list)
     custom_slots: list[CustomSlot] = field(
         default_factory=lambda: [CustomSlot() for _ in range(3)]
     )
@@ -196,6 +222,78 @@ class AudioFxState:
             return
         self.custom_slots[idx] = CustomSlot()
 
+    # ---------- sounds ----------
+
+    def rack_dict(self) -> dict:
+        """The sound-shaping part of to_dict(): no on switch, no saved
+        sounds or slots, no "which sound" bookkeeping."""
+        d = self.to_dict()
+        for k in _NOT_RACK:
+            d.pop(k, None)
+        return d
+
+    def _load_rack(self, overrides: Mapping) -> None:
+        fresh = AudioFxState.from_dict({**AudioFxState().to_dict(), **dict(overrides)})
+        for k in AudioFxState().rack_dict():
+            setattr(self, k, getattr(fresh, k))
+
+    def apply_sound(self, name: str) -> bool:
+        """Set the whole rack to a built-in sound or a saved one."""
+        if name in SOUNDS:
+            self._load_rack(SOUNDS[name])
+        else:
+            saved = next((x for x in self.saved_sounds if x.name == name), None)
+            if saved is None:
+                return False
+            self._load_rack(saved.data)
+        self.sound = name
+        return True
+
+    def _sound_rack(self, name: str) -> dict | None:
+        if name in SOUNDS:
+            probe = AudioFxState()
+            probe._load_rack(SOUNDS[name])
+            return probe.rack_dict()
+        saved = next((x for x in self.saved_sounds if x.name == name), None)
+        if saved is None:
+            return None
+        probe = AudioFxState()
+        probe._load_rack(saved.data)
+        return probe.rack_dict()
+
+    def matches_sound(self, name: str) -> bool:
+        target = self._sound_rack(name)
+        return target is not None and _racks_equal(self.rack_dict(), target)
+
+    def sound_label(self) -> str:
+        """"bass", "bass · edited", or "" when nothing was picked and the
+        rack isn't any sound."""
+        if self.sound and self._sound_rack(self.sound) is not None:
+            return self.sound if self.matches_sound(self.sound) else f"{self.sound} · edited"
+        for name in list(SOUNDS) + [x.name for x in self.saved_sounds]:
+            if self.matches_sound(name):
+                return name
+        return ""
+
+    def save_sound(self, name: str) -> str:
+        """Save the rack as ``name`` (replacing one of the same name).
+        Returns the name used."""
+        name = " ".join(str(name).split())[:32] or "my sound"
+        data = self.rack_dict()
+        for x in self.saved_sounds:
+            if x.name == name:
+                x.data = data
+                break
+        else:
+            self.saved_sounds.append(SavedSound(name=name, data=data))
+        self.sound = name
+        return name
+
+    def delete_sound(self, name: str) -> None:
+        self.saved_sounds = [x for x in self.saved_sounds if x.name != name]
+        if self.sound == name:
+            self.sound = ""
+
     # ---------- persistence ----------
 
     def to_dict(self) -> dict:
@@ -220,6 +318,19 @@ class AudioFxState:
             "crossfeed": bool(self.crossfeed),
             "crossfeed_strength": float(self.crossfeed_strength),
             "lofi": bool(self.lofi),
+            "chorus_amount": float(self.chorus_amount),
+            "flanger_amount": float(self.flanger_amount),
+            "phaser_amount": float(self.phaser_amount),
+            "lofi_amount": float(self.lofi_amount),
+            "compressor_amount": float(self.compressor_amount),
+            "eightd": bool(self.eightd),
+            "eightd_speed": float(self.eightd_speed),
+            "sub_bass": bool(self.sub_bass),
+            "sub_amount": float(self.sub_amount),
+            "sound": str(self.sound),
+            "saved_sounds": [
+                {"name": x.name, "data": dict(x.data)} for x in self.saved_sounds
+            ],
             "custom_slots": [
                 {"name": s.name, "bands": [float(v) for v in s.bands]}
                 for s in self.custom_slots
@@ -245,7 +356,7 @@ class AudioFxState:
         state.reverb_preset = rv if rv in REVERB_PRESETS else "off"
         state.reverb_wet = max(0.0, min(1.0, float(data.get("reverb_wet", 0.5))))
         state.loudness_norm = bool(data.get("loudness_norm", False))
-        state.stereo_width = max(0.0, min(2.5, float(data.get("stereo_width", 1.0))))
+        state.stereo_width = _clamp(data.get("stereo_width", 1.0), 0.0, 2.0, 1.0)
         state.compressor = bool(data.get("compressor", False))
         state.mono = bool(data.get("mono", False))
         # v1.6 fx drawer — every key optional so payloads from older
@@ -262,6 +373,15 @@ class AudioFxState:
             data.get("crossfeed_strength", 0.4), 0.0, 1.0, 0.4
         )
         state.lofi = bool(data.get("lofi", False))
+        for key in ("chorus_amount", "flanger_amount", "phaser_amount",
+                    "lofi_amount", "compressor_amount", "eightd_speed",
+                    "sub_amount"):
+            setattr(state, key, _clamp(data.get(key, 0.5), 0.0, 1.0,
+                                       getattr(cls, key)))
+        state.eightd = bool(data.get("eightd", False))
+        state.sub_bass = bool(data.get("sub_bass", False))
+        snd = data.get("sound", "")
+        state.sound = snd if isinstance(snd, str) else ""
         # custom_slots could be persisted as anything — coerce to a
         # list first so a dict ({"a": 1}) can't blow up the [:3] slice.
         slots = data.get("custom_slots")
@@ -284,6 +404,27 @@ class AudioFxState:
         while len(out_slots) < 3:
             out_slots.append(CustomSlot())
         state.custom_slots = out_slots
+        raw_sounds = data.get("saved_sounds")
+        if isinstance(raw_sounds, list):
+            for raw in raw_sounds[:24]:
+                if not isinstance(raw, Mapping):
+                    continue
+                name = str(raw.get("name", "")).strip()[:32]
+                body = raw.get("data")
+                if name and isinstance(body, Mapping) and not any(
+                        x.name == name for x in state.saved_sounds):
+                    state.saved_sounds.append(SavedSound(
+                        name=name, data={k: v for k, v in body.items()
+                                         if k in _RACK_KEYS}))
+        else:
+            # before 3.1: three eq-only slots. Each one in use becomes a
+            # saved sound with that eq.
+            for i, slot in enumerate(out_slots):
+                if any(abs(v) > 0.05 for v in slot.bands):
+                    name = slot.name or f"slot {i + 1}"
+                    if not any(x.name == name for x in state.saved_sounds):
+                        state.saved_sounds.append(SavedSound(
+                            name=name, data={"eq_bands": list(slot.bands)}))
         return state
 
     def to_json(self) -> str:
@@ -299,6 +440,60 @@ class AudioFxState:
             return cls.from_dict(json.loads(payload))
         except Exception:
             return cls()
+
+
+# ---------- sounds ----------
+
+# One tap sets the whole rack. Each entry overrides the defaults (a fresh
+# AudioFxState); anything not named is reset. "speed" isn't a rack key:
+# the page asks the player for it (slowed + reverb wants the slow).
+SOUNDS: dict[str, dict] = {
+    "flat": {},
+    "bass": {"eq_bands": [5, 4, 3, 1, 0, 0, 0, 0, 0, 0],
+             "sub_bass": True, "sub_amount": 0.4},
+    "warm": {"eq_bands": [3, 2, 1, 0, -1, -1, -2, -2, -1, 0]},
+    "bright": {"eq_bands": [0, 0, 0, 0, 0, 0, 1, 3, 4, 5],
+               "exciter": True, "exciter_amount": 1.5},
+    "vocal": {"eq_bands": [-2, -2, -1, 0, 3, 4, 4, 2, 0, -1]},
+    "slowed + reverb": {"reverb_preset": "slowed", "reverb_wet": 0.7,
+                        "eq_bands": [2, 1, 0, 0, 0, 0, -1, -2, -2, -2],
+                        "speed": 0.85},
+    "8d": {"eightd": True, "eightd_speed": 0.4,
+           "reverb_preset": "room", "reverb_wet": 0.35},
+    "lofi tape": {"lofi": True, "lofi_amount": 0.6,
+                  "eq_bands": [2, 1, 0, 0, 0, 0, -1, -1, -2, -2]},
+    "concert": {"reverb_preset": "hall", "reverb_wet": 0.45,
+                "stereo_width": 1.3,
+                "eq_bands": [2, 1, 0, 0, -1, 0, 0, 1, 2, 2]},
+}
+
+# to_dict() keys that aren't part of how it sounds.
+_NOT_RACK = ("master_enabled", "sound", "saved_sounds", "custom_slots")
+_RACK_KEYS = frozenset(k for k in AudioFxState().to_dict() if k not in _NOT_RACK)
+
+
+def sound_speed(name: str) -> float | None:
+    """The playback speed a built-in sound asks for, or None."""
+    v = SOUNDS.get(name, {}).get("speed")
+    return float(v) if v is not None else None
+
+
+def _racks_equal(a: Mapping, b: Mapping) -> bool:
+    for k in _RACK_KEYS:
+        x, y = a.get(k), b.get(k)
+        if isinstance(x, list) and isinstance(y, list):
+            if len(x) != len(y) or any(abs(float(p) - float(q)) > 0.05
+                                       for p, q in zip(x, y)):
+                return False
+        elif isinstance(x, float) or isinstance(y, float):
+            try:
+                if abs(float(x) - float(y)) > 0.005:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif x != y:
+            return False
+    return True
 
 
 def _clamp_db(value) -> float:
@@ -357,12 +552,17 @@ def _shelf(low: bool, f0: float, gain_db: float) -> tuple:
     return b, d
 
 
-def eq_peak_boost_db(state: AudioFxState) -> float:
-    """Highest point of the EQ bands + bass/treble shelves' combined
-    magnitude response, in dB (0 when nothing boosts). Adjacent boosted
-    bands overlap and a shelf stacks on top of them, so this can run well
-    past any single slider: the bass boost preset plus a +4 bass shelf
-    peaks at +10.3 dB."""
+# Sub bass: a wide peak low down, below where the 120 Hz shelf acts.
+SUB_FREQ_HZ = 50.0
+SUB_WIDTH_OCTAVES = 1.2
+SUB_MAX_DB = 10.0
+
+
+def sub_gain_db(state: AudioFxState) -> float:
+    return SUB_MAX_DB * state.sub_amount if state.sub_bass else 0.0
+
+
+def _eq_sections(state: AudioFxState) -> list:
     sections = [
         _peaking(freq, float(g), EQ_BAND_WIDTH_OCTAVES)
         for freq, g in zip(EQ_FREQUENCIES_HZ, state.eq_bands)
@@ -372,17 +572,159 @@ def eq_peak_boost_db(state: AudioFxState) -> float:
         sections.append(_shelf(True, 120.0, state.bass_db))
     if abs(state.treble_db) >= 0.05:
         sections.append(_shelf(False, 8000.0, state.treble_db))
+    sub = sub_gain_db(state)
+    if sub >= 0.05:
+        sections.append(_peaking(SUB_FREQ_HZ, sub, SUB_WIDTH_OCTAVES))
+    return sections
+
+
+def _response_db(sections: list, f: float) -> float:
+    z1 = cmath.exp(-1j * 2.0 * math.pi * f / _RESPONSE_FS)
+    z2 = z1 * z1
+    h = 1.0 + 0j
+    for b, d in sections:
+        h *= (b[0] + b[1] * z1 + b[2] * z2) / (d[0] + d[1] * z1 + d[2] * z2)
+    return 20.0 * math.log10(max(abs(h), 1e-9))
+
+
+def eq_response_db(state: AudioFxState, freqs) -> list[float]:
+    """The EQ, shelves and sub bass together, in dB at each of ``freqs``
+    (the curve the page draws)."""
+    sections = _eq_sections(state)
+    if not sections:
+        return [0.0 for _ in freqs]
+    return [_response_db(sections, float(f)) for f in freqs]
+
+
+def eq_peak_boost_db(state: AudioFxState) -> float:
+    """Highest point of the EQ bands + bass/treble shelves' combined
+    magnitude response, in dB (0 when nothing boosts). Adjacent boosted
+    bands overlap and a shelf stacks on top of them, so this can run well
+    past any single slider: the bass boost preset plus a +4 bass shelf
+    peaks at +10.3 dB."""
+    sections = _eq_sections(state)
     if not sections:
         return 0.0
-    peak = 0.0
-    for f in _RESPONSE_GRID_HZ:
-        z1 = cmath.exp(-1j * 2.0 * math.pi * f / _RESPONSE_FS)
-        z2 = z1 * z1
-        h = 1.0 + 0j
-        for b, d in sections:
-            h *= (b[0] + b[1] * z1 + b[2] * z2) / (d[0] + d[1] * z1 + d[2] * z2)
-        peak = max(peak, 20.0 * math.log10(abs(h)))
-    return peak
+    return max(0.0, max(_response_db(sections, f) for f in _RESPONSE_GRID_HZ))
+
+
+def _music_weight(f: float) -> float:
+    """Rough loudness weight per 1/24 octave: a music spectrum (flat per
+    octave up to ~300 Hz, falling after, little below 40 Hz) times the
+    K-weighting curve loudness meters use (less bass, +4 dB up top)."""
+    m = 1.0 if f < 300.0 else (300.0 / f) ** 0.8
+    if f < 40.0:
+        m *= (f / 40.0) ** 2
+    hp = (f / 38.0) ** 4 / (1.0 + (f / 38.0) ** 4)
+    shelf = 1.0 + 1.5 * (f / 1500.0) ** 2 / (1.0 + (f / 1500.0) ** 2)
+    return m * hp * shelf * shelf
+
+
+_MUSIC_WEIGHTS = tuple(_music_weight(f) for f in _RESPONSE_GRID_HZ)
+
+
+def eq_loudness_change_db(state: AudioFxState) -> float:
+    """How much louder (or quieter) the EQ makes typical music, in dB:
+    the response's power averaged over the music weighting above."""
+    sections = _eq_sections(state)
+    if not sections:
+        return 0.0
+    num = 0.0
+    for f, w in zip(_RESPONSE_GRID_HZ, _MUSIC_WEIGHTS):
+        num += w * 10.0 ** (_response_db(sections, f) / 10.0)
+    return 10.0 * math.log10(num / sum(_MUSIC_WEIGHTS))
+
+
+# How far past full scale the EQ may leave peaks for the limiter to
+# catch, in dB. Cancelling the whole peak boost (the old preamp) made
+# every boost play 3-5 dB quieter than bypass; cancelling only the
+# loudness change let bass boosts slam the limiter. This much the
+# limiter takes without audible pumping.
+EQ_PEAK_ALLOWANCE_DB = 4.5
+
+
+def eq_preamp_db(state: AudioFxState) -> float:
+    """The gain the chain opens with: cancels what the EQ adds to the
+    loudness, and enough of the peak that the limiter isn't leaned on."""
+    if not _eq_sections(state):
+        return 0.0
+    return -max(eq_loudness_change_db(state),
+                eq_peak_boost_db(state) - EQ_PEAK_ALLOWANCE_DB)
+
+
+# ---------- level matching ----------
+
+# Loudness each effect takes away (+) or adds (-) at a given amount, in
+# dB, measured with ebur128 over three songs (tools/fx_calibrate.py).
+# The chain adds the opposite as one gain stage before the limiter, so
+# switching an effect on doesn't change how loud the song is.
+_LEVEL_TABLES: dict[str, tuple[tuple[float, float], ...]] = {
+    "chorus": ((0.25, 1.30), (0.5, 0.80), (0.75, 0.43), (1.0, -0.03)),
+    "flanger": ((0.25, 2.87), (0.5, 3.47), (0.75, 3.90), (1.0, 4.30)),
+    "phaser": ((0.25, 4.33), (0.5, 3.67), (0.75, 2.93), (1.0, 2.00)),
+    "tremolo": ((0.5, 2.33),),
+    "lofi": ((0.25, 1.57), (0.5, 2.07), (0.75, 2.53), (1.0, 2.97)),
+    "compressor": ((0.25, 3.50), (0.5, 5.73), (0.75, 8.20), (1.0, 11.57)),
+    "exciter": ((0.25, -0.03), (0.5, -0.33), (0.75, -0.73), (1.0, -1.30)),
+    "crossfeed": ((0.25, 1.33), (0.5, 1.47), (0.75, 1.53), (1.0, 1.57)),
+    "eightd": ((0.25, 4.47), (1.0, 4.47)),
+    # reverb, per room, by the wet knob (the equal-power mix still comes
+    # out a little louder: the tail isn't fully uncorrelated)
+    "reverb room": ((0.25, -0.17), (0.5, -0.50), (0.75, -0.83), (1.0, -1.07)),
+    "reverb hall": ((0.25, -0.17), (0.5, -0.43), (0.75, -0.60), (1.0, -0.77)),
+    "reverb plate": ((0.25, 0.07), (0.5, 0.10), (0.75, 0.0), (1.0, -0.03)),
+    "reverb cathedral": ((0.25, -0.17), (0.5, -0.60), (0.75, -0.97), (1.0, -1.20)),
+    "reverb slowed": ((0.25, -0.27), (0.5, -0.83), (0.75, -1.23), (1.0, -1.50)),
+}
+
+
+def _level_loss_db(name: str, amount: float) -> float:
+    pts = _LEVEL_TABLES.get(name)
+    if not pts:
+        return 0.0
+    x = max(pts[0][0], min(pts[-1][0], float(amount)))
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if x0 <= x <= x1:
+            t = 0.0 if x1 == x0 else (x - x0) / (x1 - x0)
+            return y0 + t * (y1 - y0)
+    return pts[-1][1]
+
+
+def _width_gain_db(width: float) -> float:
+    """Widening raises the side signal; on typical music the side carries
+    about a seventh of the power, so this holds the total where it was."""
+    r = 0.15
+    return 10.0 * math.log10((1.0 + r) / (1.0 + r * width * width))
+
+
+def makeup_db(state: AudioFxState) -> float:
+    """The gain stage near the end of the chain: puts back what the
+    enabled effects took away (or takes back what they added)."""
+    total = 0.0
+    if state.chorus:
+        total += _level_loss_db("chorus", state.chorus_amount)
+    if state.flanger:
+        total += _level_loss_db("flanger", state.flanger_amount)
+    if state.phaser:
+        total += _level_loss_db("phaser", state.phaser_amount)
+    if state.tremolo:
+        total += _level_loss_db("tremolo", 0.5)
+    if state.lofi:
+        total += _level_loss_db("lofi", state.lofi_amount)
+    if state.compressor:
+        total += _level_loss_db("compressor", state.compressor_amount)
+    if state.exciter and state.exciter_amount > 0.05:
+        total += _level_loss_db("exciter", state.exciter_amount / 5.0)
+    if state.crossfeed:
+        total += _level_loss_db("crossfeed", state.crossfeed_strength)
+    if state.eightd:
+        total += _level_loss_db("eightd", state.eightd_speed)
+    if state.reverb_preset != "off" and state.reverb_wet > 0.0:
+        # below the first measured wet, scale toward 0 at a dry room
+        w = state.reverb_wet
+        loss = _level_loss_db(f"reverb {state.reverb_preset}", w)
+        total += loss * min(1.0, w / 0.25)
+    return total
 
 
 # ---------- chain builder ----------
@@ -476,13 +818,12 @@ def build_filter_chain(state: AudioFxState) -> str:
 
     chain: list[str] = []
 
-    # 0. Preamp: cancel the EQ + shelf boost up front so the boosted
-    # band lands where the loudest part of the song already was, not
-    # past full scale. Also leaves the later stages the headroom they
-    # expect.
-    boost = eq_peak_boost_db(state)
-    if boost >= 0.05:
-        chain.append(f"volume=volume={-boost:.2f}dB")
+    # 0. Preamp: takes back what the EQ adds to the loudness (or gives
+    # back what its cuts took), and enough of the peak boost that the
+    # limiter at the end isn't leaned on. See eq_preamp_db.
+    pre = eq_preamp_db(state)
+    if abs(pre) >= 0.05:
+        chain.append(f"volume=volume={pre:.2f}dB")
 
     # 1. 10-band graphic EQ (only emit non-zero bands).
     for freq, gain in zip(EQ_FREQUENCIES_HZ, state.eq_bands):
@@ -493,14 +834,21 @@ def build_filter_chain(state: AudioFxState) -> str:
             f"equalizer=f={freq}:t=o:w={EQ_BAND_WIDTH_OCTAVES}:g={g:g}"
         )
 
-    # 2. Exciter (crystalizer) — synthesized top-end sparkle, placed
-    # right after the EQ so the shelves below still get the last word
-    # on overall brightness.
-    # c=0: crystalizer hard-clips at full scale by default, which is
-    # exactly the crunch this rack must not add. The limiter at the end
-    # handles its overs smoothly instead.
+    # 1b. Sub bass: one wide peak at 50 Hz.
+    sub = sub_gain_db(state)
+    if sub >= 0.05:
+        chain.append(
+            f"equalizer=f={SUB_FREQ_HZ:g}:t=o:w={SUB_WIDTH_OCTAVES:g}:g={sub:.2f}"
+        )
+
+    # 2. Exciter: aexciter adds harmonics above `freq` and blends them in.
+    # (crystalizer, the old one, mostly sharpened transients and got
+    # harsh.) Right after the EQ so the shelves still get the last word
+    # on brightness. Stored amount 0..5 → aexciter amount 0..2.5.
     if state.exciter and state.exciter_amount > 0.05:
-        chain.append(f"crystalizer=i={state.exciter_amount:g}:c=0")
+        chain.append(
+            f"aexciter=amount={state.exciter_amount * 0.5:.2f}:drive=6:freq=5000:blend=0"
+        )
 
     # 3. Bass shelf at 120 Hz.
     if abs(state.bass_db) >= 0.05:
@@ -513,41 +861,64 @@ def build_filter_chain(state: AudioFxState) -> str:
     # 5. Lofi composite — thin the lows, roll the top, crush the bit
     # depth (log mode + heavy anti-aliasing so it's gritty, not harsh),
     # and add a slow shallow vibrato for tape wow. Early in the chain
-    # because it reshapes the *source* character; everything after
-    # (width, reverb, crossfeed) then treats the lofi'd signal as the
-    # song.
+    # because it reshapes the *source* character. Amount moves all four
+    # at once.
     if state.lofi:
-        chain.append("highpass=f=120")
-        chain.append("lowpass=f=5800")
-        chain.append("acrusher=bits=10:mode=log:aa=0.8:mix=0.35")
-        chain.append("vibrato=f=0.4:d=0.04")
+        a = state.lofi_amount
+        chain.append(f"highpass=f={80 + 100 * a:.0f}")
+        chain.append(f"lowpass=f={8000 - 3500 * a:.0f}")
+        chain.append(f"acrusher=bits={12 - 3 * a:.1f}:mode=log:aa=0.8:mix={0.15 + 0.35 * a:.2f}")
+        chain.append(f"vibrato=f=0.4:d={0.02 + 0.04 * a:.3f}")
 
-    # 6. Stereo width (1.0 == identity, skip).
+    # 6. Stereo width (1.0 == identity, skip). extrastereo scales the
+    # side signal; the gain beside it holds the loudness.
     if abs(state.stereo_width - 1.0) >= 0.01:
         # c=0 for the same reason as the exciter: no built-in hard clip.
         chain.append(f"extrastereo=m={state.stereo_width:g}:c=0")
+        chain.append(f"volume=volume={_width_gain_db(state.stereo_width):.2f}dB")
 
-    # 7. Compressor.
+    # 7. Compressor: amount lowers the threshold and raises the ratio.
+    # No makeup here; the level stage below matches it to bypass.
     if state.compressor:
-        # Conservative defaults that catch peaks without pumping the
-        # signal. makeup=4 dB recovers the headroom the threshold ate.
+        a = state.compressor_amount
         chain.append(
-            "acompressor=threshold=-20dB:ratio=4:attack=20:release=250:makeup=4"
+            f"acompressor=threshold={-14 - 14 * a:.0f}dB:ratio={2 + 2 * a:.1f}"
+            ":attack=15:release=200:makeup=1"
         )
 
     # 8–11. Modulation family, always ahead of the reverb (motion into
     # space, not space into motion). Two-voice chorus (positional sox
     # args: in_gain:out_gain:delays:decays:speeds:depths), a slow
-    # feedback flanger, a wide triangular phaser, and tremolo with the
-    # one exposed knob (rate).
+    # feedback flanger, a triangular phaser, and tremolo with its rate.
+    # Amount is depth and mix for each.
     if state.chorus:
-        chain.append("chorus=0.6:0.9:50|60:0.4|0.32:0.25|0.4:2|1.3")
+        a = state.chorus_amount
+        chain.append(
+            f"chorus=0.7:0.9:45|60:{0.2 + 0.3 * a:.2f}|{0.15 + 0.25 * a:.2f}"
+            f":0.25|0.4:{1 + 2 * a:.1f}|{0.8 + 1.5 * a:.1f}"
+        )
     if state.flanger:
-        chain.append("flanger=delay=1:depth=3:regen=20:width=70:speed=0.4")
+        a = state.flanger_amount
+        chain.append(
+            f"flanger=delay=1:depth={2 + 4 * a:.1f}:regen={10 + 20 * a:.0f}"
+            f":width={40 + 50 * a:.0f}:speed=0.3"
+        )
     if state.phaser:
-        chain.append("aphaser=in_gain=0.6:out_gain=0.9:delay=3:decay=0.5:speed=0.6")
+        a = state.phaser_amount
+        chain.append(
+            f"aphaser=in_gain=0.6:out_gain=0.9:delay=3:decay={0.2 + 0.45 * a:.2f}:speed=0.5"
+        )
     if state.tremolo:
-        chain.append(f"tremolo=f={state.tremolo_speed:g}:d=0.6")
+        chain.append(f"tremolo=f={state.tremolo_speed:g}:d=0.5")
+
+    # 11b. 8d: narrow the mix toward the middle, then pan it round
+    # (left and right half a cycle apart). Speed 0..1 = one circle every
+    # ~16 s to every ~4 s. Before the reverb, so the room stays put while
+    # the song moves through it.
+    if state.eightd:
+        hz = 0.06 + 0.19 * state.eightd_speed
+        chain.append("extrastereo=m=0.3:c=0")
+        chain.append(f"apulsator=mode=sine:hz={hz:.3f}:amount=0.85:offset_l=0:offset_r=0.5")
 
     # 12. Reverb — convolution against the preset's synthesized IR.
     reverb_entry = _reverb_lavfi_entry(state.reverb_preset, state.reverb_wet)
@@ -559,12 +930,18 @@ def build_filter_chain(state: AudioFxState) -> str:
     if state.crossfeed:
         chain.append(f"crossfeed=strength={state.crossfeed_strength:g}")
 
-    # 14. Loudness normalization (EBU R128 target -14 LUFS — streaming-
-    # platform-typical so cross-source queues feel level).
+    # 14. Level match: one gain stage for everything the effects above
+    # took away or added (measured; see _LEVEL_TABLES).
+    mk = makeup_db(state)
+    if abs(mk) >= 0.05:
+        chain.append(f"volume=volume={mk:.2f}dB")
+
+    # 15. Even volume (EBU R128 target -14 LUFS — streaming-platform-
+    # typical so cross-source queues feel level).
     if state.loudness_norm:
         chain.append("loudnorm=I=-14:LRA=11:tp=-1.5")
 
-    # 15. Mono fold (channel-collapse via pan). Wrapped in a lavfi
+    # 16. Mono fold (channel-collapse via pan). Wrapped in a lavfi
     # graph because mpv 0.41's native af param parser splits on ':' and
     # chokes on pan's 'mono|c0=…' layout syntax ("AVOption 'mono|c0'
     # not found" at filter creation) — inside lavfi brackets ffmpeg
@@ -572,12 +949,14 @@ def build_filter_chain(state: AudioFxState) -> str:
     if state.mono:
         chain.append("lavfi=[pan=mono|c0=0.5*c0+0.5*c1]")
 
-    # 16. Safety limiter. level=0 turns off alimiter's auto makeup gain,
+    # 17. Safety limiter. level=0 turns off alimiter's auto makeup gain,
     # which would otherwise pump everything up toward the ceiling; with
-    # it off, anything under the ceiling passes through untouched.
+    # it off, anything under the ceiling passes through untouched. A
+    # longer release with asc on, so the few dB the EQ leaves it
+    # (EQ_PEAK_ALLOWANCE_DB) come back smoothly instead of pumping.
     if chain:
         chain.append(
-            f"alimiter=limit={LIMITER_CEILING}:attack=5:release=50:level=0"
+            f"alimiter=limit={LIMITER_CEILING}:attack=5:release=120:asc=1:level=0"
         )
 
     return ",".join(chain)
@@ -593,6 +972,10 @@ __all__ = [
     "EQ_GAIN_MIN_DB",
     "EQ_PRESETS",
     "REVERB_PRESETS",
+    "SOUNDS",
+    "SavedSound",
+    "eq_response_db",
+    "sound_speed",
     "build_filter_chain",
     "detect_eq_preset",
     "eq_peak_boost_db",
