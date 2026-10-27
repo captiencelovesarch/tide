@@ -24,7 +24,7 @@ jobs:
       - name: Python packages
         run: |
           python -m pip install --upgrade pip
-          python -m pip install . "yt-dlp[default]" pypresence watchdog PyYAML pyinstaller pillow
+          python -m pip install . "yt-dlp[default]" watchdog PyYAML pyinstaller pillow
 
       - name: Version
         id: version

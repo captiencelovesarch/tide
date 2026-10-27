@@ -81,9 +81,14 @@ def _selftest() -> int:
         import importlib.util
         from tide import config, theming, layout
         dirs = [theming.BUNDLED_THEMES_DIR, layout.BUNDLED_LAYOUTS_DIR]
-        if importlib.util.find_spec("tide.plugin_host"):  # newer than 2.3.0
-            from tide import plugin_host
-            dirs.append(plugin_host.BUNDLED_DIR)
+        if importlib.util.find_spec("tide.store"):  # 3.0+: plugins from the store
+            import tide.plugin_host  # noqa: F401
+            import tide.store  # noqa: F401
+            # store plugins load at runtime, so what they import has to be
+            # in the bundle already (see tide.spec)
+            for mod in ("asyncio", "sqlite3", "http.server", "mutagen"):
+                if importlib.util.find_spec(mod) is None:
+                    problems.append(f"{mod} missing (store plugins need it)")
         for d in dirs:
             if not Path(d).is_dir():
                 problems.append(f"bundled dir missing: {d}")
