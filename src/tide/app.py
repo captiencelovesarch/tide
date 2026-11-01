@@ -713,9 +713,9 @@ def run(argv: list[str] | None = None) -> int:
     # launch. Network blips raise non-auth errors and are ignored — never
     # sign anyone out over a dead wifi link.
     #
-    # Before probing, freshen the session if it's due (tide was closed past
-    # a rotation): the stale pair would fail the probe for nothing. Then the
-    # keeper takes over rotation for as long as tide runs.
+    # Before probing, freshen the session (the browser rotated it while
+    # tide was closed): the stale pair would fail the probe for nothing.
+    # Then the keeper keeps it fresh for as long as tide runs.
     from . import yt_session
     if yt is not None and reg.is_enabled("ytmusic"):
         from PySide6.QtCore import QRunnable, QThreadPool
@@ -723,7 +723,7 @@ def run(argv: list[str] | None = None) -> int:
         class _YtAuthProbe(QRunnable):
             def run(self_inner) -> None:
                 try:
-                    yt_session.rotate()
+                    yt_session.freshen()
                 except Exception:
                     pass
                 try:

@@ -360,3 +360,51 @@ def import_cookies(profile: BrowserProfile) -> ImportResult:
     if first_miss is not None:
         return first_miss
     raise ImportError_(f"couldn't read cookies from {profile.label}: {last_error}")
+
+
+# ---------- peeking without decrypting ----------
+#
+# A full read decrypts every cookie in the browser (yt-dlp's pure-python
+# aes: 2-10 s of cpu for a chromium profile with a few thousand cookies).
+# These look at the raw youtube rows only, still encrypted where the
+# browser encrypts them, so tide can tell whether a full read is worth it.
+
+def _youtube_rows(profile: BrowserProfile, db: Path, names: tuple[str, ...]) -> list | None:
+    import sqlite3
+    from urllib.parse import quote
+    marks = ",".join("?" * len(names))
+    if profile.family == "firefox":
+        sql = (f"SELECT host, name, value FROM moz_cookies WHERE name IN ({marks}) "
+               "AND host LIKE '%youtube.com' ORDER BY host, name")
+    else:
+        sql = (f"SELECT host_key, name, value, encrypted_value FROM cookies "
+               f"WHERE name IN ({marks}) AND host_key LIKE '%youtube.com' "
+               "ORDER BY host_key, name")
+    try:
+        # immutable: no locks, so a running browser is no obstacle. It sees
+        # the main file only, the same as yt-dlp's copy of it.
+        con = sqlite3.connect(f"file:{quote(str(db))}?mode=ro&immutable=1",
+                              uri=True, timeout=1)
+        try:
+            return con.execute(sql, names).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def has_youtube_session(profile: BrowserProfile, db: Path) -> bool | None:
+    """Whether the db holds a youtube SID at all (a signed-out browser
+    doesn't). None when the db can't be peeked at."""
+    rows = _youtube_rows(profile, db, ("SID",))
+    return None if rows is None else bool(rows)
+
+
+def pair_mark(profile: BrowserProfile, db: Path) -> str | None:
+    """A short hash of the db's raw youtube PSIDTS rows. It changes when
+    the browser rotates its session. None when the db can't be peeked at."""
+    import hashlib
+    rows = _youtube_rows(profile, db, ("__Secure-1PSIDTS", "__Secure-3PSIDTS"))
+    if rows is None:
+        return None
+    return hashlib.sha256(repr(rows).encode()).hexdigest()[:16]

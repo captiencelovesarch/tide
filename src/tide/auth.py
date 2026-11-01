@@ -7,8 +7,9 @@ wizard imports one from the user's own browser (browser_import), or from
 pasted request headers, into ~/.config/tide/browser.json.
 
 That import only seeds the session. yt_session keeps it alive from then on:
-one live cookie jar shared by ytmusicapi and yt-dlp, rotated on Google's
-schedule, so tide's copy doesn't go stale while the app runs.
+one live cookie jar shared by ytmusicapi and yt-dlp, kept level with the
+browser it came from (never rotated behind the browser's back, which signs
+the browser out), so tide's copy doesn't go stale while the app runs.
 """
 from __future__ import annotations
 
@@ -58,6 +59,7 @@ def save_browser_auth(
     cookies: dict[str, str],
     user_agent: str | None = None,
     expires_at: float | None = None,
+    owned: bool = False,
 ) -> Path:
     """Persist a browser-style auth dict that ytmusicapi can consume.
 
@@ -67,6 +69,10 @@ def save_browser_auth(
     recorded in a **sidecar** file rather than in browser.json — ytmusicapi
     reads that file as a literal headers dict and sends every key it finds,
     so an extra field would end up on the wire as a bogus HTTP header.
+
+    `owned` says nothing else uses this session (a browser profile only
+    tide signs in with), so yt_session may rotate it. Anything read from
+    the user's own browser, or pasted from it, is shared: leave it False.
     """
     if REQUIRED_COOKIE not in cookies:
         raise ValueError(f"missing required cookie {REQUIRED_COOKIE} — user not fully signed in")
@@ -87,13 +93,16 @@ def save_browser_auth(
         "content-encoding": "gzip",
     }
 
+    # the sidecar first: the keeper must never see a shared session next to
+    # the previous import's "owned"
+    _write_secret(
+        _meta_file(),
+        json.dumps({"expires_at": expires_at, "imported_at": time.time(),
+                    "owned": bool(owned)}, indent=2),
+    )
     _write_secret(
         config.BROWSER_AUTH_FILE,
         json.dumps(headers, indent=2, sort_keys=True),
-    )
-    _write_secret(
-        _meta_file(),
-        json.dumps({"expires_at": expires_at, "imported_at": time.time()}, indent=2),
     )
     return config.BROWSER_AUTH_FILE
 

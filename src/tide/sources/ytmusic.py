@@ -429,9 +429,9 @@ class YTMusicSource(MusicSource):
         if self._last_auth_ok is not None:
             parts.append(f"verified {_ago(time.time() - self._last_auth_ok)} ago")
         from .. import auth, yt_session
-        rotated = yt_session.rotated_at()
-        if rotated is not None:
-            parts.append(f"refreshed {_ago(max(0.0, time.time() - rotated))} ago")
+        refreshed = yt_session.refreshed_at()
+        if refreshed is not None:
+            parts.append(f"refreshed {_ago(max(0.0, time.time() - refreshed))} ago")
         try:
             remaining = auth.seconds_until_expiry()
         except Exception:

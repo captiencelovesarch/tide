@@ -7,16 +7,23 @@ hour (it did, the day this was written: a silent browser re-import fired
 an hour after launch). Now the import only seeds one live jar that
 ytmusicapi and yt-dlp share, and a keeper rotates it on Google's schedule.
 
+2026-11-01: rotating a session imported from a browser signed the browser
+out (helium, 20 s after a refresh token). Only a session tide owns is
+rotated now; a shared one follows its browser's cookie db.
+
 Run offscreen:  QT_QPA_PLATFORM=offscreen PYTHONPATH=src python -m pytest tests/test_yt_session.py
 """
 import os
+import sqlite3
 import stat
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import requests
 
-from tide import auth, cache, config, yt_session
+from tide import auth, browser_import as bi, cache, config, yt_session
 
 _COOKIES = {
     "__Secure-3PAPISID": "abc/def",
@@ -64,10 +71,12 @@ def _rotating_post(status=200, body=')]}\'\n[["identity.hfcr",600],["di",57]]'):
 
 
 class _Base(unittest.TestCase):
+    owned = False
+
     def setUp(self) -> None:
         auth.clear_saved_auth()
         _reset()
-        auth.save_browser_auth(dict(_COOKIES))
+        auth.save_browser_auth(dict(_COOKIES), owned=self.owned)
         self.addCleanup(auth.clear_saved_auth)
         self.addCleanup(_reset)
 
@@ -123,6 +132,8 @@ class JarTests(_Base):
 
 
 class RotationTests(_Base):
+    owned = True
+
     def test_rotation_refreshes_the_pair_and_records_the_interval(self) -> None:
         post, calls = _rotating_post()
         with mock.patch.object(requests.Session, "post", post):
@@ -177,6 +188,8 @@ class RotationTests(_Base):
 
 
 class ClientTests(_Base):
+    owned = True
+
     def setUp(self) -> None:
         super().setUp()
         cache.clear_namespace(auth._VISITOR_NS)
@@ -197,6 +210,182 @@ class ClientTests(_Base):
             yt_session.rotate()
         sent = {c.name: c.value for c in yt._session.cookies}
         self.assertEqual(sent["__Secure-3PSIDTS"], "ts-new-1")
+
+
+class SharedSessionTests(_Base):
+    """an import from the user's browser is the browser's session too"""
+
+    def test_a_shared_session_is_never_rotated(self) -> None:
+        self.assertFalse(yt_session.owned())
+        post, calls = _rotating_post()
+        with mock.patch.object(requests.Session, "post", post), \
+                mock.patch.object(bi, "available_profiles", lambda: []):
+            self.assertFalse(yt_session.rotate(force=True))
+            yt_session.freshen()
+        self.assertEqual(calls, [])
+        self.assertEqual(_live()["__Secure-1PSIDTS"], "ts-old")
+
+    def test_a_new_shared_import_drops_an_old_owned_flag(self) -> None:
+        auth.save_browser_auth(dict(_COOKIES), owned=True)
+        self.assertTrue(yt_session.owned())
+        auth.save_browser_auth(dict(_COOKIES))
+        self.assertFalse(yt_session.owned())
+
+
+class FollowTests(_Base):
+    """a shared session takes the browser's rotations from its cookie db"""
+
+    def setUp(self) -> None:
+        super().setUp()
+        tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.mine = tmp / "helium.db"
+        self.other = tmp / "chromium.db"
+        self.browser = {}
+        self._set(self.other, {**_COOKIES, "SID": "sid-other"})
+        self._set(self.mine, dict(_COOKIES), bump=2)      # helium used last
+        self.profiles = [
+            bi.BrowserProfile(slug="helium", label="helium",
+                              cookies_path=self.mine, candidates=(self.mine,)),
+            bi.BrowserProfile(slug="chromium", label="chromium",
+                              cookies_path=self.other, candidates=(self.other,)),
+        ]
+        self.reads = []
+        self.broken = set()
+
+        def import_cookies(profile):
+            self.reads.append(profile.cookies_path)
+            if profile.cookies_path in self.broken:
+                raise bi.ImportError_("locked")
+            return bi.ImportResult(profile=profile,
+                                   cookies=dict(self.browser[profile.cookies_path]))
+
+        self.enterContext(mock.patch.object(bi, "available_profiles",
+                                            lambda: list(self.profiles)))
+        self.enterContext(mock.patch.object(bi, "import_cookies", import_cookies))
+
+    def _set(self, db: Path, cookies: dict, bump: int = 5) -> None:
+        """what the browser holds; its db gets the youtube rows a chromium
+        db has (encrypted_value standing in for the real ciphertext)"""
+        self.browser[db] = cookies
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE IF NOT EXISTS cookies (host_key, name, "
+                    "value, encrypted_value)")
+        con.execute("DELETE FROM cookies")
+        con.executemany("INSERT INTO cookies VALUES ('.youtube.com', ?, '', ?)",
+                        [(k, ("enc:" + v).encode()) for k, v in cookies.items()])
+        con.commit()
+        con.close()
+        _bump(db, bump)
+
+    def _browser_rotates(self, ts: str = "ts-browser") -> None:
+        self._set(self.mine, {**self.browser[self.mine],
+                              "__Secure-1PSIDTS": ts, "__Secure-3PSIDTS": ts})
+
+    def _following(self):
+        return (yt_session._load_meta().get("follow") or {}).get("db")
+
+    def test_finds_the_browser_holding_this_sign_in(self) -> None:
+        yt_session.follow()
+        self.assertEqual(self._following(), str(self.mine))
+
+    def test_the_browsers_rotation_reaches_tide(self) -> None:
+        held = yt_session.session()               # a client built before it
+        yt_session.follow()
+        self._browser_rotates()
+        self.assertTrue(yt_session.follow())
+        self.assertEqual(_live()["__Secure-3PSIDTS"], "ts-browser")
+        sent = {c.name: c.value for c in held.cookies}
+        self.assertEqual(sent["__Secure-1PSIDTS"], "ts-browser")
+        self.assertIsNotNone(yt_session.refreshed_at())
+        self.assertIn("\tts-browser", yt_session.jar_file().read_text())
+
+    def test_an_unchanged_db_is_not_read_again(self) -> None:
+        yt_session.follow()
+        self.reads.clear()
+        self.assertFalse(yt_session.follow())
+        self.assertEqual(self.reads, [])
+
+    def test_a_db_change_without_a_rotation_skips_the_full_read(self) -> None:
+        yt_session.follow()
+        self.reads.clear()
+        _bump(self.mine, 5)                       # some other site's cookie
+        self.assertFalse(yt_session.follow())
+        self.assertEqual(self.reads, [])
+        self._browser_rotates()                   # and the next one counts
+        self.assertTrue(yt_session.follow())
+
+    def test_a_browser_signed_in_as_someone_else_is_let_go(self) -> None:
+        yt_session.follow()
+        self._set(self.mine, {**_COOKIES, "SID": "sid-new",
+                              "__Secure-1PSIDTS": "ts-x"})
+        self.assertFalse(yt_session.follow())
+        self.assertEqual(_live()["SID"], "sid-1")
+        self.assertEqual(_live()["__Secure-1PSIDTS"], "ts-old")
+        self.assertIsNone(self._following())
+
+    def test_a_signed_out_browser_is_let_go(self) -> None:
+        yt_session.follow()
+        self._set(self.mine, {"__Secure-3PSID": "x", "__Secure-1PSIDTS": "y"})
+        self.assertFalse(yt_session.follow())
+        self.assertEqual(_live()["SID"], "sid-1")
+        self.assertIsNone(self._following())
+
+    def test_a_search_skips_signed_out_browsers(self) -> None:
+        self.profiles.pop(0)
+        self._set(self.other, {"__Secure-3PSID": "x"})
+        self.assertFalse(yt_session.follow())
+        self.assertEqual(self.reads, [])
+
+    def test_no_browser_with_it_waits_to_be_asked_again(self) -> None:
+        self.profiles.pop(0)
+        self.assertFalse(yt_session.follow())
+        self.assertIsNone(self._following())
+        self.profiles.insert(0, bi.BrowserProfile(
+            slug="helium", label="helium", cookies_path=self.mine,
+            candidates=(self.mine,)))
+        self.reads.clear()
+        self.assertFalse(yt_session.follow())     # the keeper's tick
+        self.assertEqual(self.reads, [])
+        yt_session.follow(look="again")           # the next run's first tick
+        self.assertEqual(self._following(), str(self.mine))
+
+    def test_a_new_import_looks_again(self) -> None:
+        yt_session.follow()
+        self._set(self.mine, {**_COOKIES, "SID": "sid-new"})
+        self._set(self.other, dict(_COOKIES), bump=10)
+        auth.save_browser_auth(dict(_COOKIES))
+        _bump(config.BROWSER_AUTH_FILE, 5)
+        yt_session.follow()
+        self.assertEqual(self._following(), str(self.other))
+
+    def test_tide_losing_its_sid_still_follows(self) -> None:
+        yt_session.follow()
+        yt_session.jar().clear(".youtube.com", "/", "SID")
+        self._browser_rotates()
+        self.assertTrue(yt_session.follow())
+        self.assertEqual(_live()["SID"], "sid-1")
+
+    def test_an_unreadable_db_is_tried_again(self) -> None:
+        yt_session.follow()
+        self.broken.add(self.mine)
+        self._browser_rotates()
+        self.assertFalse(yt_session.follow())
+        self.assertEqual(self._following(), str(self.mine))
+        self.broken.clear()
+        self.assertTrue(yt_session.follow())
+        self.assertEqual(_live()["__Secure-1PSIDTS"], "ts-browser")
+
+    def test_freshen_catches_up_after_tide_was_closed(self) -> None:
+        yt_session.follow()
+        _reset()                                  # tide quits
+        self._browser_rotates()                   # helium carries on
+        yt_session.freshen()                      # the next launch
+        self.assertEqual(_live()["__Secure-1PSIDTS"], "ts-browser")
+
+    def test_freshen_never_searches(self) -> None:
+        yt_session.freshen()                      # launch doesn't wait on it
+        self.assertEqual(self.reads, [])
+        self.assertIsNone(self._following())
 
 
 if __name__ == "__main__":
