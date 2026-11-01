@@ -115,7 +115,12 @@ class IconSetPicker(QWidget):
             col.addWidget(row)
         self._value = "regular"
         self.set_value("regular")
-        theming.manager().theme_changed.connect(lambda _t: self.update())
+        # a bound method, so the connection dies with the picker (a lambda
+        # outlived the closed settings dialog and raised on every theme change)
+        theming.manager().theme_changed.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self, _theme) -> None:
+        self.update()
 
     def normalize(self, raw) -> str:
         return raw if raw in icon_sets.SETS else "regular"
