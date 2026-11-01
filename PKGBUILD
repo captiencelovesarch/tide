@@ -35,7 +35,7 @@ makedepends=(
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 # computed from the GitHub tag tarball at release time (updpkgsums once
 # v$pkgver is tagged and pushed); until then this is the previous release's.
-sha256sums=('8b8dcc0f43da129d4ee432b3980353bca281bb2b0badafbecd608e9b4fdba629')
+sha256sums=('fa242314ce578fd5207ca30c246e94aee73344577b905baff1a62f08e55272df')
 
 build() {
   cd "$pkgname-$pkgver"
