@@ -1,6 +1,6 @@
 # Maintainer: captience <milkkjello@gmail.com>
 pkgname=tide
-pkgver=3.0.0
+pkgver=3.1.0
 pkgrel=1
 pkgdesc="A YouTube Music client for Linux"
 arch=('any')
@@ -21,6 +21,7 @@ depends=(
 optdepends=(
   'python-secretstorage: GNOME/libsecret backend for cookie import'
   'kwallet: KDE wallet backend for cookie import'
+  'python-pycryptodomex: much faster cookie reads from chromium browsers'
   'python-watchdog: live re-indexing for the local files plugin'
   'librespot: Spotify Premium playback via the librespot backend'
   'python-onnxruntime-cpu: the precise lyric timing plugin, and voice in vr'

@@ -18,4 +18,4 @@ try:
         raise LookupError("not the installed copy")
     __version__ = _dist.version
 except Exception:
-    __version__ = "3.0.0"
+    __version__ = "3.1.0"

@@ -73,6 +73,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="3.1.0" date="2026-10-31">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v3.1.0</url>
+      <description>
+        <p>the fx page, reworked: one-tap sounds and your own saved ones, the eq as one curve, an amount per effect, hold to compare, and new 8d and sub bass effects. every effect now plays at the song's own level, where eq boosts used to come out 3 to 5 dB quieter. also a youtube music sign-in on first start, home that loads at launch, playlist covers, and a like button that shows whether the song is liked. refresh token no longer signs your browser out of youtube.</p>
+      </description>
+    </release>
     <release version="3.0.0" date="2026-10-22">
       <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v3.0.0</url>
       <description>

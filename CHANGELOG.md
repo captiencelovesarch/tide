@@ -4,6 +4,28 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [3.1.0] — 2026-10-31 — the fx page
+
+### Added
+- **sounds.** one tap at the top of the fx page sets the whole rack: flat, bass, warm, bright, vocal, slowed + reverb, 8d, lofi tape or concert. slowed + reverb slows the song down too. save what you've built and it joins the row under your own name. your three eq slots are saved sounds now, with the names you gave them.
+- **hold to compare.** hold it to hear the song with fx off. let go and the rack is back.
+- **8d** (the song circles your head) and **sub bass** as new effects.
+- songs can be removed from liked music, from the playlists tab.
+
+### Changed
+- **the fx page, reworked.** the eq is one curve you drag, with the bass and treble shelves as its two ends, and every effect is a tile with one amount.
+- **every effect plays at the song's own level.** the old preamp cancelled the whole eq boost, so a bass or treble boost played 3 to 5 dB quieter than fx off, and the compressor and exciter went the other way and clipped. every sound now lands within 0.6 dB of fx off and every effect within 0.25.
+- the exciter is ffmpeg's aexciter. the old one (crystalizer) got harsh.
+- **first start** is a youtube music sign-in, then the extras if you want them: extra sources, local files and your own server. it used to list eight sources, two of them shelved.
+- home loads when tide starts instead of waiting for refresh, and quick picks comes first. while recommendations load a spinner says so, or says why they didn't. more greetings too.
+- the playlists tab shows covers.
+- the sources tab only shows when there's a source to pick between (with the extra sources or local files plugin).
+- official plugins in the store get a check in the album's colour instead of "· official".
+
+### Fixed
+- **refresh token signed your browser out of youtube.** tide and your browser share one google session, and tide renewed it on its own schedule. google keeps one copy of a session alive, so the browser's was dropped. now the browser does the renewing and tide reads the new cookies back from it, so both stay signed in.
+- the like button shows whether the playing song is liked. it never looked.
+
 ## [3.0.0] — 2026-10-22 — plugins
 
 tide 3 ships with less. get the rest from the plugin store.
