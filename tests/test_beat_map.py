@@ -9,7 +9,7 @@ import wave
 
 import numpy as np
 
-from tide import beat_map
+from tide import beat_map, kick_model
 from tide.beat_map import (
     ATTACK_S, HOLD_S, SR, Analysis, Beat, BeatMap, Hit, analyze, analyze_target,
     decode_pcm, is_analyzable,
@@ -320,91 +320,106 @@ class LoudnessTest(unittest.TestCase):
         self.assertIsNone(BeatMap.from_payload({**m.payload(), "loudness": [1.5]}))
 
 
-class DrumTest(unittest.TestCase):
-    """drumless stretches and notes that never die away."""
-
-    def test_a_drumless_stretch_pulses_softly(self):
-        n = int(60.0 / beat_map.FRAME_S)
-        drum = np.full(n, 0.01)
-        drum[: n // 2][::40] = 0.6          # a drum every ~half second, first half only
-        frames = np.array([int(n * 0.25), int(n * 0.75)])
-        damp = beat_map._drum_damping(drum, frames)
-        self.assertAlmostEqual(damp[0], 1.0)
-        self.assertAlmostEqual(damp[1], beat_map.DRUMLESS_FLOOR)
-
-    def test_a_song_without_drums_is_left_alone(self):
-        drum = np.zeros(int(30.0 / beat_map.FRAME_S))
-        self.assertTrue(np.all(beat_map._drum_damping(drum, np.array([10, 500, 2000])) == 1.0))
-
-    def test_a_drum_dips_even_with_a_hit_behind_it_and_a_held_note_does_not(self):
-        f = 10
-        kick_then_kick = np.zeros(40)
-        kick_then_kick[f + 3] = 1.0
-        kick_then_kick[f + 4:f + 8] = [0.5, 0.25, 0.12, 0.06]
-        kick_then_kick[f + 8:f + 14] = 1.2                  # the second hit is louder
-        self.assertFalse(beat_map._never_dips(kick_then_kick, f))
-        swelling = np.linspace(0.5, 1.5, 40)
-        self.assertTrue(beat_map._never_dips(swelling, f))
-
-    def test_drumless_verses_get_softer_than_the_drummed_chorus(self):
-        # kicks and hats for 20 s, then the same kicks with no hats or snare:
-        # the low band says "kick" in both, the high band says drums only in one
-        drummed, kicks = song(110.0, seconds=20.0, intro=1.0)
-        bare, _ = song(110.0, seconds=20.0, intro=0.5, snare=False, hats=False, seed=2)
-        pcm = np.concatenate((drummed, bare * 0.9))
-        m = analyze(pcm)
-        loud = [b.strength for b in pulsed(m) if 4.0 < b.time < 17.0 and b.strength > 0.3]
-        soft = [b.strength for b in pulsed(m) if 27.0 < b.time < 38.0]
-        self.assertTrue(loud and soft)
-        self.assertLess(max(soft), 0.6 * np.median(loud))
+def bassline(seconds, bpm=100.0):
+    """a plucked bass note on every beat and a pad chord every bar: music
+    with no drums in it."""
+    out = np.zeros(int(seconds * SR))
+    period = 60.0 / bpm
+    t = np.arange(int(0.9 * period * SR)) / SR
+    roots = [41.2, 49.0, 55.0, 36.7]
+    for k, pos in enumerate(np.arange(0.5, seconds - 1.0, period)):
+        f = roots[(k // 4) % 4]
+        note = sum(np.sin(2 * np.pi * f * h * t) / h for h in (1, 2, 3))
+        note *= np.minimum(1.0, t / 0.005) * np.exp(-t / 0.5)
+        st = int(pos * SR)
+        out[st:st + note.size] += 0.5 * note[: out.size - st]
+        if k % 4 == 0:
+            tb = np.arange(int(4 * period * SR)) / SR
+            pad = sum(np.sin(2 * np.pi * f * 4 * r * tb) for r in (1.0, 1.26, 1.5))
+            pad *= np.minimum(1.0, tb / 0.3) * 0.08
+            out[st:st + pad.size] += pad[: out.size - st]
+    return (out / np.abs(out).max() * 0.9).astype(np.float32)
 
 
-class HalfTimeTest(unittest.TestCase):
-    """which beats a double-time grid pulses (beat_map._pulses)."""
+class DrumlessTest(unittest.TestCase):
+    def test_a_drumless_bridge_stays_dark(self):
+        # drums, then bass notes and pads with no drums, then drums again:
+        # the bass notes look like kicks to the low band, but nothing near
+        # them is surely a kick
+        first, k1 = song(100.0, seconds=15.0, intro=0.5)
+        last, k2 = song(100.0, seconds=15.0, intro=0.5, seed=5)
+        m = analyze(np.concatenate((first, bassline(15.0), last)))
+        events = sorted([b.time for b in pulsed(m)] + [h.time for h in m.hits])
+        self.assertEqual([t for t in events if 17.0 <= t <= 28.0], [])
+        for t in k1 + [t + 30.0 for t in k2]:
+            if 2.0 < t < 14.0 or 32.0 < t < 44.0:
+                self.assertLess(nearest(events, t), 0.02, f"kick at {t:.3f} has no pulse")
 
-    def run_rule(self, strengths, period=0.3):
-        phases = [i % 4 for i in range(len(strengths))]
-        return beat_map._pulses(phases, [period] * len(strengths), np.array(strengths, dtype=float))
 
-    def test_four_on_the_floor_stays_calm(self):
-        out = self.run_rule([1.0] * 32)
-        self.assertEqual(sum(out), 16)
-        self.assertTrue(all(a != b for a, b in zip(out, out[1:])))
+class FastKickTest(unittest.TestCase):
+    def test_a_fast_four_on_the_floor_pulses_every_kick(self):
+        # the grid may lock at half speed; the kicks still each get one
+        period = 60.0 / 170.0
+        out = np.zeros(int(20 * SR))
+        t = np.arange(int(0.25 * SR)) / SR
+        k = _kick(t)
+        h = _snare(t[: int(0.03 * SR)], np.random.default_rng(1), decay=0.01)
+        kicks = []
+        for pos in np.arange(1.0, 19.5, period):
+            st = int(pos * SR)
+            out[st:st + k.size] += 0.8 * k[: out.size - st]
+            kicks.append(pos)
+            hs = int((pos + period / 2) * SR)
+            out[hs:hs + h.size] += 0.12 * h[: out.size - hs]
+        m = analyze((out / np.abs(out).max() * 0.9).astype(np.float32))
+        events = sorted([b.time for b in pulsed(m)] + [h.time for h in m.hits])
+        for t in kicks:
+            if t > 2.0:
+                self.assertLess(nearest(events, t), 0.02, f"kick at {t:.3f} has no pulse")
 
-    def test_slow_grids_pulse_every_beat(self):
-        self.assertTrue(all(self.run_rule([1.0, 0.1] * 16, period=0.5)))
 
-    def test_a_syncopated_kick_on_the_off_half_pulses(self):
-        strengths = [1.0, 0.1] * 16
-        strengths[11] = 0.8                 # a push on the off-eighth
-        out = self.run_rule(strengths)
-        self.assertTrue(out[11])
-        self.assertTrue(all(out[0::2]))
-        self.assertEqual(sum(out[1::2]), 1)
+class MergeTest(unittest.TestCase):
+    def test_a_rising_double_kick_run_gives_a_pulse_per_pair(self):
+        # each kick a little louder than the last: measured from the last
+        # kept one, the whole run used to slide into a single pulse
+        run = [(i, 1.0 + 0.08 * i, 0.4 + 0.08 * i, 0.9) for i in range(8)]
+        kept = beat_map._merge(run)
+        self.assertEqual([round(t, 2) for _f, t, _s in kept], [1.0, 1.16, 1.32, 1.48])
+        self.assertAlmostEqual(kept[-1][2], 0.4 + 0.08 * 7)
 
-    def test_up_to_180_bpm_a_run_of_real_kicks_pulses_whole(self):
-        # "chest pain": a kick on every beat at 152 bpm is not too fast to show
-        drums = self.run_rule_drum([1.0] * 32, period=0.395, drum=True)
-        self.assertTrue(all(drums))
-        notes = self.run_rule_drum([1.0] * 32, period=0.395, drum=False)
-        self.assertEqual(sum(notes), 16)
-        faster = self.run_rule_drum([1.0] * 32, period=0.3, drum=True)
-        self.assertEqual(sum(faster), 16)
+    def test_a_soft_ghost_before_the_kick_gives_way(self):
+        kept = beat_map._merge([(0, 1.0, 0.3, 0.9), (1, 1.06, 1.0, 0.95)])
+        self.assertEqual(kept, [(1, 1.06, 1.0)])
 
-    def run_rule_drum(self, strengths, period, drum):
-        phases = [i % 4 for i in range(len(strengths))]
-        return beat_map._pulses(phases, [period] * len(strengths),
-                                np.array(strengths, dtype=float), lambda _j: drum)
+    def test_a_first_hit_the_model_doubts_gives_way(self):
+        kept = beat_map._merge([(0, 1.0, 0.8, 0.2), (1, 1.05, 0.9, 0.9)])
+        self.assertEqual(kept, [(1, 1.05, 0.9)])
 
-    def test_the_ridden_half_follows_the_kicks_into_a_new_section(self):
-        # a verse whose kick pattern moved onto the other half
-        strengths = [1.0, 0.1] * 12 + [0.1, 1.0] * 12
-        out = self.run_rule(strengths)
-        for j, s in enumerate(strengths):
-            if s == 1.0:
-                self.assertTrue(out[j], f"kick at beat {j} skipped")
-        late = out[30:]
-        self.assertEqual(late, [j % 2 == 1 for j in range(30, 48)])
+
+class KickModelTest(unittest.TestCase):
+    def test_the_model_reads_every_feature(self):
+        # change what _kick_rows reads and the model must be retrained
+        # (tools/pulse_bench train --write)
+        pcm, _kicks = song(120.0, seconds=10.0)
+        an = Analysis()
+        an.push(pcm)
+        wide, mel = an._wide_now()
+        cand, *_rest, rows, _ring = beat_map._kick_candidates(wide, mel, an.frames)
+        self.assertGreater(cand.size, 0)
+        self.assertEqual(rows.shape[1], len(kick_model.WEIGHTS))
+
+    def test_sliding_filters_hold_the_edges_like_scipy(self):
+        x = np.random.default_rng(3).random((9000, 7)).astype(np.float32)
+        for k, axis in ((17, 0), (5, 1)):
+            got = beat_map._sliding(x, k, axis, np.median)
+            pad = [(k // 2, k // 2) if a == axis else (0, 0) for a in range(2)]
+            xp = np.pad(x, pad, mode="edge")
+            for i, j in ((0, 0), (5, 3), (4095, 6), (4096, 2), (8999, 0), (8990, 6)):
+                if axis == 0:
+                    want = np.median(xp[i:i + k, j])
+                else:
+                    want = np.median(xp[i, j:j + k])
+                self.assertAlmostEqual(float(got[i, j]), float(want), places=6)
 
 
 class PayloadTest(unittest.TestCase):

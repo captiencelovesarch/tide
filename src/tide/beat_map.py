@@ -3,9 +3,10 @@
 the live detector judged every frame against the last two seconds of the
 same song, so one kick scored differently depending on what came just
 before it. this module instead decodes the stream tide is about to play
-(ffmpeg, well ahead of realtime), scores the whole track at once, locks a
-beat grid to its tempo, and hands the ambient controller a map it can
-schedule against the player clock. same beat, same strength, every listen.
+(ffmpeg, well ahead of realtime), scores the whole track at once, finds
+its kicks, locks a beat grid to its tempo, and hands the ambient
+controller a map it can schedule against the player clock. same beat,
+same strength, every listen.
 
 pure numpy + subprocess, no qt. beat_service.py owns the worker thread and
 the cache; ui/ambient.py schedules the result.
@@ -23,6 +24,8 @@ import subprocess
 
 import numpy as np
 
+from . import kick_model
+
 
 SR = 22_050
 N_FFT = 1024                 # 46 ms window: sharp enough for a kick's attack
@@ -32,7 +35,7 @@ MAX_SECONDS = 20 * 60.0      # long mixes are analyzed this far and no further
 DECODE_BLOCK_S = 2.0
 PARTIAL_FIRST_S = 10.0       # first partial map after this much audio
 
-LOW_HZ = (35.0, 160.0)       # where a kick lives: strength and swell read here
+LOW_HZ = (35.0, 160.0)       # the tracker's low band: it pulls the grid toward kicks
 FULL_HZ = (30.0, 8000.0)     # periodicity reads the whole mix
 BPM_MIN, BPM_MAX = 30.0, 240.0
 BPM_PREFER = (70.0, 160.0)   # below the low end a tempo may double
@@ -44,60 +47,77 @@ LOCAL_DRIFT = 0.25           # a local period may stray this far from global
 TIGHTNESS = 60.0             # dp penalty on off-tempo beat spacing
 LOW_WEIGHT = 0.5             # share of the tracking score read from the low band
 CONFIDENCE_FLOOR = 0.3       # below this the grid is not trusted: hits only
-LOW_REF_PERCENTILE = 92.0    # "a full kick" is this percentile of beat lows
-LOW_REF_MIN = 6.0            # ...but never less than this absolute flux
 LOW_SUM_FRAMES = 3           # a kick's rise is read over this many frames
-OFFGRID_MIN = 0.9            # off-grid low peaks this strong survive as hits
-OFFGRID_VS_BEAT = 0.9        # ...when at least this much of the nearest beat's low
-# a sparse accent (a pushed or syncopated kick, about once a bar) needs
-# less: it is the drummer's choice, not a bassline's texture. "sparse" is
-# at most ACCENT_SPARSE such peaks within ACCENT_REACH beats either side.
-ACCENT_MIN = 0.6
-ACCENT_VS_BEAT = 0.7
-ACCENT_REACH = 4
-ACCENT_SPARSE = 2
-# ...and it must die away like the song's own kicks do. a bass note's onset
-# can be as big as a kick's, but it rings on; a drum is gone in a breath.
-# decay = low-band level DECAY_LATE frames after the onset over the level
-# DECAY_EARLY frames after it.
-DECAY_EARLY = 3              # 35 ms: the body of the hit
-DECAY_LATE = 13              # 150 ms: a kick has mostly gone by now
-ACCENT_DECAY = 1.25          # an accent may ring this much longer than a kick
-ACCENT_DECAY_SLACK = 0.05
-HIT_DIP_MAX = 0.95           # never dropping below this share of the hit within 150 ms:
-                             # a note swelling or holding, never a drum
-# a beat sits on its kick, not on the grid: the grid says which beat, the
-# low band says when. a live drummer or a swung eighth lands tens of ms off
-# an even grid, and the pulse should land with the drum. anything past this
-# reach is off-grid, so no kick falls between "on a beat" and "a hit".
-SNAP_FRACTION = 0.15         # of the local period...
-SNAP_MIN_S = 0.035           # ...but never less than this
-SNAP_MIN_LOW = 0.3           # a kick this much of the song's full kick moves the beat
 ATTACK_BACK_S = 0.035        # a kick's attack may lead its low-band rise by this much
 ATTACK_BACK = int(round(ATTACK_BACK_S / FRAME_S))
 ATTACK_NEAR_TOP = 0.8
-MERGE_S = 0.1                # two pulses this close read as a stutter: keep one
-CALM_S = 0.2                 # ...and this close, a much weaker one reads as a
-CALM_RATIO = 0.6             # ...mistimed twin of the strong one: under this share, drop it
-# drums, or not: a drum hit lifts most of the 1.5-9 khz band in one frame
-# (a vertical line in the spectrogram); a strummed guitar, a pad or a sung
-# note lifts a few bins, or lifts them slowly. where a song has no drums
-# for a while (the guitar verses of "exit music") its low-band onsets are
-# bass and guitar notes, and pulsing them reads as beats that aren't there.
-DRUM_HZ = (1500.0, 9000.0)
-DRUM_RISE = 0.7              # a bin "jumps" when its log level rises this much in a frame
-DRUM_WINDOW_S = 4.0          # presence is read over this much audio
-DRUM_REF_PERCENTILE = 90.0   # ...against the song's own drummed stretches
-DRUM_LO, DRUM_HI = 0.1, 0.3  # presence below LO is drumless, above HI fully drummed
-DRUMLESS_FLOOR = 0.3         # a drumless stretch pulses at this share of its strength
-DRUM_MIN_REF = 0.01          # a song with no drums anywhere is left as it is
+MERGE_S = 0.1                # kicks this close are one pulse (see _merge)
+FIRST_SHARE = 0.5
+# a beat sits on its kick, not on the grid: the grid says which beat, the
+# kick says when. a kick within this reach of a grid beat moves it.
+SNAP_FRACTION = 0.15         # of the local period...
+SNAP_MIN_S = 0.035           # ...but never less than this
+
+# ---------- kicks ----------
+# the pulse follows the kicks, found first, with the grid only as a hint.
+# measured against demucs drum stems on real songs (tools/pulse_bench), the
+# old grid-first map showed 74% of kicks and fired 13 pulses a minute with no
+# drum under them; this one shows 85% and fires 6.5.
+#
+# the kick signal: a wider frame (more low-frequency detail) split by median
+# filtering into its sustained and percussive parts (fitzgerald 2010). a bass
+# note is a horizontal line in the spectrogram and lands in the sustained
+# part; a kick's pitch sweep is vertical. the percussive part's low-band rise
+# finds the candidates.
+WIDE_FFT = 2048
+WIDE_TOP_HZ = 400.0          # the split only reads bins near the kick band
+SPLIT_TIME = 17              # sustained: median over this many frames (~200 ms)
+SPLIT_FREQ = 13              # percussive: median over this many bins (~140 hz)
+KICK_HZ = (30.0, 180.0)
+PEAK_REACH = 3               # a candidate tops the kick signal this many frames either side
+KICK_REF_PERCENTILE = 95.0   # "a full kick" among the song's candidates
+LOCAL_S = 6.0                # the local reference reads this far either side
+# whether a candidate is a kick is learned: kick_model.py, a logistic
+# regression over a log-mel patch at the candidate, trained by
+# tools/pulse_bench against demucs drum stems. change anything that feeds
+# _kick_rows (the bands, the patch, the candidate rules above) and retrain.
+N_MEL = 32
+MEL_HZ = (30.0, 10000.0)
+PATCH_PRE = 2                # the patch's base frame sits this far before the candidate
+PATCH_FRAMES = 5             # ...and this many frames are read against it
+DECAY_FRAMES = (6, 12)       # the kick band's level 70 and 140 ms on, against its peak
+# ...and a rule outside the model: a candidate whose kick band, 140 ms on,
+# holds e^RING_MAX times more than the song's strongest hits do is a bass
+# note ringing on, not a drum. an 808 song's strongest hits are 808s, so its
+# 808s pass. on real songs this drops 0.3% of kicks.
+STRONG_SHARE = 0.8           # "the strongest hits": candidates this near the full kick
+RING_MAX = 2.0
+KICK_SURE = 0.3              # model odds that pulse on a beat, eighth or sixteenth slot
+OFF_SLOT_EXTRA = 0.2         # ...off every slot the model must be this much surer
+# the hand rule: a candidate this strong against its local reference pulses
+# too, unless the model says it is almost surely not a kick
+KICK_VETO = 0.06
+HAND_SLOT, HAND_FREE = 0.38, 0.6
+# ...and a full-strength hit on a slot pulses whatever the model says: it
+# can misread one odd patch (a hi-hat landing late inside it), and a drum
+# this loud on the beat is not worth second-guessing
+HAND_SURE = 0.85
+LOCAL_SHARE = 0.85
+LOCAL_FLOOR = 0.4            # the local reference never drops below this share of the song's
+# no drums nearby: fewer than LONE_MIN sure kicks within LONE_S either
+# side (a vocal, a drumless verse). there only a very sure kick pulses.
+SURE_P = 0.5
+LONE_S = 4.0
+LONE_MIN = 3
+LONE_P = 0.7
+# slots: sixteenths of the local beat, or of half of it when the beat is
+# slow (a half-time grid). a kick within the tolerance of one is on a slot.
+SLOW_BEAT_S = 0.6
+SLOT_TOL = 0.2               # of a slot...
+SLOT_MIN_S = 0.03            # ...but never less than this
 SWELL_WINDOW_S = 1.5
 SWELL_RATE = 4.0
-HALF_TIME_PERIOD_S = 0.4     # above 150 bpm the pulse rides every other beat...
-ODD_ACCENT_MIN = 0.55        # ...but a skipped beat carrying a kick this strong
-ODD_ACCENT_VS_RUN = 0.6      # ...pulses, unless its half carries this share of it every time
-RUN_ALL_PERIOD_S = 0.33      # ...though up to 180 bpm a run of real kicks pulses whole
-HALF_TIME_SWITCH = 1.5       # the ridden half changes when the other earns this many kicks more
+HALF_TIME_PERIOD_S = 0.4     # a beat faster than this releases over two beats' worth
 # a rise that starts at t shows up in the frame whose window is just
 # catching it at the trailing edge, so the frame center sits a little
 # before the onset. measured on synthetic kicks (tools/pulse_lab.py
@@ -135,9 +155,40 @@ def _bins(lo_hz: float, hi_hz: float) -> tuple[int, int]:
 
 
 _LOW = _bins(*LOW_HZ)
-_DRUM = _bins(*DRUM_HZ)
 _FULL = _bins(*FULL_HZ)
 _WINDOW = np.hanning(N_FFT).astype(np.float32)
+_WIDE_WINDOW = np.hanning(WIDE_FFT).astype(np.float32)
+
+
+def _wide_bins(lo_hz: float, hi_hz: float) -> tuple[int, int]:
+    hz = SR / WIDE_FFT
+    return max(1, int(round(lo_hz / hz))), int(round(hi_hz / hz)) + 1
+
+
+def _mel_bank() -> np.ndarray:
+    """N_MEL triangles from MEL_HZ[0] to MEL_HZ[1] over the wide frame's bins."""
+    def mel(f):
+        return 2595.0 * np.log10(1.0 + f / 700.0)
+
+    def hz(m):
+        return 700.0 * (10.0 ** (m / 2595.0) - 1.0)
+    edges = hz(np.linspace(mel(MEL_HZ[0]), mel(MEL_HZ[1]), N_MEL + 2))
+    freqs = np.fft.rfftfreq(WIDE_FFT, 1.0 / SR)
+    bank = np.zeros((N_MEL, freqs.size), np.float32)
+    for k in range(N_MEL):
+        lo, c, hi = edges[k], edges[k + 1], edges[k + 2]
+        up = (freqs - lo) / max(c - lo, 1e-9)
+        down = (hi - freqs) / max(hi - c, 1e-9)
+        bank[k] = np.clip(np.minimum(up, down), 0.0, None)
+        if bank[k].sum() == 0.0:
+            bank[k, int(np.argmin(np.abs(freqs - c)))] = 1.0
+    return bank
+
+
+_KICK = _wide_bins(*KICK_HZ)
+_WIDE_TOP = _wide_bins(0.0, WIDE_TOP_HZ)[1]
+_MEL_FB = _mel_bank()
+_KICK_WEIGHTS = np.asarray(kick_model.WEIGHTS, dtype=float)
 _LAG_MIN = int(round(60.0 / BPM_MAX / FRAME_S))
 _LAG_MAX = int(round(60.0 / BPM_MIN / FRAME_S))
 
@@ -150,7 +201,7 @@ class Beat:
     strength: float
     phase: int        # 0 is the strongest of four; 0 and 2 carry half-time
     period: float     # local beat period in media seconds
-    pulse: bool = True  # false: the screen rides over it (half time, or a stronger hit beside it)
+    pulse: bool = True  # false: no kick landed on this beat
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,14 +528,6 @@ def _track_beats(score: np.ndarray, period: np.ndarray) -> np.ndarray:
     return np.array(beats[::-1], dtype=np.int64)
 
 
-def _peak_near(x: np.ndarray, idx: np.ndarray, reach: int) -> np.ndarray:
-    out = np.empty(idx.size)
-    n = x.size
-    for k, i in enumerate(idx):
-        out[k] = x[max(0, i - reach):min(n, i + reach + 1)].max()
-    return out
-
-
 def _refine(idx: np.ndarray, full: np.ndarray, reach: int = 2) -> np.ndarray:
     out = np.empty_like(idx)
     n = full.size
@@ -511,245 +554,176 @@ def _onset_frame(low: np.ndarray, full: np.ndarray, i: int) -> int:
     return back + int(near_top[-1])
 
 
-def _decay(rms: np.ndarray, f: int) -> float:
-    n = rms.size
-    early = float(rms[min(n - 1, f + DECAY_EARLY)])
-    return float(rms[min(n - 1, f + DECAY_LATE)]) / max(early, 1e-9)
-
-
-def _never_dips(rms: np.ndarray, f: int) -> bool:
-    """a drum always falls away before 150 ms, even when another hit comes
-    in behind it; a held or swelling note never does."""
-    n = rms.size
-    early = float(rms[min(n - 1, f + DECAY_EARLY)])
-    lowest = float(rms[min(n - 1, f + DECAY_EARLY):min(n, f + DECAY_LATE + 1)].min())
-    return lowest >= HIT_DIP_MAX * max(early, 1e-9)
-
-
-def _rings(rms: np.ndarray, f: int, kick_decay: float | None) -> bool:
-    """true when the onset at frame f rings on like a note, not a drum."""
-    if kick_decay is None:
-        return True
-    return _decay(rms, f) > kick_decay * ACCENT_DECAY + ACCENT_DECAY_SLACK
-
-
-def _reach(period_frames: float) -> int:
-    return max(int(round(SNAP_MIN_S / FRAME_S)),
-               int(round(SNAP_FRACTION * period_frames)))
-
-
-def _snap(idx: np.ndarray, low2: np.ndarray, low: np.ndarray,
-          full: np.ndarray, period: np.ndarray
-          ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """each beat onto the kick inside its reach, when there is one. a beat
-    with no kick near (a snare, a rest) keeps its grid place and reads the
-    little low it has there. returns the beats' frames, their lows, the
-    grid frames they came from and the low right at those grid frames."""
-    n = low2.size
-    near = _peak_near(low2, idx, 2)
-    best = np.empty_like(idx)
-    for k, i in enumerate(idx):
-        r = _reach(float(period[i]))
-        lo, hi = max(0, i - r), min(n, i + r + 1)
-        best[k] = lo + int(np.argmax(low2[lo:hi]))
-    found = low2[best]
-    ref = max(LOW_REF_MIN, float(np.percentile(found, LOW_REF_PERCENTILE))) if found.size else LOW_REF_MIN
-    out = idx.copy()
-    lows = near.copy()
-    for k, j in enumerate(best):
-        if found[k] >= SNAP_MIN_LOW * ref:
-            out[k] = _onset_frame(low, full, int(j))
-            lows[k] = found[k]
-    # two neighbours may have reached for the same kick: the one that moved
-    # less keeps it
-    kept: list[int] = []
-    for k in range(out.size):
-        if kept and out[k] <= out[kept[-1]]:
-            prev = kept[-1]
-            if abs(int(idx[k]) - int(out[k])) < abs(int(idx[prev]) - int(out[prev])):
-                kept[-1] = k
-            continue
-        kept.append(k)
-    sel = np.array(kept, dtype=np.int64)
-    return out[sel], lows[sel], idx[sel], near[sel]
-
-
-def _offgrid(low2: np.ndarray, ref: float, grid_frames: np.ndarray,
-             beat_lows: np.ndarray, period: np.ndarray | None,
-             times: np.ndarray, low: np.ndarray, full: np.ndarray,
-             rms: np.ndarray, kick_decay: float | None) -> list[tuple[float, float]]:
-    """kicks the grid missed: anything past a grid slot's snap reach. one
-    as strong as the song's full kick and about as loud as the nearest beat
-    always survives; a lesser one survives only as an accent: a push about
-    once a bar that dies away like a drum. a busy bassline is neither, so
-    it rides the grid instead of doubling it."""
-    if low2.size < 3:
-        return []
-    inner = low2[1:-1]
-    cand = np.flatnonzero((inner > low2[:-2]) & (inner >= low2[2:])
-                          & (inner >= ACCENT_MIN * ref)) + 1
-    found: list[tuple[int, float, float, bool, float]] = []
-    for i in cand:
-        f = _onset_frame(low, full, int(i))
-        rel = math.inf
-        if grid_frames.size:
-            j = int(np.searchsorted(grid_frames, f))
-            ks = [k for k in (j - 1, j) if 0 <= k < grid_frames.size]
-            k = min(ks, key=lambda k: abs(f - int(grid_frames[k])))
-            r = _reach(float(period[i])) if period is not None else 0
-            if abs(f - int(grid_frames[k])) <= r:
-                continue
-            rel = float(low2[i]) / max(float(beat_lows[k]), 1e-9)
-        if rel < ACCENT_VS_BEAT:
-            continue
-        strict = low2[i] >= OFFGRID_MIN * ref and rel >= OFFGRID_VS_BEAT
-        beat_s = float(period[i]) * FRAME_S if period is not None else 0.5
-        found.append((f, float(times[f]), min(1.0, float(low2[i]) / ref), strict,
-                      ACCENT_REACH * beat_s))
-    stamps = np.array([t for _f, t, _s, _strict, _r in found])
-    hits: list[tuple[float, float]] = []
-    for f, t, strength, strict, reach in found:
-        if _never_dips(rms, f):
-            continue
-        if not strict:
-            if _rings(rms, f, kick_decay):
-                continue
-            crowd = int(np.searchsorted(stamps, t + reach) - np.searchsorted(stamps, t - reach))
-            if crowd > ACCENT_SPARSE:
-                continue
-        if hits and t - hits[-1][0] < MERGE_S:
-            if strength > hits[-1][1]:
-                hits[-1] = (t, strength)
-            continue
-        hits.append((t, strength))
-    return hits
-
-
-def _ridden_half(odd: np.ndarray, strengths: np.ndarray) -> np.ndarray:
-    """which half of a double-time grid carries the kicks, beat by beat:
-    a two-state viterbi that earns a beat's strength when that beat is on
-    the ridden half and pays HALF_TIME_SWITCH to change halves. a verse
-    whose kicks moved to the off-eighth switches once, at its edge; a lone
-    syncopation never does. returns, per beat, whether the odd half rides."""
-    n = odd.size
-    score = np.zeros(2)
-    back = np.zeros((n, 2), dtype=np.int8)
-    for j in range(n):
-        new = np.empty(2)
-        for half in (0, 1):
-            stay, move = score[half], score[1 - half] - HALF_TIME_SWITCH
-            back[j, half] = half if stay >= move else 1 - half
-            new[half] = max(stay, move) + (strengths[j] if int(odd[j]) == half else 0.0)
-        score = new
-    out = np.zeros(n, dtype=bool)
-    half = int(np.argmax(score))
-    for j in range(n - 1, -1, -1):
-        out[j] = bool(half)
-        half = int(back[j, half])
-    return out
-
-
-def _in_run(st: np.ndarray, j: int, floor: float) -> bool:
-    """the same half's beats either side (two grid steps away) and one
-    beat next door are all at least ``floor``. at the ends of the song
-    the one neighbour there is stands for both."""
-    n = st.size
-
-    def pair(step: int) -> tuple[float, float]:
-        before = float(st[j - step]) if j - step >= 0 else None
-        after = float(st[j + step]) if j + step < n else None
-        if before is None and after is None:
-            return 0.0, 0.0
-        return (before if before is not None else after,
-                after if after is not None else before)
-
-    same = pair(2)
-    next_door = pair(1)
-    return min(same) >= floor and max(next_door) >= floor
-
-
-def _pulses(phases: list[int], periods: list[float], strengths: np.ndarray,
-            is_drum=None) -> list[bool]:
-    """above 150 bpm the screen rides every other beat: whichever half
-    carries the kicks (_ridden_half). a skipped beat still pulses when it
-    carries a real kick that is not just the tail of a run: four on the
-    floor at 170 stays calm, a pushed kick on the off-eighth of a
-    double-time grid does not vanish. up to 180 bpm a run of real kicks
-    (``is_drum(j)``: dies away like the song's kicks) pulses whole; a run
-    of bass notes on the eighths still rides every other one."""
-    n = len(phases)
-    odd = np.array([p % 2 for p in phases], dtype=bool)
-    st = np.asarray(strengths, dtype=float)
-    rides_odd = _ridden_half(odd, st) if n else np.zeros(0, dtype=bool)
-    out = [True] * n
-    for j in range(n):
-        if periods[j] >= HALF_TIME_PERIOD_S or odd[j] == rides_odd[j]:
-            continue
-        # when the skipped half carries kicks like this one every time, it
-        # is the run the half-time rule exists to calm; a kick the skipped
-        # half does not usually have is a push of its own
-        s = float(st[j])
-        if s < ODD_ACCENT_MIN:
-            out[j] = False
-        elif _in_run(st, j, ODD_ACCENT_VS_RUN * s):
-            out[j] = (periods[j] >= RUN_ALL_PERIOD_S and is_drum is not None
-                      and bool(is_drum(j)))
+def _sliding(x: np.ndarray, k: int, axis: int, fn) -> np.ndarray:
+    """fn over a centred window of k along axis, edges held (like
+    scipy.ndimage with mode="nearest"). chunked so a long song never
+    builds the whole window stack at once."""
+    half = k // 2
+    out = np.empty_like(x)
+    n = x.shape[0]
+    step = 4096
+    for s in range(0, n, step):
+        e = min(n, s + step)
+        if axis == 0:
+            lo, hi = max(0, s - half), min(n, e + half)
+            seg = np.pad(x[lo:hi], ((half - (s - lo), half - (hi - e)), (0, 0)), mode="edge")
         else:
-            out[j] = True
+            seg = np.pad(x[s:e], ((0, 0), (half, half)), mode="edge")
+        win = np.lib.stride_tricks.sliding_window_view(seg, k, axis=axis)
+        out[s:e] = fn(win, axis=-1)
     return out
 
 
-def _merge(beat_times: np.ndarray, strengths: np.ndarray, pulse: list[bool],
-           hits: list[tuple[float, float]]) -> tuple[list[bool], list[tuple[float, float]]]:
-    """pulses that crowd each other: within MERGE_S they are one drum read
-    twice, within CALM_S a much weaker one is a stray beside the real hit.
-    either way the stronger stays."""
-    pulse = list(pulse)
-    events = sorted([(float(beat_times[k]), float(strengths[k]), k)
-                     for k in range(beat_times.size) if pulse[k]]
-                    + [(t, s, -1 - i) for i, (t, s) in enumerate(hits)])
-    dropped: set[int] = set()
-    last = None
-    for ev in events:
-        if last is not None:
-            gap = ev[0] - last[0]
-            weak, strong = (ev, last) if ev[1] <= last[1] else (last, ev)
-            if gap < MERGE_S or (gap < CALM_S and weak[1] < CALM_RATIO * strong[1]):
-                dropped.add(weak[2])
-                last = strong
-                continue
-        last = ev
-    for key in dropped:
-        if key >= 0:
-            pulse[key] = False
-    kept = [h for i, h in enumerate(hits) if -1 - i not in dropped]
-    return pulse, kept
+def _kick_signal(wide: np.ndarray) -> np.ndarray:
+    """per frame: the low-band rise of the percussive part, summed over
+    LOW_SUM_FRAMES like the tracker's low band."""
+    if wide.shape[0] == 0:
+        return np.zeros(0)
+    sustained = _sliding(wide, SPLIT_TIME, 0, np.median)
+    percussive = _sliding(wide, SPLIT_FREQ, 1, np.median)
+    mask = percussive * percussive / (percussive * percussive + sustained * sustained + 1e-12)
+    lo, hi = _KICK
+    sq = np.sqrt(wide[:, lo:hi] * mask[:, lo:hi])
+    rise = np.zeros(wide.shape[0])
+    rise[1:] = np.maximum(sq[1:] - sq[:-1], 0.0).sum(axis=1)
+    out = rise.copy()
+    for k in range(1, LOW_SUM_FRAMES):
+        out[k:] += rise[:-k]
+    return out
 
 
-def _drum_presence(drum: np.ndarray) -> np.ndarray | None:
-    """per frame, 0..1: how drummed this stretch is against the song's own
-    drummed stretches. None when the song has no drums to compare with."""
-    if drum.size == 0:
-        return None
-    w = max(1, int(round(DRUM_WINDOW_S / FRAME_S)))
-    excess = np.maximum(0.0, drum - float(np.median(drum)))
-    env = np.convolve(excess, np.ones(w) / w, mode="same")
-    ref = float(np.percentile(env, DRUM_REF_PERCENTILE))
-    if ref < DRUM_MIN_REF:
-        return None
-    return np.clip(env / ref, 0.0, 1.0)
+def _local_max(frames: np.ndarray, values: np.ndarray, reach: int) -> np.ndarray:
+    """per entry: the largest value among the entries within reach frames."""
+    out = np.empty(values.size)
+    lo = np.searchsorted(frames, frames - reach, side="left")
+    hi = np.searchsorted(frames, frames + reach, side="right")
+    for k in range(values.size):
+        out[k] = values[lo[k]:hi[k]].max()
+    return out
 
 
-def _drum_damping(drum: np.ndarray | None, frames: np.ndarray) -> np.ndarray:
-    """strength multipliers for pulses at these frames: 1 where drums play,
-    DRUMLESS_FLOOR where none have for a while, a smooth ramp between."""
-    presence = _drum_presence(drum) if drum is not None else None
-    if presence is None or frames.size == 0:
-        return np.ones(frames.size)
-    x = np.clip((presence[np.clip(frames, 0, presence.size - 1)] - DRUM_LO)
-                / (DRUM_HI - DRUM_LO), 0.0, 1.0)
-    x = x * x * (3.0 - 2.0 * x)
-    return DRUMLESS_FLOOR + (1.0 - DRUMLESS_FLOOR) * x
+def _kick_rows(logmel: np.ndarray, kick: np.ndarray, cand: np.ndarray,
+               kick_ref: float, local: np.ndarray, body: np.ndarray) -> np.ndarray:
+    """what the model reads at each candidate: the log-mel rise over a few
+    frames against the frame before the attack, the level at the attack
+    against the song's loud frames, the kick signal against the song's full
+    kick and against its neighbours, and how far the kick band has fallen
+    a little later."""
+    ref = float(np.percentile(logmel.mean(axis=1), 95)) if logmel.size else 0.0
+    base = logmel[cand - PATCH_PRE]
+    rise = np.stack([logmel[cand - PATCH_PRE + 1 + k] - base for k in range(PATCH_FRAMES)], axis=1)
+    level = logmel[cand] - ref
+    v = kick[cand]
+    peak = np.maximum.reduce([body[cand + k] for k in range(3)]) + 1e-6
+    decay = np.stack([np.log((body[cand + k] + 1e-6) / peak) for k in DECAY_FRAMES], axis=1)
+    return np.hstack((rise.reshape(cand.size, -1), level,
+                      np.log(v / kick_ref + 1e-6)[:, None],
+                      np.log(v / (local + 1e-9) + 1e-6)[:, None], decay))
+
+
+def _kick_odds(rows: np.ndarray) -> np.ndarray:
+    z = rows @ _KICK_WEIGHTS + kick_model.BIAS
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -40.0, 40.0)))
+
+
+def _kick_candidates(wide: np.ndarray, mel: np.ndarray, n: int):
+    """kick-signal peaks the model can judge: their frames, the kick
+    signal, the song's full kick, the local references, the model's rows
+    and how much longer each rings than the song's strongest hits."""
+    kick = _kick_signal(wide)[:n]
+    none = (np.zeros(0, np.int64), kick, 1.0, np.zeros(0), np.zeros((0, 0)), np.zeros(0))
+    if kick.size < 2 * PEAK_REACH + 1:
+        return none
+    top = _sliding(kick[:, None], 2 * PEAK_REACH + 1, 0, np.max)[:, 0]
+    cand = np.flatnonzero((kick >= top) & (kick > 0))
+    if cand.size:
+        cand = cand[np.concatenate(([True], np.diff(cand) > 1))]
+    if cand.size == 0:
+        return none
+    vals = kick[cand]
+    kick_ref = max(1e-9, float(np.percentile(vals[vals > 0.05 * vals.max()], KICK_REF_PERCENTILE)))
+    local = _local_max(cand, vals, int(round(LOCAL_S / FRAME_S)))
+    usable = (cand - PATCH_PRE >= 0) & (cand - PATCH_PRE + PATCH_FRAMES < n) & (cand + DECAY_FRAMES[-1] < n)
+    cand, local = cand[usable], local[usable]
+    logmel = np.log(1e-3 + mel[:n])
+    body = wide[:n, _KICK[0]:_KICK[1]].sum(axis=1)
+    rows = _kick_rows(logmel, kick, cand, kick_ref, local, body)
+    late = rows[:, -1]
+    strong = kick[cand] >= STRONG_SHARE * kick_ref
+    ring = late - float(np.median(late[strong] if strong.any() else late)) if cand.size else late
+    return cand, kick, kick_ref, local, rows, ring
+
+
+def _slot_distance(t: float, beat_times: np.ndarray) -> tuple[float, float]:
+    """distance from t to the nearest slot of the local grid and how far
+    off a slot may be, both in seconds."""
+    j = int(np.searchsorted(beat_times, t)) - 1
+    if j < 0 or j + 1 >= beat_times.size:
+        return 0.0, 1.0
+    a, b = float(beat_times[j]), float(beat_times[j + 1])
+    slot = (b - a) / (4 if b - a <= SLOW_BEAT_S else 8)
+    x = (t - a) / slot
+    return abs(x - round(x)) * slot, max(SLOT_MIN_S, SLOT_TOL * slot)
+
+
+def _kicks(low: np.ndarray, full: np.ndarray, wide: np.ndarray, mel: np.ndarray,
+           times: np.ndarray, beat_times: np.ndarray) -> list[tuple[int, float, float]]:
+    """(frame, time, strength) of every kick, one per drum."""
+    cand, kick, kick_ref, local, rows, ring = _kick_candidates(wide, mel, low.size)
+    if cand.size == 0:
+        return []
+    odds = _kick_odds(rows)
+    hand_ref = np.clip(local * LOCAL_SHARE, LOCAL_FLOOR * kick_ref, kick_ref)
+    sure_t = times[cand[odds >= SURE_P]]
+    found = []
+    for i, p, ref, r in zip(cand, odds, hand_ref, ring):
+        if r > RING_MAX:
+            continue
+        f = _onset_frame(low, full, int(i))
+        t = float(times[f])
+        on_slot = True
+        if beat_times.size:
+            d, tol = _slot_distance(t, beat_times)
+            on_slot = d <= tol
+        need = KICK_SURE if on_slot else min(0.95, KICK_SURE + OFF_SLOT_EXTRA)
+        at = float(times[i])
+        lone = int(np.searchsorted(sure_t, at + LONE_S, side="right")
+                   - np.searchsorted(sure_t, at - LONE_S, side="left")) < LONE_MIN
+        if lone:
+            need = max(need, LONE_P)
+        ok = p >= need
+        if not ok and not lone:
+            rel = kick[i] / ref
+            ok = (p >= KICK_VETO and rel >= (HAND_SLOT if on_slot else HAND_FREE)
+                  or on_slot and rel >= HAND_SURE)
+        if ok:
+            found.append((f, t, min(1.0, float(kick[i]) / kick_ref), float(p)))
+    return _merge(sorted(found))
+
+
+def _merge(found: list[tuple[int, float, float, float]]) -> list[tuple[int, float, float]]:
+    """(frame, time, strength) per pulse from (frame, time, strength,
+    odds) per kick, in time order. kicks within MERGE_S of a group's first
+    are one pulse. it sits on the first when the model is sure of that
+    one and it has FIRST_SHARE of the louder's strength (a double kick
+    starts there), otherwise on the louder (a soft ghost before the real
+    hit). groups are measured from their first kick, so a run of fast
+    kicks gives one pulse per pair instead of sliding along the run."""
+    kept: list[tuple[int, float, float]] = []
+    first_sure = False
+    start = -math.inf
+    for f, t, s, p in found:
+        if kept and t - start < MERGE_S:
+            kf, kt, ks = kept[-1]
+            if first_sure and ks >= FIRST_SHARE * s:
+                kept[-1] = (kf, kt, max(s, ks))
+            elif s > ks:
+                kept[-1] = (f, t, s)
+            continue
+        start = t
+        first_sure = p >= SURE_P
+        kept.append((f, t, s))
+    return kept
 
 
 def _loudness(level: np.ndarray | None, times: np.ndarray, duration: float) -> np.ndarray:
@@ -780,7 +754,7 @@ def _swell(rms: np.ndarray, times: np.ndarray, duration: float) -> np.ndarray:
 
 
 def _build(low: np.ndarray, full: np.ndarray, rms: np.ndarray,
-           complete: bool, drum: np.ndarray | None = None,
+           wide: np.ndarray, mel: np.ndarray, complete: bool,
            level: np.ndarray | None = None) -> BeatMap:
     n = low.size
     duration = n * FRAME_S
@@ -788,56 +762,57 @@ def _build(low: np.ndarray, full: np.ndarray, rms: np.ndarray,
     ref_full = float(np.percentile(full, 98)) if n else 0.0
     onset = np.clip(full / max(ref_full, 1e-6), 0.0, 1.0)
     tempo, confidence, period = _tempo(onset)
-    # a kick's attack spans a few frames and splits across their edges
-    # differently each time; summing the rise over LOW_SUM_FRAMES reads it
-    # the same wherever it lands in the frame grid
-    low2 = low.copy()
-    for k in range(1, LOW_SUM_FRAMES):
-        low2[k:] += low[:-k]
-    beats: tuple[Beat, ...] = ()
-    beat_times = np.zeros(0)
-    lows = np.zeros(0)
+    grid = np.zeros(0, dtype=np.int64)
     if period is not None and confidence >= CONFIDENCE_FLOOR:
-        # the grid should sit on the low-band events when it has a choice:
-        # a snare is the louder onset, the kick is the one the pulse wants
+        # a kick's attack spans a few frames and splits across their edges
+        # differently each time; summing the rise over LOW_SUM_FRAMES reads
+        # it the same wherever it lands in the frame grid. the grid should
+        # sit on the low-band events when it has a choice: a snare is the
+        # louder onset, the kick is the one the pulse wants.
+        low2 = low.copy()
+        for k in range(1, LOW_SUM_FRAMES):
+            low2[k:] += low[:-k]
         ref_low = float(np.percentile(low2, 98))
         low_norm = np.clip(low2 / max(ref_low, 1e-6), 0.0, 1.0)
         score = _smooth((1.0 - LOW_WEIGHT) * onset + LOW_WEIGHT * low_norm)
         grid = _refine(_track_beats(score, period), full)
         grid = grid[(grid >= 0) & (grid < n)]
-        idx, lows, grid, on_grid = _snap(grid, low2, low, full, period)
-        # "a full kick" is read where the grid put the beats, as it always
-        # was: a snapped beat may now read stronger, never the rest weaker
-        ref = max(LOW_REF_MIN, float(np.percentile(on_grid, LOW_REF_PERCENTILE))) if lows.size else LOW_REF_MIN
-        strengths = np.clip(lows / ref, 0.0, 1.0)
-        if idx.size >= 4:
-            k = int(np.argmax([lows[j::4].mean() for j in range(4)]))
-        else:
-            k = 0
-        phases = [(j - k) % 4 for j in range(idx.size)]
-        periods = [float(period[i] * FRAME_S) for i in idx]
-        kicks = [int(i) for i, s in zip(idx, strengths) if s >= ODD_ACCENT_MIN]
-        kick_decay = float(np.median([_decay(rms, i) for i in kicks])) if kicks else None
-        pulse = _pulses(phases, periods, strengths,
-                        lambda j: not _rings(rms, int(idx[j]), kick_decay))
-        beat_times = times[idx]
-        hits = _offgrid(low2, ref, grid, lows, period, times, low, full, rms, kick_decay)
-        pulse, hits = _merge(beat_times, strengths, pulse, hits)
-        damp = _drum_damping(drum, idx)
-        beats = tuple(
-            Beat(float(beat_times[j]), float(strengths[j] * damp[j]), int(phases[j]),
-                 periods[j], bool(pulse[j]))
-            for j in range(idx.size))
-    else:
-        ref = max(LOW_REF_MIN, float(np.percentile(low2, 99))) if n else LOW_REF_MIN
-        hits = _offgrid(low2, ref, np.zeros(0, dtype=np.int64), lows, None, times, low, full,
-                        rms, None)
-    hit_frames = np.searchsorted(times, [t for t, _s in hits]).astype(np.int64)
-    hit_damp = _drum_damping(drum, hit_frames)
-    hits = tuple(Hit(t, s * float(d)) for (t, s), d in zip(hits, hit_damp))
+    grid_times = times[grid]
+    kicks = _kicks(low, full, wide, mel, times, grid_times)
+    kick_times = np.array([t for _f, t, _s in kicks])
+    used: set[int] = set()
+    beats: list[Beat] = []
+    if grid.size:
+        # each beat moves onto the nearest kick within its reach; a beat
+        # with none keeps its grid place and does not pulse
+        periods = [float(period[i] * FRAME_S) for i in grid]
+        beat_times = grid_times.copy()
+        strengths = np.zeros(grid.size)
+        for j, bt in enumerate(grid_times):
+            reach = max(SNAP_MIN_S, SNAP_FRACTION * periods[j])
+            k = int(np.searchsorted(kick_times, bt))
+            best = None
+            for kk in (k - 1, k):
+                if (0 <= kk < kick_times.size and kk not in used
+                        and abs(kick_times[kk] - bt) <= reach
+                        and (best is None or abs(kick_times[kk] - bt) < abs(kick_times[best] - bt))):
+                    best = kk
+            if best is not None:
+                used.add(best)
+                beat_times[j] = kick_times[best]
+                strengths[j] = kicks[best][2]
+        # the bar starts on whichever beat of four carries the most kick
+        first = int(np.argmax([strengths[j::4].mean() for j in range(4)])) if grid.size >= 4 else 0
+        last = -math.inf
+        for j in range(grid.size):
+            t = max(float(beat_times[j]), last + 1e-3)
+            last = t
+            beats.append(Beat(t, float(strengths[j]), (j - first) % 4, periods[j],
+                              bool(strengths[j] > 0.0)))
+    hits = tuple(Hit(t, s) for k, (_f, t, s) in enumerate(kicks) if k not in used)
     swell = tuple(float(v) for v in _swell(rms, times, duration)) if n else ()
     loudness = tuple(float(v) for v in _loudness(level, times, duration)) if n else ()
-    return BeatMap(duration, complete, tempo, confidence, beats, hits, swell,
+    return BeatMap(duration, complete, tempo, confidence, tuple(beats), hits, swell,
                    loudness=loudness)
 
 
@@ -848,14 +823,18 @@ class Analysis:
 
     def __init__(self) -> None:
         self._tail = np.zeros(0, dtype=np.float32)
+        # wide frames centre where the narrow ones do, so they start half
+        # the difference in window length before the audio
+        self._wide_tail = np.zeros(WIDE_FFT // 2 - N_FFT // 2, dtype=np.float32)
+        self._wide_frames = 0
         self._prev: np.ndarray | None = None
         self._prev_sq: np.ndarray | None = None
-        self._prev_drum: np.ndarray | None = None
         self._low: list[np.ndarray] = []
-        self._drum: list[np.ndarray] = []
         self._level: list[np.ndarray] = []
         self._full: list[np.ndarray] = []
         self._rms: list[np.ndarray] = []
+        self._wide: list[np.ndarray] = []
+        self._mel: list[np.ndarray] = []
         self.frames = 0
 
     @property
@@ -864,6 +843,7 @@ class Analysis:
 
     def push(self, pcm: np.ndarray) -> None:
         pcm = np.nan_to_num(np.asarray(pcm, dtype=np.float32).ravel())
+        self._push_wide(pcm)
         buf = np.concatenate((self._tail, pcm)) if self._tail.size else pcm
         n = (buf.size - N_FFT) // HOP + 1 if buf.size >= N_FFT else 0
         if n <= 0:
@@ -888,23 +868,55 @@ class Analysis:
         self._full.append(rise[:, _FULL[0]:_FULL[1]].sum(axis=1))
         self._prev_sq = sq[-1:]
         self._rms.append(np.sqrt((band * band).sum(axis=1)) / (N_FFT / 4.0))
-        # drums: the share of the high band that jumps at once
-        hi = np.log1p(10.0 * mag[:, _DRUM[0]:_DRUM[1]])
-        prev_drum = self._prev_drum if self._prev_drum is not None else hi[:1]
-        jump = np.diff(np.vstack((prev_drum, hi)), axis=0) > DRUM_RISE
-        self._drum.append(jump.mean(axis=1))
-        self._prev_drum = hi[-1:]
         self._level.append(np.sqrt((mag * mag).sum(axis=1)) / (N_FFT / 4.0))
         self._prev = logm[-1:]
         self._tail = buf[n * HOP:]
         self.frames += n
 
+    def _wide_spectra(self, buf: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+        out_low = np.empty((n, _WIDE_TOP), np.float32)
+        out_mel = np.empty((n, N_MEL), np.float32)
+        for s in range(0, n, 1024):
+            e = min(n, s + 1024)
+            idx = np.arange(WIDE_FFT)[None, :] + HOP * np.arange(s, e)[:, None]
+            mag = np.abs(np.fft.rfft(buf[idx] * _WIDE_WINDOW, axis=1)).astype(np.float32)
+            out_low[s:e] = mag[:, :_WIDE_TOP]
+            out_mel[s:e] = mag @ _MEL_FB.T
+        return out_low, out_mel
+
+    def _push_wide(self, pcm: np.ndarray) -> None:
+        buf = np.concatenate((self._wide_tail, pcm))
+        n = (buf.size - WIDE_FFT) // HOP + 1 if buf.size >= WIDE_FFT else 0
+        if n <= 0:
+            self._wide_tail = buf
+            return
+        low, mel = self._wide_spectra(buf, n)
+        self._wide.append(low)
+        self._mel.append(mel)
+        self._wide_tail = buf[n * HOP:]
+        self._wide_frames += n
+
+    def _wide_now(self) -> tuple[np.ndarray, np.ndarray]:
+        """the wide spectra for every narrow frame so far: the last few
+        need audio past the frontier, read as silence until it arrives."""
+        wide = list(self._wide)
+        mel = list(self._mel)
+        missing = self.frames - self._wide_frames
+        if missing > 0:
+            buf = np.concatenate((self._wide_tail, np.zeros(missing * HOP + WIDE_FFT, np.float32)))
+            low, m = self._wide_spectra(buf, missing)
+            wide.append(low)
+            mel.append(m)
+        if not wide:
+            return np.zeros((0, _WIDE_TOP), np.float32), np.zeros((0, N_MEL), np.float32)
+        return np.concatenate(wide)[:self.frames], np.concatenate(mel)[:self.frames]
+
     def build(self, complete: bool = False) -> BeatMap | None:
         if self.frames < 4:
             return None
+        wide, mel = self._wide_now()
         return _build(np.concatenate(self._low), np.concatenate(self._full),
-                      np.concatenate(self._rms), complete,
-                      drum=np.concatenate(self._drum),
+                      np.concatenate(self._rms), wide, mel, complete,
                       level=np.concatenate(self._level))
 
 
