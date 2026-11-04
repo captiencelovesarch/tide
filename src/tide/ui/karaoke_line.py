@@ -118,7 +118,7 @@ class SweepLine(QWidget):
         self._fg = QColor("#e6e6e6")
         self._accent = QColor("#d4b95e")
         self._modern = False
-        self._pt = 24
+        self._pt = 24.0
         self._layout_key: tuple | None = None
         self._rows: list[list[tuple[int, float, float]]] = []   # (word idx, x, width)
         self._row_h = 0.0
@@ -127,6 +127,8 @@ class SweepLine(QWidget):
         self._timer.timeout.connect(self._tick)
         self._last_state: tuple | None = None
         self._left = False
+        # centred but snug: the lyrics list's centre layout (no karaoke air)
+        self._snug = False
         self._apply_font()
 
     # ---------- configuration ----------
@@ -134,10 +136,19 @@ class SweepLine(QWidget):
     def set_look(self, *, fg: QColor, accent: QColor, modern: bool, pt: int) -> None:
         self._fg, self._accent, self._modern = QColor(fg), QColor(accent), bool(modern)
         if pt != self._pt:
-            self._pt = int(pt)
+            self._pt = float(pt)
             self._apply_font()
         self._last_state = None
         self.update()
+
+    def set_pt(self, pt: float) -> None:
+        """Just the size, fractional allowed: the lyrics list grows its
+        sung line into place a frame at a time."""
+        pt = float(pt)
+        if pt != self._pt:
+            self._pt = pt
+            self._apply_font()
+            self.update()
 
     def set_left_aligned(self, left: bool) -> None:
         """Left-aligned and snug (the lyrics list's active line) instead of
@@ -147,9 +158,17 @@ class SweepLine(QWidget):
         self.updateGeometry()
         self.update()
 
+    def set_snug(self, snug: bool) -> None:
+        """Centred rows without karaoke's breathing room above and below
+        (the lyrics list in its centre layout)."""
+        self._snug = bool(snug)
+        self._layout_key = None
+        self.updateGeometry()
+        self.update()
+
     def _apply_font(self) -> None:
         f = QFont(self.font())
-        f.setPointSize(max(1, self._pt))
+        f.setPointSizeF(max(1.0, float(self._pt)))
         f.setWeight(QFont.Bold)
         f.setLetterSpacing(QFont.PercentageSpacing, 102)
         self.setFont(f)
@@ -222,7 +241,7 @@ class SweepLine(QWidget):
         fm = QFontMetricsF(self.font())
         rows = max(1, len(self._rows))
         m = self.contentsMargins()
-        air = 0.0 if self._left else fm.height() * 0.5
+        air = 0.0 if (self._left or self._snug) else fm.height() * 0.5
         return int(rows * self._row_h + air + m.top() + m.bottom() + 0.999)
 
     def sizeHint(self) -> QSize:
@@ -296,7 +315,7 @@ class SweepLine(QWidget):
         total_h = len(self._rows) * self._row_h
         m = self.contentsMargins()
         inner_h = self.height() - m.top() - m.bottom()
-        top = m.top() + (0.0 if self._left else (inner_h - total_h) / 2.0)
+        top = m.top() + (0.0 if (self._left or self._snug) else (inner_h - total_h) / 2.0)
         fg = legibility.ink(self, self._fg)
         accent = legibility.ink(self, self._accent)
         idx, frac = self._progress(self.clock.now())

@@ -747,6 +747,7 @@ class VisualizerView(QWidget):
         self.engine.fullscreen_requested.connect(self._toggle_fullscreen)
         self._grid = TileGrid(self.engine, api_provider=self._api)
         self._grid.menu_requested.connect(self._on_tile_menu)
+        self._grid.menu_extra.connect(self._fill_tile_menu)
         self._grid.setFocusPolicy(Qt.ClickFocus)
 
         self._heading = Heading("visualizer")
@@ -1001,15 +1002,18 @@ class VisualizerView(QWidget):
         return menu
 
     def _build_tile_menu(self, slot: int) -> QMenu:
-        from .vis_play import LAYOUT_LABELS
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_DeleteOnClose)
+        self._fill_tile_menu(slot, menu)
+        return menu
+
+    def _fill_tile_menu(self, slot: int, menu: QMenu) -> None:
+        from .vis_play import LAYOUT_LABELS
         self._slot_menu(menu, slot)
         menu.addSeparator()
         lmenu = menu.addMenu(theming.styled_case("layout"))
         self._radio(lmenu, LAYOUT_LABELS, self._settings().visualizer_layout,
                     "visualizer_layout")
-        return menu
 
     def _open_style_menu(self) -> None:
         # Rebuilt per open so the device list re-enumerates fresh. Deferred

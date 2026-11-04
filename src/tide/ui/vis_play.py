@@ -209,6 +209,8 @@ class LyricsTile(TileMixin, QWidget):
                 w = getattr(self.view, chrome, None)
                 if w is not None:
                     w.hide()
+            # right-click a line: the lyric items, then the tile's own
+            self.view.set_menu_extra(self._fill_host_menu)
             lay.addWidget(self.view)
         else:
             label = QLabel(theming.styled_case("lyrics show up here"))
@@ -220,6 +222,12 @@ class LyricsTile(TileMixin, QWidget):
         self._last_pos = -math.inf
         self._rippling = False
         engine.register(self)
+
+    def _fill_host_menu(self, menu) -> None:
+        # the tile's own right-click items live with the visualizer view
+        grid = self.parentWidget()
+        if isinstance(grid, TileGrid) and self in grid.tiles:
+            grid.menu_extra.emit(grid.tiles.index(self), menu)
 
     def _sync(self) -> None:
         if self.view is None or not self.isVisible():
@@ -354,6 +362,8 @@ class TileGrid(QWidget):
     long as its slot keeps its kind (the tapper's streak, the spectrogram's history)."""
 
     menu_requested = Signal(int, object)    # slot, global QPoint
+    # slot, a QMenu to add that tile's items to (a lyrics tile's own menu)
+    menu_extra = Signal(int, object)
 
     def __init__(self, engine: VisEngine, api_provider=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)

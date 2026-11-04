@@ -267,6 +267,8 @@ class FullscreenPlayer(QWidget):
             chrome.hide()
         self.lyrics_panel.setSizePolicy(QSizePolicy.Expanding,
                                         QSizePolicy.Expanding)
+        # right-click a line: the lyric items, then this surface's own
+        self.lyrics_panel.set_menu_extra(self._fill_menu)
         # Start hidden to match _pane="off"; showEvent applies the
         # remembered pane.
         self.lyrics_panel.hide()
@@ -432,6 +434,11 @@ class FullscreenPlayer(QWidget):
             "speed_faster": lambda: window.speed_btn.set_speed(
                 window.speed_btn.speed() + SPEED_STEP),
             "speed_reset": lambda: window.speed_btn.reset(),
+            # the lyrics keys, on the pane's lyrics (karaoke stays K below)
+            "lyrics_earlier": lambda: self.lyrics_panel.nudge_timing(-1),
+            "lyrics_later": lambda: self.lyrics_panel.nudge_timing(1),
+            "lyrics_timing_reset": lambda: self.lyrics_panel.reset_timing(),
+            "lyrics_copy": lambda: self.lyrics_panel.copy_line(),
         }
         self._keymap_shortcuts: dict[str, QShortcut] = {
             action_id: QShortcut(QKeySequence(), self, handler)
@@ -1034,9 +1041,17 @@ class FullscreenPlayer(QWidget):
     # ---------- context menu ----------
 
     def _on_context_menu(self, pos) -> None:
-        s = self._settings()
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_DeleteOnClose)
+        self._fill_menu(menu)
+        self._menu = menu
+        # popup() is non-blocking — no modal-from-handler hazard.
+        menu.popup(self.mapToGlobal(pos))
+
+    def _fill_menu(self, menu: QMenu) -> None:
+        """This surface's own items. The lyrics pane's menu adds them
+        under its lyric items (LyricsView.set_menu_extra)."""
+        s = self._settings()
 
         backdrop = menu.addMenu(theming.styled_case("backdrop"))
         current_style = s.fullscreen_backdrop_style or "follow"
@@ -1079,7 +1094,3 @@ class FullscreenPlayer(QWidget):
         exit_act = QAction(theming.styled_case("exit fullscreen"), menu)
         exit_act.triggered.connect(self._request_exit)
         menu.addAction(exit_act)
-
-        self._menu = menu
-        # popup() is non-blocking — no modal-from-handler hazard.
-        menu.popup(self.mapToGlobal(pos))

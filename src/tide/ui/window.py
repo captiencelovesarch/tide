@@ -466,7 +466,22 @@ ACTIONS: tuple[ShortcutAction, ...] = (
     # taken by repeat.
     ShortcutAction("refresh_session", "refresh yt session", "Ctrl+Shift+R",
                    "session", lambda w: w.refresh_session_manual()),
+    # -- lyrics: live only while the lyrics tab is up (_sync_lyrics_keys),
+    # so the bare keys don't swallow typing or other views' keys. ","
+    # and "." because [ and ] are the speed keys.
+    ShortcutAction("lyrics_karaoke", "karaoke mode", "K", "lyrics",
+                   lambda w: w.lyrics_view.toggle_karaoke()),
+    ShortcutAction("lyrics_earlier", "this song's lyrics earlier", ",", "lyrics",
+                   lambda w: w.lyrics_view.nudge_timing(-1)),
+    ShortcutAction("lyrics_later", "this song's lyrics later", ".", "lyrics",
+                   lambda w: w.lyrics_view.nudge_timing(1)),
+    ShortcutAction("lyrics_timing_reset", "reset this song's timing", "", "lyrics",
+                   lambda w: w.lyrics_view.reset_timing()),
+    ShortcutAction("lyrics_copy", "copy the lyric line", "Ctrl+C", "lyrics",
+                   lambda w: w.lyrics_view.copy_line()),
 )
+
+LYRICS_ACTION_IDS = frozenset(a.id for a in ACTIONS if a.group == "lyrics")
 
 
 def default_keymap() -> dict[str, str]:
@@ -892,8 +907,13 @@ class MainWindow(QMainWindow):
         from .. import lyric_timing
         lyric_timing.service().set_settings_provider(lambda: self._settings)
         lyric_timing.service().set_stream_provider(self._stream_ref_for)
-        self.lyrics_view = LyricsView(self.api)
+        self.lyrics_view = LyricsView(self.api, tab=True)
         self.lyrics_view.list_sweep_toggled.connect(self._on_lyrics_list_sweep)
+        # Click a lyric line (tab, mini, fullscreen, visualizer tile) to
+        # play from it.
+        from . import lyrics as lyrics_ui
+        lyrics_ui.set_seeker(self.player.seek)
+        lyrics_ui.set_romanized_saver(self._on_lyrics_romanized)
         # Used by ctx.music.play_at (the instrumental finder's swap) + by
         # any future feature that needs to load a track and snap to a
         # non-zero start point on first PLAYING (e.g. session-restore
@@ -1043,6 +1063,7 @@ class MainWindow(QMainWindow):
         # there (click, digit shortcut, back). Detail pages keep the root
         # they were reached from.
         self.stack.currentChanged.connect(self._mark_nav_current)
+        self.stack.currentChanged.connect(self._sync_lyrics_keys)
         # Named so the adaptive-background QSS can transparentize content
         # containers and QScrollArea viewports. See theming._CONTENT_BACKDROP_QSS.
         self.stack.setObjectName("contentStack")
@@ -2519,6 +2540,10 @@ class MainWindow(QMainWindow):
         if can_like and self._current is not None:
             self._lookup_like(cur_source, self._current.video_id)
         self._refresh_nav_buttons()
+        # The song's own lyric timing nudge, for every lyric reader (the
+        # views, discord's line, plugins), open lyrics view or not.
+        from . import lyrics as lyrics_ui
+        lyrics_ui.song_changed(self._current)
         # If lyrics is the active view, refresh it for the new track.
         if self.stack.currentIndex() == 3:
             self.lyrics_view.show_for(self._current)
@@ -3354,6 +3379,9 @@ class MainWindow(QMainWindow):
             return
         self._prefetch_armed_for = nxt.video_id
         self._prefetch.request(nxt)
+        # and its lyrics, so they're up the moment it starts
+        from . import lyrics as lyrics_ui
+        lyrics_ui.prefetch(self.api, nxt)
 
     def _on_duration(self, secs: float) -> None:
         self.progress.setDuration(secs)
@@ -3700,6 +3728,8 @@ class MainWindow(QMainWindow):
         text_fx.set_style(getattr(s, "text_transition", "") or "scramble")
         art_fx.set_style(getattr(s, "art_transition", "") or "flip")
         lyrics.set_size(getattr(s, "lyrics_size", "") or "large")
+        lyrics.set_layout_pref(getattr(s, "lyrics_layout", "") or "theme")
+        lyrics.set_romanized(bool(getattr(s, "lyrics_romanized", False)), save=False)
         self.apply_lyrics_timing_setting()
         self.apply_app_icon_setting()
         # Thumbnails are preset-owned (brutalist keeps them ON).
@@ -3867,7 +3897,17 @@ class MainWindow(QMainWindow):
             sc = QShortcut(QKeySequence(km.get(action.id, action.default)),
                            self, lambda a=action: a.run(self))
             self._shortcuts[action.id] = sc
+        self._sync_lyrics_keys()
         self._refresh_shortcut_tooltips()
+
+    def _sync_lyrics_keys(self, *_args) -> None:
+        """The lyrics keys work on the lyrics tab and nowhere else."""
+        stack = getattr(self, "stack", None)
+        on = stack is not None and stack.currentIndex() == 3
+        for action_id in LYRICS_ACTION_IDS:
+            sc = getattr(self, "_shortcuts", {}).get(action_id)
+            if sc is not None:
+                sc.setEnabled(on)
 
     def rebind_shortcuts(self) -> None:
         """Apply settings.keymap to the live QShortcuts — no restart.
@@ -5136,6 +5176,7 @@ class MainWindow(QMainWindow):
         "apply_text_transition_setting",
         "apply_art_transition_setting",
         "apply_lyrics_size_setting",
+        "apply_lyrics_layout_setting",
         "apply_lyrics_timing_setting",
         "apply_loading_setting",
         "apply_ui_sounds_setting",
@@ -5360,6 +5401,22 @@ class MainWindow(QMainWindow):
     def apply_lyrics_size_setting(self) -> None:
         from . import lyrics
         lyrics.set_size(getattr(self._settings, "lyrics_size", "") or "large")
+
+    def _on_lyrics_romanized(self, on: bool) -> None:
+        """The lyrics menu's [show romanized]: keep it."""
+        s = getattr(self, "_settings", None)
+        if s is None:
+            return
+        s.lyrics_romanized = bool(on)
+        try:
+            from .. import settings as settings_module
+            settings_module.save_fields(s, "lyrics_romanized")
+        except Exception:
+            pass
+
+    def apply_lyrics_layout_setting(self) -> None:
+        from . import lyrics
+        lyrics.set_layout_pref(getattr(self._settings, "lyrics_layout", "") or "theme")
 
     def _on_lyrics_list_sweep(self, on: bool) -> None:
         """The lyrics tab's [sweep words] checkbox: persist + apply."""

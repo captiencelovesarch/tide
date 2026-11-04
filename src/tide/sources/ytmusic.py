@@ -722,19 +722,29 @@ class YTMusicSource(MusicSource):
         return None
 
     def get_lyrics_for(self, video_id: str) -> str | None:
+        """The video's plain lyrics, kept on disk (lyrics_provider's
+        cache_get): a re-listen doesn't ask YouTube again."""
+        from ..lyrics_provider import LyricsResult, cache_get, cache_put
         if not video_id:
             return None
+        key = f"yt-plain|v1|{video_id}"
+        hit, cached = cache_get(key)
+        if hit:
+            return cached.plain_text if cached is not None else None
         try:
-            wp = self.yt.get_watch_playlist(videoId=video_id)
+            text = self._fetch_plain_lyrics(video_id)
         except Exception:
-            return None
+            return None          # trouble, not an answer: ask again next time
+        cache_put(key, LyricsResult(plain_text=text, source="youtube music") if text else None)
+        return text
+
+    def _fetch_plain_lyrics(self, video_id: str) -> str | None:
+        """Raises on trouble; None means YouTube has no lyrics for it."""
+        wp = self.yt.get_watch_playlist(videoId=video_id)
         browse_id = wp.get("lyrics") if isinstance(wp, dict) else None
         if not browse_id:
             return None
-        try:
-            lyr = self.yt.get_lyrics(browse_id)
-        except Exception:
-            return None
+        lyr = self.yt.get_lyrics(browse_id)
         if not lyr:
             return None
         text = lyr.get("lyrics") if isinstance(lyr, dict) else getattr(lyr, "lyrics", None)
@@ -758,22 +768,35 @@ class YTMusicSource(MusicSource):
         fetch — the signed-in client is never touched. Verified live:
         authed+mobile → 400; anonymous+mobile → hasTimestamps=True.
         """
-        from ..lyrics_provider import LyricsResult
+        from ..lyrics_provider import cache_get, cache_put
         if not video_id:
             return None
+        # Kept on disk: the lyrics view and discord's tracker used to ask
+        # YouTube for every play, often both at once.
+        key = f"yt-timed|v1|{video_id}"
+        hit, cached = cache_get(key)
+        if hit:
+            return cached
         try:
-            client = _anon_lyrics_client()
-            # as_mobile() mutates the shared client's context for the
-            # duration of the block — serialize so overlapping lyric
-            # workers (fast track skips) can't interleave contexts.
-            with _ANON_LYRICS_LOCK, client.as_mobile():
-                wp = client.get_watch_playlist(videoId=video_id)
-                browse_id = wp.get("lyrics") if isinstance(wp, dict) else None
-                if not browse_id:
-                    return None
-                lyr = client.get_lyrics(browse_id, timestamps=True)
+            result = self._fetch_yt_timed(video_id)
         except Exception:
-            return None
+            return None          # trouble, not an answer: ask again next time
+        cache_put(key, result)
+        return result
+
+    def _fetch_yt_timed(self, video_id: str):
+        """Raises on trouble; None means no timed lyrics for this video."""
+        from ..lyrics_provider import LyricsResult
+        client = _anon_lyrics_client()
+        # as_mobile() mutates the shared client's context for the
+        # duration of the block — serialize so overlapping lyric
+        # workers (fast track skips) can't interleave contexts.
+        with _ANON_LYRICS_LOCK, client.as_mobile():
+            wp = client.get_watch_playlist(videoId=video_id)
+            browse_id = wp.get("lyrics") if isinstance(wp, dict) else None
+            if not browse_id:
+                return None
+            lyr = client.get_lyrics(browse_id, timestamps=True)
         if not lyr:
             return None
         body = lyr.get("lyrics") if isinstance(lyr, dict) else getattr(lyr, "lyrics", None)
@@ -810,7 +833,8 @@ class YTMusicSource(MusicSource):
             return None
         return LyricsResult(plain_text="\n".join(texts),
                             timed_lines=[(t, text) for t, text, _e in rows],
-                            line_ends=[e for _t, _text, e in rows])
+                            line_ends=[e for _t, _text, e in rows],
+                            source="youtube music")
 
     def get_lyrics_for_track(self, track: Track):
         from ..lyrics_provider import LyricsResult, fetch_lrclib
@@ -832,9 +856,10 @@ class YTMusicSource(MusicSource):
             return LyricsResult(plain_text=plain or lrc.plain_text,
                                 timed_lines=lrc.timed_lines,
                                 line_ends=lrc.line_ends,
-                                word_lines=lrc.word_lines)
+                                word_lines=lrc.word_lines,
+                                source="lrclib")
         if plain:
-            return LyricsResult(plain_text=plain)
+            return LyricsResult(plain_text=plain, source="youtube music")
         return lrc
 
     def get_radio(self, video_id: str, exclude: set[str] | None = None,

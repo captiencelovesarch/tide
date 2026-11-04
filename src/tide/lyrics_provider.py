@@ -25,8 +25,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+import time
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +53,9 @@ class LyricsResult:
     timed_lines: list[tuple[float, str]] = field(default_factory=list)
     line_ends: list = field(default_factory=list)
     word_lines: list = field(default_factory=list)
+    # where the lines came from, as the lyrics menu names it:
+    # "youtube music" | "lrclib" | "netease" ("" = unknown)
+    source: str = ""
 
     @property
     def has_timed(self) -> bool:
@@ -173,6 +179,7 @@ def fetch_lrclib(*, title: str, artist: str, album: str = "",
     key = f"v2|{title}|{artist}|{album}|{int(duration_seconds)}"
     cached = _load_cache(key)
     if cached is not None and not cached.is_empty:
+        cached.source = "lrclib"
         return cached
 
     params = {
@@ -205,7 +212,145 @@ def fetch_lrclib(*, title: str, artist: str, album: str = "",
         words = parse_enhanced_lrc(synced)
     ends = lyricsfile_line_ends(lyricsfile, timed) if lyricsfile else []
     result = LyricsResult(plain_text=plain, timed_lines=timed, line_ends=ends,
-                          word_lines=words)
+                          word_lines=words, source="lrclib")
     if not result.is_empty:
         _save_cache(key, result)
     return result if not result.is_empty else None
+
+
+def fetch_netease(track) -> LyricsResult | None:
+    """NetEase's word-synced lyrics for ``track`` as a whole result (the
+    lyrics menu's "netease" pick). Its timing is NetEase's own recording,
+    so it can sit off the video; the timing nudge is there for that."""
+    from .lyrics_netease import fetch_yrc
+    try:
+        sheet = fetch_yrc(title=getattr(track, "title", "") or "",
+                          artist=getattr(track, "artists", "") or "",
+                          duration_seconds=float(getattr(track, "duration_seconds", 0) or 0))
+    except Exception:
+        return None
+    if not sheet:
+        return None
+    return LyricsResult(plain_text="\n".join(l.text for l in sheet),
+                        timed_lines=[(l.start, l.text) for l in sheet],
+                        line_ends=[l.end for l in sheet],
+                        word_lines=list(sheet), source="netease")
+
+
+# ---------- one fetch per song, shared ----------
+# The lyrics views, the headless tracker (discord, plugins) and the
+# next-song prefetch all ask for the same song, often at the same moment.
+# The first asks the network; the rest wait for its answer and share it.
+# Answers are kept for the session (the newest MEMO_SIZE songs); a miss
+# isn't, so a network blip doesn't stick.
+MEMO_SIZE = 64
+_memo: "OrderedDict[str, LyricsResult]" = OrderedDict()
+_locks: dict[str, threading.Lock] = {}
+_guard = threading.Lock()
+
+
+def _shared(key: str, fn, force: bool = False):
+    with _guard:
+        lock = _locks.setdefault(key, threading.Lock())
+        if force:
+            _memo.pop(key, None)
+    with lock:
+        with _guard:
+            if key in _memo:
+                _memo.move_to_end(key)
+                return _memo[key]
+        result = fn()
+        if result is not None:
+            with _guard:
+                _memo[key] = result
+                while len(_memo) > MEMO_SIZE:
+                    old, _r = _memo.popitem(last=False)
+                    _locks.pop(old, None)
+        return result
+
+
+def fetch_from(api_obj, track, source: str | None, *, force: bool = False) -> LyricsResult | None:
+    """``track``'s lyrics from one source, or tide's usual order (the
+    track's own source, then lrclib) when ``source`` is None. Shared: a
+    second caller for the same song gets the first one's answer.
+    ``force`` asks again (the lyrics view's try again)."""
+    key = (f"{getattr(track, 'source', '') or 'ytmusic'}:{getattr(track, 'video_id', '')}"
+           f"|{source or 'auto'}")
+    return _shared(key, lambda: _fetch_from(api_obj, track, source), force)
+
+
+def _fetch_from(api_obj, track, source: str | None) -> LyricsResult | None:
+    if source is None:
+        return api_obj.get_lyrics_for_track(track)
+    if source == "lrclib":
+        return fetch_lrclib(title=track.title or "", artist=track.artists or "",
+                            album=track.album or "",
+                            duration_seconds=int(track.duration_seconds or 0))
+    if source == "netease":
+        return fetch_netease(track)
+    if source == "youtube music":
+        timed = getattr(api_obj, "_yt_timed_lyrics", None)
+        result = timed(track.video_id) if callable(timed) else None
+        if result is not None:
+            return result
+        plain_fn = getattr(api_obj, "get_lyrics_for", None)
+        plain = plain_fn(track.video_id) if callable(plain_fn) else None
+        return LyricsResult(plain_text=plain, source="youtube music") if plain else None
+    return None
+
+
+# ---------- a disk cache for sources that have none of their own ----------
+# YouTube Music's lyrics (timed and plain) were fetched again every play.
+# Kept like lrclib's, as LyricsResult rows; a miss is kept for a few days
+# so a song with no lyrics costs one lookup, and a hit is asked again after
+# a month in case the sync was fixed.
+HIT_TTL_S = 30 * 24 * 3600
+MISS_TTL_S = 3 * 24 * 3600
+
+
+def cache_get(key: str) -> tuple[bool, LyricsResult | None]:
+    """(hit, result) for ``key``. A fresh cached miss is (True, None)."""
+    path = _cache_path(key)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return False, None
+    if not isinstance(data, dict):
+        return False, None
+    try:
+        age = time.time() - float(data.get("at", 0) or 0)
+    except (TypeError, ValueError):
+        return False, None
+    if data.get("miss"):
+        return (True, None) if age < MISS_TTL_S else (False, None)
+    if age >= HIT_TTL_S:
+        return False, None
+    result = _load_cache(key)
+    if result is None or result.is_empty:
+        return False, None
+    src = data.get("source")
+    result.source = src if isinstance(src, str) else ""
+    return True, result
+
+
+def cache_put(key: str, result: LyricsResult | None) -> None:
+    if result is None or result.is_empty:
+        path = _cache_path(key)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"miss": True, "at": time.time()}, f)
+        except OSError:
+            pass
+        return
+    _save_cache(key, result)
+    path = _cache_path(key)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        data["source"], data["at"] = result.source, time.time()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except (OSError, ValueError):
+        pass

@@ -74,6 +74,7 @@ _WIDGET_ATTRS: dict[str, str] = {
     "text_transition": "text_transition_picker",
     "art_transition": "art_transition_picker",
     "lyrics_size": "lyrics_size_picker",
+    "lyrics_layout": "lyrics_layout_picker",
     "lyrics_sweep": "lyrics_sweep_picker",
     "lyrics_list_sweep": "lyrics_list_sweep_toggle",
     "lyrics_word_timing": "lyrics_word_timing_picker",

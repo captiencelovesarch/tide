@@ -133,6 +133,12 @@ class Settings:
     # Lyric type, relative to the body text: "small" | "medium" | "large"
     # | "huge" (see ui/lyrics.py SIZES). The ui scale multiplies it too.
     lyrics_size: str = "large"
+    # The lyrics tab's layout: "theme" (the theme's [slots] lyrics, the
+    # list when it says nothing) | "list" | "beside" | "center".
+    lyrics_layout: str = "theme"
+    # Romanized lines under the lyrics where NetEase has them (the lyrics'
+    # right-click menu: "show romanized"). Sticks once turned on.
+    lyrics_romanized: bool = False
     # ---- 2.3 lyric word timing (see lyric_timing.py) ----
     # Karaoke's word highlight: "sweep" (the light runs through each word
     # as it's sung) | "word" (each word lights whole). The look follows

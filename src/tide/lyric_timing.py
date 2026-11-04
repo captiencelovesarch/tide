@@ -143,6 +143,10 @@ class WordTimingService(QObject):
         netease = bool(getattr(s, "lyrics_netease", True))
         return sources, netease, self.has_aligner()
 
+    def netease_allowed(self) -> bool:
+        """Whether the settings let tide ask NetEase at all."""
+        return self._flags()[1]
+
     def sheet_for(self, track, result) -> list[WordLine]:
         """The best sheet known now; schedules the upgrades."""
         timed = list(getattr(result, "timed_lines", []) or [])

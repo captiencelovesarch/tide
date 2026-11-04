@@ -6,10 +6,10 @@ The lyrics *panel* (ui/lyrics.py) can't serve this role: it only tracks
 the active line while it's the visible view, so a presence wired to it
 would freeze the moment the user switches tabs.
 
-Fetching mirrors the panel's provider chain (track's own source first,
-LRClib as the community fallback), and lyrics_provider's on-disk cache
-means an open lyrics panel + this tracker cost one network fetch, not
-two.
+Fetching is the panel's own (lyrics_provider.fetch_from: the track's
+source first, LRClib as the community fallback, or the source picked
+for the song), shared with any open lyrics view, so the two cost one
+network fetch, not two.
 
 Emissions: ``timeline_changed`` with the whole timed sheet (presence
 schedules ahead from it), and ``lyric_changed(str | None)``. None means "no current line" —
@@ -34,18 +34,23 @@ if TYPE_CHECKING:
 class _FetchWorker(QObject):
     done = Signal(str, object)   # video_id, LyricsResult | None
 
-    def __init__(self, api_obj, track) -> None:
+    def __init__(self, api_obj, track, source: str | None = None) -> None:
         super().__init__()
         self._api = api_obj
         self._track = track
+        self._source = source
 
     def run(self) -> None:
+        # The same fetch the lyrics views make (lyrics_provider.fetch_from
+        # is shared, so an open view and this tracker cost one), and the
+        # source picked for the song in the lyrics menu, if any.
         result = None
         try:
-            result = self._api.get_lyrics_for_track(self._track)
+            result = lyrics_provider.fetch_from(self._api, self._track, self._source)
         except Exception:
             result = None
-        if result is None or not getattr(result, "has_timed", False):
+        # (a picked source is final, even without timing)
+        if self._source is None and (result is None or not getattr(result, "has_timed", False)):
             # Source has no timed lyrics of its own (base sources return
             # None outright) — ask LRClib directly. fetch_lrclib caches
             # to disk, so re-listens and the lyrics panel don't re-query.
@@ -147,7 +152,9 @@ class LyricTracker(QObject):
 
     def _fetch(self, track) -> None:
         thread = QThread()
-        worker = _FetchWorker(self._track_api(track), track)
+        from . import lyrics_picks
+        worker = _FetchWorker(self._track_api(track), track,
+                              lyrics_picks.source(lyric_timing.track_key(track)))
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.done.connect(self._on_fetched)

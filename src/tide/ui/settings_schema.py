@@ -259,6 +259,12 @@ def lyrics_size_choices() -> tuple[tuple[str, str], ...]:
     return lyrics.size_choices()
 
 
+def lyrics_layout_choices() -> tuple[tuple[str, str], ...]:
+    """The lyrics tab's layouts, the theme's own pick first."""
+    from . import lyrics
+    return lyrics.layout_choices()
+
+
 def scale_choices() -> tuple[tuple[str, str], ...]:
     """Scale presets; the multiplier labels read off the factor table."""
     from . import scale as scale_module
@@ -362,6 +368,14 @@ REGISTRY: tuple[OptionDesc, ...] = (
         choices="lyrics_size_choices", live="apply_lyrics_size_setting",
         tooltip="lyric lines, measured against the rest of the text. "
                 "fullscreen makes them bigger again, the mini smaller.",
+    ),
+    OptionDesc(
+        key="lyrics_layout", label="lyrics layout", kind="choice",
+        tab="appearance", section="typography",
+        choices="lyrics_layout_choices", live="apply_lyrics_layout_setting",
+        tooltip="how the lyrics tab lays out. the theme's: whatever the "
+                "theme picks, the list unless it says otherwise. beside "
+                "the cover needs a wide window, narrower ones get the list.",
     ),
     # ---- playback · lyrics (2.3 word timing) ----
     OptionDesc(
@@ -857,6 +871,7 @@ INTERNAL_FIELDS: frozenset[str] = frozenset({
     "report_plays_answered",    # one-time upgrade-pointer stamp
     # remembered widget state — the surface that shows it owns it
     "mini_lyrics_open",         # the mini's lyrics panel remembers itself
+    "lyrics_romanized",         # the lyrics' right-click menu owns it
     "nav_rail_collapsed",       # the rail's own chevron (and Ctrl+B) owns it
     "mini_pin",                 # the mini's own right-click menu owns pinning
     "fullscreen_pane",          # the fullscreen window's pane toggles own it

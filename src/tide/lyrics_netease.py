@@ -12,6 +12,9 @@ was authored against NetEase's copy of the recording, so callers don't
 use it as-is: lyric_words.adopt_source_words lines it up against the
 playing video's own line timing, and drops it when the lines don't match.
 
+``fetch_roman`` gives NetEase's romanized lines (rv=1) for the lyrics
+view's "show romanized", from the same lookup.
+
 Cached on disk next to the LRClib cache. A miss is cached too, so a song
 NetEase lacks costs one lookup.
 """
@@ -53,8 +56,8 @@ def _cache_file(key: str):
     return config.LYRICS_CACHE_DIR / name
 
 
-def _load(key: str) -> tuple[bool, list[WordLine] | None]:
-    """(hit, sheet). A cached miss is (True, None)."""
+def _load(key: str) -> tuple[bool, dict | None]:
+    """(hit, entry). A cached miss is (True, None)."""
     path = _cache_file(key)
     try:
         with open(path, encoding="utf-8") as f:
@@ -69,19 +72,19 @@ def _load(key: str) -> tuple[bool, list[WordLine] | None]:
         except (TypeError, ValueError):
             fresh = False
         return (True, None) if fresh else (False, None)
-    sheet = sheet_from_payload(data.get("sheet"))
-    return (sheet is not None), sheet
+    entry = data.get("entry")
+    return (True, entry) if isinstance(entry, dict) else (False, None)
 
 
-def _save(key: str, sheet: list[WordLine] | None) -> None:
+def _save(key: str, entry: dict | None) -> None:
     path = _cache_file(key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            if sheet is None:
+            if entry is None:
                 json.dump({"miss": True, "at": time.time()}, f)
             else:
-                json.dump({"sheet": sheet_payload(sheet)}, f)
+                json.dump({"entry": entry}, f)
     except OSError:
         pass
 
@@ -123,16 +126,19 @@ def pick(songs: list, *, title: str, artist: str, duration_seconds: float) -> in
     return best_id
 
 
-def fetch_yrc(*, title: str, artist: str, duration_seconds: float = 0) -> list[WordLine] | None:
-    """NetEase's word sheet for the track, or None (miss, network error,
-    no word timing)."""
+def _entry(title: str, artist: str, duration_seconds: float) -> dict | None:
+    """The song's NetEase lyrics, cached: {"sheet": its YRC word sheet
+    payload or None, "lrc": [[t, line], ...], "roma": [[t, romanized], ...]}.
+    One search and one lyric request, whoever asks first (word timing or
+    the romanized lines). None when NetEase doesn't have the song."""
     title, artist = (title or "").strip(), (artist or "").strip()
     if not title or not artist:
         return None
-    key = f"{title}|{artist}|{int(duration_seconds or 0)}"
-    hit, sheet = _load(key)
+    key = f"v2|{title}|{artist}|{int(duration_seconds or 0)}"
+    hit, entry = _load(key)
     if hit:
-        return sheet
+        return entry
+    from .lyrics_provider import parse_lrc
     try:
         q = urllib.parse.urlencode({"s": f"{title} {_first_artist(artist)}",
                                     "type": 1, "limit": 8})
@@ -140,13 +146,59 @@ def fetch_yrc(*, title: str, artist: str, duration_seconds: float = 0) -> list[W
         songs = ((found or {}).get("result") or {}).get("songs") or []
         sid = pick(songs, title=title, artist=artist,
                    duration_seconds=float(duration_seconds or 0))
-        sheet = None
+        entry = None
         if sid is not None:
-            lyr = _get_json(f"{LYRIC_URL}?id={sid}&lv=1&yv=1")
-            yrc = ((lyr or {}).get("yrc") or {}).get("lyric") or ""
-            parsed = parse_yrc(yrc) if isinstance(yrc, str) else []
-            sheet = parsed if any(l.words for l in parsed) else None
+            # rv=1: the romanized lines too (Japanese, mostly), timed like
+            # the plain ones so they pair up by timestamp
+            lyr = _get_json(f"{LYRIC_URL}?id={sid}&lv=1&yv=1&rv=1") or {}
+
+            def text_of(name: str) -> str:
+                v = (lyr.get(name) or {}).get("lyric") or ""
+                return v if isinstance(v, str) else ""
+            parsed = parse_yrc(text_of("yrc"))
+            entry = {
+                "sheet": sheet_payload(parsed) if any(l.words for l in parsed) else None,
+                "lrc": [[t, line] for t, line in parse_lrc(text_of("lrc"))],
+                "roma": [[t, line] for t, line in parse_lrc(text_of("romalrc"))],
+            }
     except Exception:
         return None          # network trouble: don't cache, try next time
-    _save(key, sheet)
-    return sheet
+    _save(key, entry)
+    return entry
+
+
+def fetch_yrc(*, title: str, artist: str, duration_seconds: float = 0) -> list[WordLine] | None:
+    """NetEase's word sheet for the track, or None (miss, network error,
+    no word timing)."""
+    entry = _entry(title, artist, duration_seconds)
+    if not entry or not entry.get("sheet"):
+        return None
+    return sheet_from_payload(entry["sheet"])
+
+
+def fetch_roman(*, title: str, artist: str, duration_seconds: float = 0
+                ) -> list[tuple[float, str, str]] | None:
+    """NetEase's romanized lyrics as (time, original line, romanized line),
+    or None when it has none for the song. The originals are NetEase's
+    own, for matching against the lines tide is showing."""
+    entry = _entry(title, artist, duration_seconds)
+    if not entry:
+        return None
+    roma: dict[float, str] = {}
+    for row in entry.get("roma") or []:
+        try:
+            t, line = float(row[0]), str(row[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if line.strip():
+            roma[round(t, 2)] = line.strip()
+    out: list[tuple[float, str, str]] = []
+    for row in entry.get("lrc") or []:
+        try:
+            t, line = float(row[0]), str(row[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        r = roma.get(round(t, 2))
+        if r and line.strip():
+            out.append((t, line.strip(), r))
+    return out or None

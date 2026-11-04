@@ -989,6 +989,8 @@ class MiniPlayer(QWidget):
                            panel.plugin_status):
                 chrome.hide()
             panel.setFixedHeight(0)
+            # right-click a line: the lyric items, then the mini's own
+            panel.set_menu_extra(self._fill_menu)
             self._content_col.addWidget(panel)
             self.lyrics_panel = panel
             self._install_wake_filters()
@@ -1368,9 +1370,17 @@ class MiniPlayer(QWidget):
     # ---------- context menu ----------
 
     def _on_context_menu(self, pos) -> None:
-        s = self._settings()
         menu = QMenu(self)
         menu.setAttribute(Qt.WA_DeleteOnClose)
+        self._fill_menu(menu)
+        self._menu = menu
+        # popup() is non-blocking — no modal-from-handler hazard.
+        menu.popup(self.mapToGlobal(pos))
+
+    def _fill_menu(self, menu: QMenu) -> None:
+        """This surface's own items. The lyrics pane's menu adds them
+        under its lyric items (LyricsView.set_menu_extra)."""
+        s = self._settings()
 
         backdrop = menu.addMenu(theming.styled_case("backdrop"))
         current_style = s.mini_backdrop_style or "follow"
@@ -1416,7 +1426,3 @@ class MiniPlayer(QWidget):
         exit_act = QAction(theming.styled_case("exit mini player"), menu)
         exit_act.triggered.connect(self._request_exit)
         menu.addAction(exit_act)
-
-        self._menu = menu
-        # popup() is non-blocking — no modal-from-handler hazard.
-        menu.popup(self.mapToGlobal(pos))
