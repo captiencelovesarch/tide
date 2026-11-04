@@ -4,6 +4,40 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [3.2.0] — 2026-11-04 — the lyrics tab
+
+### Added
+- **click a lyric line to play from there.** hover a line to see when it starts. dragging still selects text.
+- **right-click a lyric line:** play from here, copy the line, copy all the lyrics, fix the timing for this song, or take this song's lyrics from somewhere else (youtube music, lrclib or netease). both picks are remembered per song. in the mini, fullscreen and the visualizer tile their own menu items follow underneath.
+- the timing fix moves this song's lyrics in quarter seconds, on top of the lyrics offset setting, and discord's lyric line follows it too.
+- **lyric cards.** right-click a line and make a card: up to four lines in the cover's colours, with the cover, title, artist and a small tide mark. square or tall (for stories and short video), copy it or save it as a png.
+- **romanized lyrics.** for songs in japanese and other scripts, right-click the lyrics and turn on show romanized to get netease's romanized line under each line. the switch only shows up on songs that have them, and it stays on. it needs the netease switch in settings → playback → lyrics.
+- **the lyrics tab has layouts:** the list, beside the cover (the art, title and artist to the left of the lines) or center. a theme picks one with `lyrics = "list" | "beside" | "center"` in its `[slots]`, and settings → appearance → typography → lyrics layout can override it. every theme that ships with tide picks the list. beside the cover needs a wide window and shows the list in a narrow one.
+- lyrics keys on the lyrics tab: k for karaoke mode, comma and period to show this song's lyrics earlier or later, ctrl+c to copy the line. comma, period and ctrl+c work in fullscreen too. all of them can be rebound, along with a reset for the timing that has no key by default.
+
+### Changed
+- **the lyrics tab, redone for modern themes.** the line being sung is the brightest thing on the page. the lines still to come sit a step under it and the ones already sung fade back. the shades come from each theme's own colours, so every theme gets them.
+- the sung line grows into place as the list scrolls, instead of jumping a size and bumping every line under it.
+- lines fade out at the top and bottom of the list, and the scrollbar only shows while you scroll or point at it.
+- no lyrics and loading are one quiet line in the middle of the tab, with a try again button when the lyrics didn't come. loading only shows when it takes a moment.
+- the lyrics tab has no heading in modern themes. the player bar already says what's playing.
+- scroll the lyrics yourself and they stay put instead of jumping back on the next line. a back to the song button brings you back, and they pick the song up again on their own after a few seconds.
+- intros and instrumental breaks show three dots where the next line will be, filling up as it gets close. click them to skip to that line.
+- the ♪ lines some lyrics use for an instrumental are drawn as the same three dots.
+- when the lyrics say where a line's singing ends (youtube music's do), the line fades back once it's over instead of staying lit through the break.
+- all of this works in the mini, fullscreen and the visualizer's lyrics tile too, except the layouts and keys, which are the lyrics tab's. brutalist themes keep their lyrics look and get the rest in their own style.
+- the next song's lyrics are fetched while the current one finishes, so they're up as soon as it starts.
+- discord's lyric line uses the lyrics source you picked for a song.
+- **the beat pulse finds the kicks first.** it used to pulse on an even beat grid and let a kick off the grid through only past a stack of rules, so syncopated kicks were dropped and bass notes sitting on the grid pulsed. now every kick is found and the grid only helps decide. checked against drum stems separated from 19 everyday songs, on songs the model never trained on: kicks shown went from 74% to 83%, pulses with no drum under them from 13 a minute to under 5.
+- a small trained model decides what's a kick. it's a couple hundred numbers in the source, no new dependency. it learned from 32 songs, 13 of them metal, breakcore and drum and bass. `tools/pulse_bench` scores the pulse against drum truth and retrains it, and now also says how often the pulse flashes more than three times a second and how many beats it visibly lands.
+- fast double kicks get a pulse for every pair. a run that kept getting louder used to slide into one or two pulses in odd places.
+- with no drums nearby (a vocal, a drumless verse) only a kick the model is sure of pulses. a bass note that rings on far longer than the song's kicks doesn't pulse at all.
+- fast songs with a kick on every beat now pulse on every kick. they used to skip every other one.
+- songs get re-analyzed once with the new beat maps. analysis takes about three times as long, a couple of seconds for a six minute song.
+
+### Fixed
+- youtube music's lyrics are kept on disk like lrclib's, and the lyrics tab and discord's lyric line share one fetch. tide used to ask youtube for a song's lyrics on every play, twice with discord on.
+
 ## [3.1.0] — 2026-10-31 — the fx page
 
 ### Added

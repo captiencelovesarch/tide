@@ -73,6 +73,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="3.2.0" date="2026-11-04">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v3.2.0</url>
+      <description>
+        <p>the lyrics tab, reworked: the sung line is the brightest thing on the page and grows into place, click a line to play from it, your own scroll holds the list, and intros and breaks show three dots that fill up. right-click a line to fix this song's timing, pick where its lyrics come from, show romanized lines, or make a lyric card to share. themes can put the lyrics beside the cover or down the middle. also a beat pulse that finds the kicks first: more kicks shown, far fewer pulses with no drum.</p>
+      </description>
+    </release>
     <release version="3.1.0" date="2026-10-31">
       <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v3.1.0</url>
       <description>

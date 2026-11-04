@@ -1,6 +1,6 @@
 # Maintainer: captience <milkkjello@gmail.com>
 pkgname=tide
-pkgver=3.1.0
+pkgver=3.2.0
 pkgrel=1
 pkgdesc="A YouTube Music client for Linux"
 arch=('any')
