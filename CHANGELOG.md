@@ -4,6 +4,18 @@ All notable changes to **tide** land here. Format roughly follows [Keep a Change
 
 The canonical source of truth for the diff lives in the [GitHub Releases](https://github.com/captiencelovesarch/tide/releases) — this file is for browsing history at a glance.
 
+## [3.2.1] — 2026-11-17 — the selection follows the cover
+
+### Added
+- plugins can see the lyric breaks: `ctx.lyrics.break_changed` and `ctx.lyrics.break_at(seconds)`, the same intros, instrumentals and long waits the lyrics tab puts its dots on.
+
+### Fixed
+- **a selected song stayed in the theme's own colour** while the accent followed the cover, so an orange cover still got a cyan row on blackwater. the selection follows the cover now on every theme that colours it with the accent, with text that stays readable on it.
+- the mini player's seek bar (and pages opened after the song started, like an album or your liked songs) showed the theme's colours until the next song instead of the cover's.
+- the mini player's lyric line shows the three dots during an instrumental break, like the lyrics tab, instead of hanging on the last line.
+- when tide is using your own copy of a plugin and the store has a newer one, the store says so and where the folder is, instead of only offering turn on and reload.
+- **"the download was damaged" when it wasn't.** if the store changed since tide last read it (for up to an hour tide reuses what it read), installs failed their check. tide now reads the store again and tries once more.
+
 ## [3.2.0] — 2026-11-04 — the lyrics tab
 
 ### Added

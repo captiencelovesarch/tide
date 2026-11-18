@@ -73,6 +73,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="3.2.1" date="2026-11-17">
+      <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v3.2.1</url>
+      <description>
+        <p>a selected song takes the cover's colour along with the rest of the accent, and the mini player's seek bar and pages opened mid-song do too. the mini player's lyric line shows the three dots during a break. the plugin store reads its list again when a download fails its check instead of calling it damaged, and says when it has a newer version of a plugin you keep your own copy of. plugins can see the lyric breaks.</p>
+      </description>
+    </release>
     <release version="3.2.0" date="2026-11-04">
       <url type="details">https://github.com/captiencelovesarch/tide/releases/tag/v3.2.0</url>
       <description>
