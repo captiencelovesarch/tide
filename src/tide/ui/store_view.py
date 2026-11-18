@@ -300,8 +300,14 @@ class StoreController(QObject):
         rec = self.host.record(slug)
         if rec is None:
             return ""
-        if rec.manifest.origin == "yours" and self.entry(slug) is not None:
-            # a folder of yours with the store's slug wins over the store's
+        entry = self.entry(slug)
+        if rec.manifest.origin == "yours" and entry is not None:
+            # a folder of yours with the store's slug wins over the store's,
+            # and the store never writes over it, so there's no update button
+            if store.newer(entry.version, rec.manifest.version):
+                return (f"the store has {entry.version}, but tide is using your own copy "
+                        f"({rec.manifest.version}) in {rec.manifest.path}. move that folder "
+                        "out and restart tide to update")
             return (f"your own copy in {rec.manifest.path} is the one tide uses; "
                     "remove it to get the store's")
         if rec.running:
@@ -346,17 +352,40 @@ class StoreController(QObject):
         root, cache, trash = self.root, self.cache_dir, self.trash_dir
 
         def work(progress):
-            return store.install(entry, root, downloads_dir=cache / "downloads",
-                                 trash_dir=trash, on_progress=progress)
+            def get(e: store.Entry) -> None:
+                store.install(e, root, downloads_dir=cache / "downloads",
+                              trash_dir=trash, on_progress=progress)
+            try:
+                get(entry)
+                return None
+            except store.StoreError as exc:
+                if str(exc) != store.DAMAGED:
+                    raise
+                # the index can be older than the files it points at (a
+                # release uploaded again, a rebuilt local store), and then
+                # every download fails its check: read the index again
+                # and try once more with what it says now (2026-11-09)
+                fresh = store.fetch_index(cache)
+                again = fresh.entry(slug)
+                if again is None or (again.sha256, again.url) == (entry.sha256, entry.url):
+                    raise
+                get(again)
+                return fresh
 
-        _run(self, work, lambda _p: self._installed(slug), lambda t: self._install_failed(slug, t),
+        _run(self, work, lambda fresh: self._installed(slug, fresh),
+             lambda t: self._install_failed(slug, t),
              lambda d, t: self._on_progress(slug, d, t))
 
     def _on_progress(self, slug: str, done: int, total: int) -> None:
         self._progress[slug] = (done, total)
         self.progress.emit(slug, done, total)
 
-    def _installed(self, slug: str) -> None:
+    def _installed(self, slug: str, fresh: store.Index | None = None) -> None:
+        if fresh is not None:
+            # the retry read a newer index: show what was installed from it
+            self.index = fresh
+            self.offline = ""
+            self.index_changed.emit()
         self._busy.pop(slug, None)
         self._progress.pop(slug, None)
         self.host.installed(slug)

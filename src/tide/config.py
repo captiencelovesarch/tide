@@ -57,9 +57,19 @@ HISTORY_FILE: Path = CACHE_DIR / "history.jsonl"
 USER_PLUGINS_DIR: Path = CONFIG_DIR / "plugins"
 PLUGIN_STATE_FILE: Path = CONFIG_DIR / "plugins.toml"
 PLUGIN_SETTINGS_DIR: Path = CONFIG_DIR / "plugin-settings"
-PLUGIN_DATA_DIR: Path = DATA_DIR / "plugins"
-PLUGIN_CACHE_DIR: Path = CACHE_DIR / "plugins"
-PLUGIN_START_STAMP: Path = CACHE_DIR / "plugin-starting"
+# A dev build on a copy of your config (TIDE_CONFIG_DIR) keeps its own
+# plugins too: what the store installed, their data, the store's index
+# and downloads, the start stamp. Shared, uninstalling a plugin in the
+# dev build took it out of your everyday tide as well, and each tide's
+# store index overwrote the other's (2026-11-09).
+_PLUGIN_STATE: Path | None = (CONFIG_DIR / "plugin-state"
+                              if os.environ.get("TIDE_CONFIG_DIR") else None)
+PLUGIN_DATA_DIR: Path = (_PLUGIN_STATE / "data" if _PLUGIN_STATE is not None
+                         else DATA_DIR / "plugins")
+PLUGIN_CACHE_DIR: Path = (_PLUGIN_STATE / "cache" if _PLUGIN_STATE is not None
+                          else CACHE_DIR / "plugins")
+PLUGIN_START_STAMP: Path = (_PLUGIN_STATE / "starting" if _PLUGIN_STATE is not None
+                            else CACHE_DIR / "plugin-starting")
 # what the store installed (store.py); its downloads, previews and the
 # signed index it read last live under PLUGIN_CACHE_DIR
 PLUGIN_STORE_DIR: Path = PLUGIN_DATA_DIR / "installed"

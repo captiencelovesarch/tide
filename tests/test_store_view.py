@@ -116,6 +116,21 @@ class ControllerTests(ViewBase):
         self.assertEqual(c.status("demo"), store.DAMAGED)
         self.assertFalse((self.root / "demo").exists())
 
+    def test_a_stale_index_is_read_again_and_the_install_goes_through(self):
+        # the store rebuilt under the same file names after tide read its
+        # index (2026-11-09, the local dev store): the download fails its
+        # check against the old index, and the fresh index has it right
+        old = self.publish(self.plugin_zip())
+        c = self.ctl()
+        self.fetched(c)
+        new = self.plugin_zip(version="1.1.0")
+        self.publish(new, version="1.1.0", url=old["url"])
+        (self.web / "demo-1.0.0.zip").write_bytes(new)
+        self.installed(c)
+        self.assertEqual(c.state("demo")[0], "installed")
+        self.assertEqual(c.entry("demo").version, "1.1.0")
+        self.assertEqual(self.events, [("start", "demo", "1.1.0", "hi")])
+
     def test_updates_count_and_install(self):
         self.publish(self.plugin_zip())
         c = self.ctl()
