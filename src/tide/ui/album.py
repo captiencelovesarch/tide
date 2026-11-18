@@ -64,7 +64,7 @@ class AlbumView(QWidget):
     def __init__(self, api_obj: api.Api, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.api = api_obj
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
         self._thread: QThread | None = None
         self._worker: _AlbumWorker | None = None

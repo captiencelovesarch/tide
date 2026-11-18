@@ -88,7 +88,7 @@ class BarProgress(QWidget):
         self._position = 0.0
         self._duration = 0.0
         self._enabled = False
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self.setFixedHeight(8)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         theming.manager().theme_changed.connect(self._on_theme)
@@ -160,7 +160,7 @@ class ThinProgress(QWidget):
         self._position = 0.0
         self._duration = 0.0
         self._enabled = False
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self.setFixedHeight(self.HANDLE_R * 2 + 4)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         theming.manager().theme_changed.connect(self._on_theme)
@@ -233,7 +233,7 @@ class DottedProgress(QWidget):
         self._position = 0.0
         self._duration = 0.0
         self._enabled = False
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self.setFixedHeight(22)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         theming.manager().theme_changed.connect(self._on_theme)
@@ -373,7 +373,7 @@ class KnobVolume(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._volume = 80
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self.setFixedSize(self.SIZE + 4, self.SIZE + 4)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)
@@ -468,7 +468,7 @@ class WedgeVolume(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._volume = 80
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self.setFixedSize(120, 22)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor)

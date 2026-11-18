@@ -647,7 +647,7 @@ class MainWindow(QMainWindow):
 
         self._art_for_video_id: str | None = None
 
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme_changed)
 
         self._build_ui()
@@ -5290,7 +5290,7 @@ class MainWindow(QMainWindow):
         delegates repaint with the new mode."""
         from .track_row import set_thumbnail_override
         set_thumbnail_override(self._settings.show_thumbnails or "theme")
-        current = theming.manager().current()
+        current = theming.manager().current_effective()
         if current is not None:
             theming.manager().theme_changed.emit(current)
 

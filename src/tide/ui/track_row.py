@@ -64,7 +64,7 @@ class TrackRowDelegate(QStyledItemDelegate):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self._refresh_scaled_sizes()
         theming.manager().theme_changed.connect(self._on_theme_changed)
         # Listen for newly-loaded art. Coalesce a burst of loads into ONE

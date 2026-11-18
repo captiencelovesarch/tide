@@ -613,7 +613,7 @@ class _Canvas(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         self._override_slug: str | None = None
         self._renderer = renderer_for_theme(self._theme)
         self._bands: np.ndarray | None = None

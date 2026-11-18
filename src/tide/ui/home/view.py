@@ -400,7 +400,7 @@ class HomeView(QWidget):
         super().__init__(parent)
         self.api = api_obj
         self._settings_provider = settings_provider or (lambda: None)
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
         self._gen = 0
         self._loaded = False

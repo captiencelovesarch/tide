@@ -60,7 +60,7 @@ class Toast(QFrame):
         self._on_action = on_action
         self._dismissed = False
 
-        theme = theming.manager().current()
+        theme = theming.manager().current_effective()
         bg = _color(theme, "bg_alt", "#1a1a1a")
         fg = _color(theme, "fg", "#e6e6e6")
         border = _color(theme, "border_col", "#e6e6e6")

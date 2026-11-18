@@ -336,6 +336,35 @@ def _normalize_accent(c: QColor, bg_lum: float) -> QColor:
 # ---------- pickers ----------
 
 
+def selection_tokens(theme, accent: QColor) -> dict[str, str]:
+    """``sel_bg`` / ``sel_fg`` to go with a cover-picked accent.
+
+    Most themes paint their selection in the accent itself (blackwater's
+    selected row IS its cyan). Swapping only ``accent`` left those rows
+    in the theme's own colour under an orange cover, cutting straight
+    through the palette. Themes that chose a separate selection colour
+    (paper's ink, the greys) keep it. The ink on top is whichever of the
+    theme's own colours reads best on the new fill, so a dark cover
+    accent doesn't end up under black text.
+    """
+    sel = QColor(theme.token("sel_bg", ""))
+    base = QColor(theme.token("accent", ""))
+    if not sel.isValid() or not base.isValid() or sel.rgb() != base.rgb():
+        return {}
+    from .. import contrast
+    inks = [QColor(theme.token(k, "")) for k in ("sel_fg", "bg", "fg")]
+    inks = [c for c in inks if c.isValid()]
+    if not inks:
+        return {"sel_bg": accent.name()}
+    # The theme's own sel_fg wins while it still clears body-text
+    # contrast; otherwise take the best of bg / fg.
+    if contrast.contrast_ratio(inks[0], accent) >= 4.5:
+        ink = inks[0]
+    else:
+        ink = max(inks, key=lambda c: contrast.contrast_ratio(c, accent))
+    return {"sel_bg": accent.name(), "sel_fg": ink.name()}
+
+
 def pick_accent(
     palette: list[tuple[QColor, int]], theme_bg: QColor
 ) -> QColor | None:
@@ -630,6 +659,7 @@ class AdaptiveDriver(QObject):
                 new_accent_alt = pick_accent_alt(palette, new_accent, bg)
                 if new_accent_alt is not None:
                     overrides["accent_alt"] = new_accent_alt.name()
+                overrides.update(selection_tokens(theme, new_accent))
             if new_ambient_bg is not None:
                 overrides["ambient_bg"] = new_ambient_bg.name()
             elif wants_bg and new_accent is None:

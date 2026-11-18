@@ -207,7 +207,7 @@ class _WinButton(QPushButton):
         super().paintEvent(ev)       # QSS background (incl. hover states)
         if self._text_mode:
             return                   # QSS already drew the bracket text
-        theme = theming.manager().current()
+        theme = theming.manager().current_effective()
 
         def tok(name: str, fallback: str) -> str:
             return theme.token(name, fallback) if theme else fallback
@@ -299,7 +299,7 @@ class TitleBar(QWidget):
 
         theming.manager().theme_changed.connect(self._on_theme)
         self._window.installEventFilter(self)   # WindowStateChange → glyphs
-        self._on_theme(theming.manager().current())
+        self._on_theme(theming.manager().current_effective())
 
     # ---------- theming ----------
 
@@ -331,7 +331,7 @@ class TitleBar(QWidget):
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if obj is self._window and event.type() == QEvent.WindowStateChange:
-            self._on_theme(theming.manager().current())
+            self._on_theme(theming.manager().current_effective())
         return False
 
     # ---------- mouse: drag to move, double-click to maximize ----------

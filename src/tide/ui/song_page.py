@@ -179,7 +179,7 @@ class _Avatar(QLabel):
         p.setRenderHint(QPainter.Antialiasing, True)
         rect = QRect(0, 0, self._px, self._px)
         if self._img is None:
-            theme = theming.manager().current()
+            theme = theming.manager().current_effective()
             dim = QColor(theme.token("dim", "#6f6f6f") if theme else "#6f6f6f")
             p.setPen(dim)
             p.setBrush(Qt.NoBrush)
@@ -204,7 +204,7 @@ class _CommentRow(QWidget):
                  reply_count: int = 0, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         from . import scale as _scale
-        theme = theming.manager().current()
+        theme = theming.manager().current_effective()
         accent = theme.token("accent", "#d4b95e") if theme else "#d4b95e"
 
         head_bits = [comment.author or "someone"]
@@ -292,7 +292,7 @@ class SongPage(QWidget):
         # Session cache: video_id → {"related": [...], "credits": [...],
         # "comments": {"top": [...], "new": [...]}, "insights": SongInsights}
         self._page_cache: dict[str, dict] = {}
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
         self._build_ui()
 

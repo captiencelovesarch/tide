@@ -209,7 +209,7 @@ class AudioFxPopover(QFrame):
         self._hint.setAlignment(Qt.AlignCenter)
         self._refresh_hint()
 
-        self._apply_theme(theming.manager().current())
+        self._apply_theme(theming.manager().current_effective())
         theming.manager().theme_changed.connect(self._apply_theme)
 
         root = QVBoxLayout(self)

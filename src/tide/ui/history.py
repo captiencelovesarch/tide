@@ -71,7 +71,7 @@ class HistoryView(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._theme = theming.manager().current()
+        self._theme = theming.manager().current_effective()
         theming.manager().theme_changed.connect(self._on_theme)
         # The remote side needs a source; window attaches it after
         # construction (same late-bind pattern as _settings).
