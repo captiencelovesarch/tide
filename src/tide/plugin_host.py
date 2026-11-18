@@ -360,6 +360,7 @@ class _Relay(QObject):
     lyrics_changed = Signal(object)      # (times, lines) or None
     pulse = Signal(float)                # the bass envelope, 0..1, ~60 a second
     lyric_line_changed = Signal(object)  # str or None
+    lyric_break_changed = Signal(object)  # (begin, end) or None
     theme_changed = Signal()
     settings_changed = Signal(object)    # set of keys
     job_done = Signal(int, object, object)
@@ -544,6 +545,19 @@ class _Lyrics:
     @property
     def line_changed(self):
         return self._ctx._relay.lyric_line_changed
+
+    @property
+    def break_changed(self):
+        """a break is up (the stretch the lyrics views draw three dots
+        over: the intro, an instrumental, a long wait for the next line)
+        as (begin, end) in song seconds, or None when it's over."""
+        return self._ctx._relay.lyric_break_changed
+
+    def break_at(self, seconds: float):
+        """(begin, end) of the break at song time ``seconds``, or None.
+        for plugins that look ahead. needs a subscription, like the rest."""
+        t = self._ctx._host._lyric_tracker
+        return t.break_at(float(seconds)) if (self._on and t is not None) else None
 
     def subscribe(self) -> None:
         if not self._on:
@@ -1509,6 +1523,7 @@ class PluginHost(QObject):
             t.start_wire()
             t.timeline_changed.connect(self._on_lyric_sheet)
             t.lyric_changed.connect(lambda line: self._emit("lyric_line_changed", line))
+            t.break_changed.connect(lambda span: self._emit("lyric_break_changed", span))
             self._lyric_tracker = t
         if self._lyric_tracker is not None:
             self._lyric_tracker.set_enabled(True)

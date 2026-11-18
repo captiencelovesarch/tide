@@ -16,6 +16,11 @@ schedules ahead from it), and ``lyric_changed(str | None)``. None means "no curr
 pre-first-line intro, instrumental gap (empty LRC line), untimed/missing
 lyrics, disabled, or no track — so consumers can fall back to whatever
 they normally display.
+
+``break_changed`` says when a break is up: the stretch the lyrics views
+draw their three dots over (tide.lyric_breaks), as ``(begin, end)`` in
+song time, or None. ``break_at`` answers the same for any moment, for
+consumers that look ahead.
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from . import lyric_timing, lyrics_provider, qthreads
+from . import lyric_breaks, lyric_timing, lyric_words, lyrics_provider, qthreads
 
 if TYPE_CHECKING:
     from .player import Player
@@ -76,6 +81,8 @@ class LyricTracker(QObject):
     # (off, no track, untimed). Discord presence schedules from this, so it
     # can push a line before it's sung and fold fast lines together.
     timeline_changed = Signal(object)
+    # (begin, end) of the break under the playhead, in song time, or None
+    break_changed = Signal(object)
 
     def __init__(self, api_obj, player: "Player", queue: "Queue",
                  parent: QObject | None = None) -> None:
@@ -91,12 +98,22 @@ class LyricTracker(QObject):
         self._times: list[float] = []
         self._lines: list[str] = []
         self._emitted: str | None = None
+        # Where the breaks are (lyric_breaks): when each line's singing
+        # ends, which lines have no words, the next line with some.
+        self._track = None
+        self._result = None
+        self._ends: list = []
+        self._blank: list[bool] = []
+        self._next: list = []
+        self._break: tuple | None = None
         self._thread: QThread | None = None
         self._worker: _FetchWorker | None = None
 
     def start_wire(self) -> None:
         self._queue.current_changed.connect(self._on_current_changed)
         self._player.position_changed.connect(self._on_position_changed)
+        # word timing found where lines really end (a lyrics view asked)
+        lyric_timing.service().updated.connect(self._on_sheet)
 
     def set_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -104,8 +121,7 @@ class LyricTracker(QObject):
             return
         self._enabled = enabled
         if not enabled:
-            self._times = []
-            self._lines = []
+            self._clear_sheet()
             self._emit(None)
             self.timeline_changed.emit(None)
             return
@@ -120,8 +136,7 @@ class LyricTracker(QObject):
     # ---------- signal handlers ----------
 
     def _on_current_changed(self, track) -> None:
-        self._times = []
-        self._lines = []
+        self._clear_sheet()
         self._emit(None)
         self.timeline_changed.emit(None)
         if track is None:
@@ -136,9 +151,60 @@ class LyricTracker(QObject):
             return
         # Latest line whose timestamp <= position. Bisect (not a walk from
         # the previous index) so seeks in either direction just work.
-        idx = bisect_right(self._times, float(secs) + lyric_timing.offset_s()) - 1
+        pos = float(secs) + lyric_timing.offset_s()
+        idx = bisect_right(self._times, pos) - 1
         text = self._lines[idx].strip() if idx >= 0 else ""
         self._emit(text or None)
+        self._emit_break(self._break_for(idx, pos))
+
+    # ---------- breaks ----------
+
+    def break_at(self, secs: float) -> tuple | None:
+        """(begin, end) of the break at song time ``secs``, or None."""
+        if not self._times:
+            return None
+        pos = float(secs) + lyric_timing.offset_s()
+        span = self._break_for(bisect_right(self._times, pos) - 1, pos)
+        if span is not None and self._break is not None and span[1] == self._break[1]:
+            return self._break      # the one that's up: same start as announced
+        return span
+
+    def _break_for(self, idx: int, pos: float) -> tuple | None:
+        _lit, gap = lyric_breaks.visual(idx, pos, self._times, self._ends,
+                                        self._blank, self._next)
+        if gap is None:
+            return None
+        off = lyric_timing.offset_s()
+        return (gap[1] - off, gap[2] - off)
+
+    def _emit_break(self, span: tuple | None) -> None:
+        # one break is known by where it ends (the line it leads to)
+        if (span is None) == (self._break is None) and (
+                span is None or span[1] == self._break[1]):
+            return
+        self._break = span
+        self.break_changed.emit(span)
+
+    def _clear_sheet(self) -> None:
+        self._times, self._lines = [], []
+        self._track = self._result = None
+        self._ends, self._blank, self._next = [], [], []
+        self._emit_break(None)
+
+    def _set_ends(self, sheet) -> None:
+        """Line ends from a word sheet with the same lines; else only what
+        the source said (lyric_breaks.real_line_ends)."""
+        if not sheet or len(sheet) != len(self._times):
+            sheet = lyric_words.line_sheet(
+                list(zip(self._times, self._lines)),
+                list(getattr(self._result, "line_ends", []) or []))
+        self._ends = lyric_breaks.real_line_ends(sheet, self._result)
+
+    def _on_sheet(self, key: str, sheet) -> None:
+        if (self._track is None or not self._times
+                or key != lyric_timing.track_key(self._track)):
+            return
+        self._set_ends(sheet)
 
     # ---------- internals ----------
 
@@ -151,6 +217,7 @@ class LyricTracker(QObject):
         self.lyric_changed.emit(value)
 
     def _fetch(self, track) -> None:
+        self._track = track
         thread = QThread()
         from . import lyrics_picks
         worker = _FetchWorker(self._track_api(track), track,
@@ -185,6 +252,12 @@ class LyricTracker(QObject):
             return
         self._times = [float(t) for t, _line in result.timed_lines]
         self._lines = [line for _t, line in result.timed_lines]
+        self._result = result
+        self._blank = [lyric_breaks.is_blank(line) for line in self._lines]
+        self._next = lyric_breaks.next_sung(self._blank)
+        # the best sheet known, without starting word timing for it
+        self._set_ends(lyric_timing.service().peek(self._track, result)
+                       if self._track is not None else None)
         self.timeline_changed.emit((list(self._times), list(self._lines)))
         # No immediate emit: mpv's position ticks are sub-second, so the
         # current line lands on the next tick (and while paused there's

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
-    QAction, QFontMetrics, QKeySequence, QPainter, QPainterPath, QPen,
+    QAction, QColor, QFontMetrics, QKeySequence, QPainter, QPainterPath, QPen,
     QShortcut,
 )
 from PySide6.QtWidgets import (
@@ -325,6 +325,10 @@ class MiniPlayer(QWidget):
         self.ticker_lbl.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.ticker_lbl.setProperty("class", "dim")
         self._ticker_h_anim = None
+        # The break's three dots (the lyrics tab's own marker) stand in
+        # for the ticker line while the song is between lines.
+        self._ticker_break: tuple | None = None
+        self._ticker_dots = None
         fg.addWidget(self.title_lbl)
         fg.addWidget(self.artist_lbl)
         fg.addWidget(self.ticker_lbl)
@@ -462,6 +466,7 @@ class MiniPlayer(QWidget):
                                      parent=self)
         self._tracker.start_wire()
         self._tracker.lyric_changed.connect(self._on_ticker_line)
+        self._tracker.break_changed.connect(self._on_ticker_break)
 
         # Escape is a fixed exit affordance — deliberately NOT rebindable.
         QShortcut(QKeySequence(Qt.Key_Escape), self, self._request_exit)
@@ -781,6 +786,8 @@ class MiniPlayer(QWidget):
         self.ticker_lbl.setFixedHeight(int(value))
 
     def _apply_ticker_text(self, raw: str, animate: bool) -> None:
+        if self._ticker_break is not None:
+            raw = ""            # the dots have the line
         if raw:
             shown, h = self._ticker_fit(theming.styled_case(raw))
         else:
@@ -812,6 +819,8 @@ class MiniPlayer(QWidget):
         self.progress.setPosition(secs)
         self.ring.set_progress(secs, duration)
         self._update_time(secs, duration)
+        if self._ticker_dots is not None and self._ticker_dots.isVisible():
+            self._ticker_dots.report_position(secs)
         if self._lyrics_open and self.lyrics_panel is not None:
             if abs(secs - self._last_lyrics_pos) >= 0.25:
                 self._last_lyrics_pos = secs
@@ -896,6 +905,53 @@ class MiniPlayer(QWidget):
                             "scramble/artist", False)
         # Font/scale may have changed — re-fit the ticker (height pin too).
         self._apply_ticker_text(self._raw_ticker, animate=False)
+        self._sync_ticker_dots()
+
+    def _on_ticker_break(self, span) -> None:
+        self._ticker_break = span
+        if span is None:
+            # the line the break led to is already in _raw_ticker
+            self._sync_ticker_dots()
+            if self.isVisible():
+                self._apply_ticker_text(self._raw_ticker,
+                                        animate=bool(self._raw_ticker)
+                                        and not self._zen_asleep)
+            return
+        self._apply_ticker_text("", animate=False)
+        self._sync_ticker_dots()
+
+    def _sync_ticker_dots(self) -> None:
+        """Dots over the ticker line for the break that's up, dressed
+        like the lyrics tab's: lit = the sung line's ink in modern, the
+        accent in brutalist."""
+        span = self._ticker_break
+        dots = self._ticker_dots
+        if span is None:
+            if dots is not None:
+                dots.hide()
+            return
+        from .lyrics import _GapMarker, line_tones
+        if dots is None:
+            dots = self._ticker_dots = _GapMarker(self.ticker_lbl)
+            dots.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        theme = theming.manager().current_effective()
+        if self._brutal:
+            lit = QColor(theme.token("accent", "#d4b95e") if theme else "#d4b95e")
+            dim = QColor(theme.token("dim", "#6f6f6f") if theme else "#6f6f6f")
+        else:
+            tones = line_tones(theme)
+            lit, dim = tones[0], tones[2]
+        line_h = self._ticker_line_height()
+        dots.set_look(lit=lit, dim=dim, modern=not self._brutal,
+                      pt=self.ticker_lbl.font().pointSizeF(), left=0)
+        dots.set_centered(not self._brutal)
+        dots.set_full_height(line_h)
+        dots.setGeometry(0, 0, self.ticker_lbl.width(), line_h)
+        if dots.span() != (span[0], max(span[0] + 0.01, span[1])):
+            dots.set_span(*span)
+        dots.show()
+        dots.raise_()
+        dots.report_position(getattr(self._window, "_last_position", 0.0))
 
     def _on_ticker_line(self, value) -> None:
         text = value if isinstance(value, str) else ""

@@ -149,6 +149,15 @@ class WordTimingService(QObject):
 
     def sheet_for(self, track, result) -> list[WordLine]:
         """The best sheet known now; schedules the upgrades."""
+        return self._best(track, result, schedule=True)
+
+    def peek(self, track, result) -> list[WordLine]:
+        """The best sheet known now, without scheduling anything: for
+        readers that shouldn't start word timing on their own (the
+        headless LyricTracker). They hear about upgrades on ``updated``."""
+        return self._best(track, result, schedule=False)
+
+    def _best(self, track, result, *, schedule: bool) -> list[WordLine]:
         timed = list(getattr(result, "timed_lines", []) or [])
         base = lyric_words.line_sheet(timed, list(getattr(result, "line_ends", []) or []))
         key = track_key(track)
@@ -163,7 +172,7 @@ class WordTimingService(QObject):
         if cached:
             self._sheets[key] = (fp, cached)
             return cached
-        if not (sources or precise):
+        if not schedule or not (sources or precise):
             return base
         self._enqueue(_Job(key, track, result, fp, sources, netease, precise))
         return base

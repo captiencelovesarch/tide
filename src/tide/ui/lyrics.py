@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import api, contrast, lyric_timing, lyric_words, lyrics_picks, qthreads, theming
+from .. import api, contrast, lyric_breaks, lyric_timing, lyric_words, lyrics_picks, qthreads, theming
 from . import legibility, motion as motion_module, scale as _scale
 from .karaoke_line import SweepLine
 from .headings import Heading, line_heading as _line_heading
@@ -510,14 +510,8 @@ LOADING_DELAY_MS = 300
 # the quiet scrollbar stays this long after the last scroll
 BAR_LINGER_MS = 1200
 
-# Breaks (the intro, an instrumental, a long blank line) this long get
-# the dots where the next line will land.
-GAP_MIN_S = 4.0
-# A line stays lit this long past the end of its singing (when the source
-# says where that is), and only fades back if the next line is at least
-# FADE_MIN_S away: a quick handoff just moves on.
-TAIL_GRACE_S = 0.35
-FADE_MIN_S = 2.5
+# Breaks and line tails (GAP_MIN_S, TAIL_GRACE_S, FADE_MIN_S) live in
+# tide.lyric_breaks, shared with LyricTracker.
 # After a scroll of your own the list stops following the song, then
 # picks it up again after this long without one.
 FOLLOW_IDLE_MS = 8000
@@ -540,19 +534,9 @@ def set_seeker(fn) -> None:
     _seek_fn = fn
 
 
-def _is_blank(text: str) -> bool:
-    """No words to sing: empty, or only ♪ and punctuation."""
-    return not any(ch.isalnum() for ch in (text or ""))
-
-
-_NOTE_CHARS = frozenset("♩♪♫♬🎵🎶🎼")
-
-
-def _is_note(text: str) -> bool:
-    """A source's instrumental mark (a line of just ♪): drawn as the
-    break's three dots instead."""
-    t = (text or "").strip()
-    return bool(t) and _is_blank(t) and any(ch in _NOTE_CHARS for ch in t)
+_is_blank = lyric_breaks.is_blank
+_is_note = lyric_breaks.is_note
+real_line_ends = lyric_breaks.real_line_ends
 
 
 def _paint_dots(p: QPainter, *, left: float, cy: float, d: float,
@@ -586,24 +570,6 @@ def _gap_key(gap) -> int | None:
 def _clock(secs: float) -> str:
     s = max(0, int(secs))
     return f"{s // 60}:{s % 60:02d}"
-
-
-def real_line_ends(sheet, result) -> list:
-    """When each line's singing stops, only where something knows it:
-    a word-timed line's last word, or the source's own line end (YT and
-    lrclib's lyricsfile say). None where it would only be a guess, so a
-    line never fades back while it's still being sung."""
-    src = list(getattr(result, "line_ends", []) or [])
-    known = len(src) == len(sheet)
-    out: list = []
-    for i, line in enumerate(sheet):
-        end = None
-        if line.words and line.timing in ("source", "aligned"):
-            end = float(line.words[-1].end)
-        elif known and src[i] is not None:
-            end = float(line.end)        # the source's end, capped at the next line
-        out.append(end)
-    return out
 
 
 class _HoverPlate(QWidget):
@@ -1636,35 +1602,9 @@ class LyricsView(QWidget):
 
     def _visual(self, idx: int, secs: float) -> tuple[int, tuple | None]:
         """(the line drawn as sung, the break the dots are up for) at
-        ``secs``. A line is sung until its singing ends (when that's
-        known) and the next line is a while off; a break long enough
-        gets dots, from where it starts to the next line with words."""
-        starts, n = self._timed_starts, len(self._timed_starts)
-        if not n or len(self._next_sung) != n + 1:
-            return idx, None
-        if idx >= 0 and not self._blank[idx]:
-            end = self._ends[idx] if idx < len(self._ends) else None
-            if end is None or secs < end + TAIL_GRACE_S:
-                return idx, None
-            j = self._next_sung[idx + 1]
-            if j is None:
-                return -1, None                  # the last line, sung
-            if starts[j] - end < FADE_MIN_S:
-                return idx, None                 # the next one is right there
-            begin = end + TAIL_GRACE_S
-            return -1, ((j, begin, starts[j]) if starts[j] - begin >= GAP_MIN_S else None)
-        # the intro, or a blank line
-        j = self._next_sung[idx + 1]
-        if j is None:
-            return -1, None
-        if idx < 0:
-            begin = 0.0
-        else:
-            k = idx
-            while k > 0 and self._blank[k - 1]:
-                k -= 1
-            begin = starts[k]
-        return -1, ((j, begin, starts[j]) if starts[j] - begin >= GAP_MIN_S else None)
+        ``secs``: see lyric_breaks.visual."""
+        return lyric_breaks.visual(idx, secs, self._timed_starts, self._ends,
+                                   self._blank, self._next_sung)
 
     def _resync(self) -> None:
         """Forget the drawn state and redraw it from the playhead (a new
@@ -1881,12 +1821,7 @@ class LyricsView(QWidget):
         self._blank = [_is_blank(text) for _t, text in lines]
         self._note = [_is_note(text) for _t, text in lines]
         self._ends = [None] * len(lines)       # _show_sheet knows better
-        nxt, upcoming = [None] * (len(lines) + 1), None
-        for i in range(len(lines) - 1, -2, -1):
-            nxt[i + 1] = upcoming
-            if i >= 0 and not self._blank[i]:
-                upcoming = i
-        self._next_sung = nxt
+        self._next_sung = lyric_breaks.next_sung(self._blank)
         for i, (_t, text) in enumerate(lines):
             lbl = _LineLabel(text or " ", self._timed_host)
             lbl.set_centered(self._centered)
